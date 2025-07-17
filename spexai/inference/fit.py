@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 font = {'size'   : 16}
 matplotlib.rc('font', **font)
-plt.style.use('seaborn-whitegrid')
+plt.style.use('seaborn-v0_8-whitegrid')
 
 from spexai.inference import write_tensors
 

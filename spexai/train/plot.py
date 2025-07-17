@@ -25,7 +25,7 @@ def loss(train, test, yscale='log', lossfn='MSE'):
     lossfn: str default 'MSE'
         name loss function    
     '''
-    plt.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
     fig = plt.figure(figsize=(15,5))
     plt.rcParams['text.usetex']=True
 
@@ -67,7 +67,7 @@ def fraction(list_labels, labels, pred, test, mask, x, crit_frac=-3,loss_fn=nn.M
     yscale: list
         list of str to indicate y-axis
     '''
-    plt.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
     
     #make sure there all arrays
     if torch.is_tensor(labels) == True:
@@ -158,7 +158,7 @@ def ind_loss(pred, test, mask, x, crit_frac=-3, loss_fn=nn.MSELoss(), xlabel=r'T
     loss_fn
         pytorch lossfunction
     '''
-    plt.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
     
     #make sure there all arrays
     if torch.is_tensor(x) == True:
@@ -281,7 +281,7 @@ def heatmap(X, Y, Z, mask, Z_center=-3., color='seismic', xlabel=r'Energy $\math
     print('N_points above f_(10^({})) = {}; This is {:.03g}% of N_total'.format(Z_center+1, N_limitH, (N_limitH/N_total)*100))
 
 def plot_errors(X, Z, mask, Z_center=-3., color='seismic', xlabel='Energy [KeV]'):
-    plt.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
 
     #make sure there all arrays
     if torch.is_tensor(X) == True:
@@ -296,7 +296,7 @@ def plot_errors(X, Z, mask, Z_center=-3., color='seismic', xlabel='Energy [KeV]'
     mean_x = np.nanmean(Znan, axis=0)
 
 def plot_errors(X, Z, mask, Z_center=-3., color='seismic', xlabel=r'Energy $\mathrm{[KeV]}$'):
-    plt.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
 
     #make sure there all arrays
     if torch.is_tensor(X) == True:
@@ -362,7 +362,7 @@ def show_data(list_labels,  labels, data, mask, x, name_x='Energy', name_label='
     ylimint: list default None
         list of min-max value of y-axis
     '''
-    plt.style.use('seaborn-whitegrid')
+    plt.style.use('seaborn-v0_8-whitegrid')
 
     #make sure there all arrays
     if torch.is_tensor(labels) == True:
