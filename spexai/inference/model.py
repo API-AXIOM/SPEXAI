@@ -4,8 +4,8 @@ import torch.nn as nn
 from torchinterp1d import interp1d as interp1d_torch
 import scipy.constants as constants
 
-import write_tensors
-from spexai.trian.neuralnetwork import FFN, CNN
+import spexai.inference.write_tensors as write_tensors
+from spexai.train.neuralnetwork import FFN, CNN
 
 
 torch.set_default_dtype(torch.float32)

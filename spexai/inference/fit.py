@@ -10,7 +10,7 @@ import seaborn as sns
 font = {'size'   : 16}
 matplotlib.rc('font', **font)
 
-import write_tensors
+import spexai.inference.write_tensors as write_tensors
 
 import spexai.inference.model as model
 
