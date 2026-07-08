@@ -1,4 +1,4 @@
-# Running the element30 ablation study on a GPU machine
+# Running the element 26 (iron) ablation study on a GPU machine
 
 Everything below assumes a Linux box with an NVIDIA GPU and CUDA drivers.
 The code auto-selects `cuda` when available (falls back to `mps`/`cpu`).
@@ -13,22 +13,24 @@ git clone <your-spexai-remote> spexai && cd spexai
 git checkout fix_small_bugs   # or whichever branch has scripts/ + spexai/train/operator.py
 ```
 
-The preprocessed data cache (1.4 GB, much cheaper to copy than the 21 GB of
+The preprocessed data cache (1.4 GB, much cheaper to copy than the ~21 GB of
 raw text files):
 
 ```bash
 # from your Mac
-rsync -avP /Users/danielahuppenkothen/work/data/spexai/processed/element30/ \
-      <gpu-host>:~/spexai_data/processed/element30/
+rsync -avP /Users/danielahuppenkothen/work/data/spexai/processed/element26/ \
+      <gpu-host>:~/spexai_data/processed/element26/
 ```
 
-(Alternatively copy the raw `element30/` directory and rerun
-`python scripts/preprocess_element30.py --datadir ... --outdir ...` there.)
+(Alternatively copy the raw `element_26/` directory and rerun
+`python scripts/preprocess_spectra.py --datadir ... --outdir ...` there.)
 
 ## 2. Environment
 
 ```bash
-conda create -n spexai-ml python=3.11 -y
+# python 3.11-3.13 are zero-risk; 3.14 works with torch >= 2.10 but verify
+# the CUDA (not CPU-only) wheel gets installed -- see check below
+conda create -n spexai-ml python=3.12 -y
 conda activate spexai-ml
 pip install torch numpy pandas scipy scikit-learn matplotlib
 python -c "import torch; print(torch.cuda.is_available())"   # must print True
@@ -40,8 +42,8 @@ No `pip install -e .` needed as long as you run from the repo root.
 
 ```bash
 cd spexai
-CACHE=~/spexai_data/processed/element30
-RUNS=~/spexai_data/runs/element30
+CACHE=~/spexai_data/processed/element26
+RUNS=~/spexai_data/runs/element26
 
 nohup python scripts/run_ablation.py \
     --steps 20000 --lr 1e-3 \
@@ -84,8 +86,8 @@ metrics, timing, per-variant residual plots in `figures/`) and
 
 ```bash
 # from your Mac
-rsync -avP <gpu-host>:~/spexai_data/runs/element30/ \
-      /Users/danielahuppenkothen/work/data/spexai/runs/element30/
+rsync -avP <gpu-host>:~/spexai_data/runs/element26/ \
+      /Users/danielahuppenkothen/work/data/spexai/runs/element26/
 ```
 
 Everything needed for analysis (checkpoints, histories, metrics, figures)

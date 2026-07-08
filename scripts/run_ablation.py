@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--variants", nargs="+", default=ALL_VARIANTS)
     ap.add_argument("--steps", type=int, default=6000)
     ap.add_argument("--outdir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element26")
     args, extra = ap.parse_known_args()
 
     results = {}

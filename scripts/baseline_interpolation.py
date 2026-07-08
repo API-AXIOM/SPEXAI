@@ -1,4 +1,4 @@
-"""Classical interpolation baselines for the element30 emulator benchmark.
+"""Classical interpolation baselines for the single-element emulator benchmark.
 
 Because the CIE single-element model has a single parameter (temperature),
 per-bin interpolation across the training temperatures is the natural
@@ -91,9 +91,9 @@ def predict_pca_gp(lt_train, Y, lt_test, ncomp=64, max_gp=2000, seed=42):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cachedir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/processed/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/processed/element26")
     ap.add_argument("--outdir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element26")
     ap.add_argument("--methods", nargs="+", default=["linear", "pchip", "pca_gp"])
     ap.add_argument("--n-train", type=int, default=0,
                     help="subsample training temperatures (0 = use all)")

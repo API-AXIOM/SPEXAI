@@ -310,9 +310,9 @@ def train(args):
 def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cachedir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/processed/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/processed/element26")
     ap.add_argument("--outdir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element26")
     ap.add_argument("--variant", default="base",
                     choices=["base", "no_sobolev", "no_trend", "no_film",
                              "no_fourier", "fixed_grid", "hash_grid",

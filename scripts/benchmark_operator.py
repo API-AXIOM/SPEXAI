@@ -10,7 +10,7 @@ evaluated every 50 bins and interpolated). A bin is a "line" bin when its
 flux exceeds twice the local continuum estimate; remaining non-empty bins
 count as continuum.
 
-    python scripts/benchmark_operator.py --rundir .../runs/element30
+    python scripts/benchmark_operator.py --rundir .../runs/element26
 """
 
 import argparse
@@ -89,9 +89,9 @@ def speed_benchmark(model, data, device, fixed_grid, nrep=50):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rundir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/runs/element26")
     ap.add_argument("--cachedir",
-                    default="/Users/danielahuppenkothen/work/data/spexai/processed/element30")
+                    default="/Users/danielahuppenkothen/work/data/spexai/processed/element26")
     ap.add_argument("--split", default="test", choices=["test", "val"])
     args = ap.parse_args()
 
