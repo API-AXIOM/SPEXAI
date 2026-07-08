@@ -226,7 +226,7 @@ def heatmap(X, Y, Z, mask, Z_center=-3., color='seismic', xlabel=r'Energy $\math
     Z_center = float default -3
         center of colorbar in logspace
     '''
-    plt.style.use('seaborn-ticks')
+    plt.style.use('seaborn-v0_8-ticks')
 
     #make sure there all arrays
     if torch.is_tensor(X) == True:

@@ -11,7 +11,8 @@ torch.set_default_dtype(torch.float32)
 
 class SpexAIMemoryDataset(Dataset):
     def __init__(self, annotations_file, datadir, indexdir, flux=None, min_flux=None,  size="all",
-                 min_energy=None, max_energy=None, min_temp=None, max_temp=None, element=None):
+                 min_energy=None, max_energy=None, min_temp=None, max_temp=None, element=None, pca=None, 
+                 flux_pca=None, ncomp=10, apply_pca=False):
         
         """
         Helper class to load the SPEX spectra for ML. 
@@ -41,7 +42,6 @@ class SpexAIMemoryDataset(Dataset):
         """
         
         self.labels = pd.read_csv(indexdir + annotations_file, sep=" ")
-        
         self.datadir = datadir
         self.element = element
 
@@ -56,12 +56,12 @@ class SpexAIMemoryDataset(Dataset):
         self.scaler_flux = None
         self.scaler_temp = None
         self.scaler_pca = None
-        self.pca = None
+        self.pca = pca
         
         self.flux = []
         self.temp = []
-        
-        self.flux_pca = None
+         
+        #self.flux_pca = None
         self.flux_scaled = None
         self.flux_scaled_pca= None
         self.temp_scaled = None
@@ -79,7 +79,7 @@ class SpexAIMemoryDataset(Dataset):
             # LOADED FROM THE SAME FILE!
             for i in range(len(self.flux)):
                 idx = self.labels.index[i]
-                self.temp.append(self.labels.iloc[idx, 1])
+                self.temp.append(self.labels.iloc[idx, 0])
                 # for one index, actually run read_data
                 # so that the energy array gets set
                 if i == 0:
@@ -120,10 +120,19 @@ class SpexAIMemoryDataset(Dataset):
             self.flux = torch.where(self.flux < (min_flux-5), (min_flux-5), self.flux)
             
         
+        if apply_pca is True and flux_pca is None:
+             if self.pca is None:
+                 self.pca = PCA(n_components=ncomp)
+             flux_pca = torch.Tensor(self.pca.fit_transform(self.flux))
+
+        self.flux_pca = flux_pca
+
         #order the flux on temperature
         sort = torch.argsort(self.temp)
         self.temp = self.temp[sort]
         self.flux = self.flux[sort]
+        if self.flux_pca is not None:
+            self.flux_pca = self.flux_pca[sort]
         self.mask = self.mask[sort]
 
         
@@ -131,7 +140,8 @@ class SpexAIMemoryDataset(Dataset):
         return len(self.labels)
     
     def read_data(self, idx):
-        data_path = os.path.join(self.datadir + self.labels.iloc[idx, 0])
+        data_path = self.labels.iloc[idx,1]
+        #data_path = os.path.join(self.datadir + self.labels.iloc[idx, 2])
         data = pd.read_csv(data_path, sep=" ", names=["energy", "flux"])
 
         if self.minidx is None and self.maxidx is None:
@@ -144,13 +154,12 @@ class SpexAIMemoryDataset(Dataset):
             else:
                 self.maxidx = data["energy"].searchsorted(self.max_energy)
         flux = data.loc[self.minidx:self.maxidx, "flux"].to_numpy()
-        if len(flux) != 50125:
-            print(data_path)
+        #if len(flux) != 50125:
+            #print(data_path)
             
         if self.energy is None:
             self.energy = data.loc[self.minidx:self.maxidx, "energy"].to_numpy()
-        
-        temp = self.labels.iloc[idx, 1]
+        temp = float(self.labels.iloc[idx, 0])
         return temp, flux
     
     def __getitem__(self, idx):

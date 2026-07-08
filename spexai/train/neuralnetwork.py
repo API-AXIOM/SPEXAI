@@ -33,7 +33,8 @@ class FFN(nn.Module):
             'elu': nn.ELU(),
             'softmax' : nn.Softmax(),
             'sofltpus' : nn.Softplus(),
-            'tanh': nn.Tanh()})
+            'tanh': nn.Tanh(),
+            'gelu': nn.GELU()})
 
         self.layers = nn.Sequential()
         for i in range(n_hidden):

@@ -11,7 +11,8 @@ torch.set_default_dtype(torch.float32)
 class NeuralNetworkTrainer(object):
     def __init__(self, X, y, X_test, y_test, model, loss_fn=torch.nn.MSELoss(),
                  optimizer='adam', l_rate=1e-2, lr_factor=0.33, lr_patience=250,
-                 lr_threshold=2e-2, lr_mode='rel', lr_cooldown=100, 
+                 lr_threshold=2e-2, lr_mode='rel', lr_cooldown=100, pca=None,
+                 scaler_pca = None, 
                  scaler_flux=None, mask=None, mask_test=None, f_dir='log/', 
                  save_model=False, name=None,  element=00):
         '''
@@ -89,6 +90,7 @@ class NeuralNetworkTrainer(object):
         self.y_test = y_test
         self.mask_test = mask_test
 
+        self.pca = pca
         self.f_dir = f_dir
         self.save_model = save_model
         self.name = name
@@ -144,7 +146,12 @@ class NeuralNetworkTrainer(object):
                 if self.mask is not None:
                     mask_batch = mask_shuffled[i*nbatch:(i+1)*nbatch]
                     #rescale back to original spectra and look if pred spectra is above minimum flux (-10)
-                    mask_batch = torch.where(torch.add(torch.mul(y_pred, self.scale), self.mean) > -10, 1, mask_batch.to(self.device))
+                    if self.pca is not None:
+                        y_pred_pca = self.scaler_pca.inverse_transform(y_pred)
+                        y_pred_unscaled = self.pca.inverse_transform(y_pred_pca)
+                        mask_batch = torch.where(y_pred_unscaled > -10, 1, mask_batch.to(self.device))
+                    else:
+                        mask_batch = torch.where(torch.add(torch.mul(y_pred, self.scale), self.mean) > -10, 1, mask_batch.to(self.device))
                     y_pred = torch.mul(y_pred, mask_batch.to(self.device))
                     y_batch = torch.mul(y_batch.to(self.device), mask_batch)
 
