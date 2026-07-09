@@ -175,6 +175,8 @@ def make_variant(variant, data, args):
     kw = dict(
         hidden_size=args.hidden, n_hidden=args.layers,
         n_freqs=args.n_freqs, f_max=args.f_max,
+        activation=getattr(args, "activation", "gelu"),
+        line_dim=getattr(args, "line_dim", 16),
         x_lo=math.log10(data.energy[0].item()),
         x_hi=math.log10(data.energy[-1].item()),
         t_lo=math.log10(data.temps.min().item()),
@@ -192,6 +194,11 @@ def make_variant(variant, data, args):
         no_fourier=dict(use_fourier=False),
         hash_grid=dict(use_grid=True),
         line_head=dict(use_linehead=True),
+        # winning combination from the element-26 ablation:
+        # line head on, Sobolev off (handled by use_sobolev in train());
+        # trend head switchable for hyperparameter search
+        combo=dict(use_linehead=True,
+                   use_trend=bool(getattr(args, "use_trend", 1))),
     )[variant]
     line_ids = None
     if flags.get("use_linehead"):
@@ -199,7 +206,8 @@ def make_variant(variant, data, args):
         n_lines = int((line_ids >= 0).sum())
         print(f"line head: {n_lines} line bins "
               f"({100.0 * n_lines / data.n_bins:.1f}% of grid)", flush=True)
-    return SpectralOperator(OperatorConfig(**{**kw, **flags}), line_ids=line_ids)
+    return SpectralOperator(OperatorConfig(**{**kw, **flags}),
+                            line_ids=line_ids, energy_grid=data.energy)
 
 
 def train(args):
@@ -211,7 +219,8 @@ def train(args):
 
     model = make_variant(args.variant, data, args).to(device)
     fixed_grid = args.variant == "fixed_grid"
-    use_sobolev = args.variant not in ("no_sobolev", "fixed_grid")
+    use_sobolev = (args.variant not in ("no_sobolev", "fixed_grid", "combo")
+                   and args.w_sobolev > 0)
     print(f"variant={args.variant} model={model} params={model.count_parameters():,} "
           f"device={device}", flush=True)
 
@@ -235,7 +244,7 @@ def train(args):
     temps_all = data.temps
 
     os.makedirs(args.outdir, exist_ok=True)
-    runname = f"{args.variant}"
+    runname = getattr(args, "tag", None) or args.variant
     best = {"val_yield_1pct": -1.0}
     history = []
     t0 = time.time()
@@ -316,7 +325,7 @@ def build_parser():
     ap.add_argument("--variant", default="base",
                     choices=["base", "no_sobolev", "no_trend", "no_film",
                              "no_fourier", "fixed_grid", "hash_grid",
-                             "line_head"])
+                             "line_head", "combo"])
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--points", type=int, default=4096)
@@ -325,6 +334,11 @@ def build_parser():
     ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--n_freqs", type=int, default=256)
     ap.add_argument("--f_max", type=float, default=8000.0)
+    ap.add_argument("--activation", default="gelu",
+                    choices=["gelu", "silu", "tanh", "sine"])
+    ap.add_argument("--line_dim", type=int, default=16)
+    ap.add_argument("--use_trend", type=int, default=1,
+                    help="combo variant only: include the trend head (1/0)")
     ap.add_argument("--fg_hidden", type=int, default=512)
     ap.add_argument("--fg_layers", type=int, default=4)
     ap.add_argument("--w_sobolev", type=float, default=1e-3)
@@ -332,6 +346,8 @@ def build_parser():
     ap.add_argument("--curriculum_frac", type=float, default=0.3)
     ap.add_argument("--eval_every", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--tag", default=None,
+                    help="checkpoint/history name (defaults to variant)")
     return ap
 
 

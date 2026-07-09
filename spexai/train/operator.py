@@ -44,6 +44,7 @@ class OperatorConfig:
     # trunk
     hidden_size: int = 256
     n_hidden: int = 6
+    activation: str = "gelu"  # gelu | silu | tanh | sine
     # conditioning network (FiLM generator / theta embedding)
     cond_hidden: int = 128
     cond_layers: int = 3
@@ -83,6 +84,32 @@ class FourierFeatures(nn.Module):
             w = torch.clamp(alpha * self.n_freqs - k, 0.0, 1.0)
             feats = feats * torch.cat([w, w])
         return torch.cat([x, feats], dim=-1)
+
+
+def edges_from_centers(centers):
+    """Bin edges for a (log-spaced) grid of bin centers: geometric means of
+    neighbouring centers, with the end edges extrapolated at the same ratio."""
+    inner = torch.sqrt(centers[:-1] * centers[1:])
+    first = centers[0] ** 2 / inner[0]
+    last = centers[-1] ** 2 / inner[-1]
+    return torch.cat([first.view(1), inner, last.view(1)])
+
+
+class Sine(nn.Module):
+    """SIREN-style sinusoidal activation. With a Fourier/grid embedding in
+    front, w0 = 1 is appropriate (frequencies come from the embedding)."""
+
+    def __init__(self, w0=1.0):
+        super().__init__()
+        self.w0 = w0
+
+    def forward(self, x):
+        return torch.sin(self.w0 * x)
+
+
+def make_activation(name):
+    return {"gelu": nn.GELU, "silu": nn.SiLU, "tanh": nn.Tanh,
+            "sine": Sine}[name]()
 
 
 class GridFeatures(nn.Module):
@@ -137,12 +164,26 @@ class LineHead(nn.Module):
     """
 
     def __init__(self, line_ids, n_params, cond_hidden, cond_layers,
-                 line_dim=16, hidden=128, floor=-12.0):
+                 line_dim=16, hidden=128, floor=-12.0, energy_grid=None):
         super().__init__()
         # line_ids: (n_bins,) long, slot index for line bins, -1 elsewhere
         self.register_buffer("line_ids", line_ids)
         n_lines = int(line_ids.max().item()) + 1
         self.n_lines = n_lines
+        # energy of each line slot and the width of its training-grid bin;
+        # these make the head portable to arbitrary instrument grids: the
+        # head predicts log10 flux DENSITY on the training grid, so the
+        # integrated line flux is 10^amp * line_widths, which can then be
+        # re-deposited into any target bin (see deposit()).
+        if energy_grid is not None:
+            edges = edges_from_centers(energy_grid)
+            sel = torch.nonzero(line_ids >= 0).squeeze(-1)
+            self.register_buffer("line_energies", energy_grid[sel].clone())
+            self.register_buffer("line_widths",
+                                 (edges[1:] - edges[:-1])[sel].clone())
+        else:  # legacy checkpoints; deposit() unavailable
+            self.register_buffer("line_energies", torch.zeros(n_lines))
+            self.register_buffer("line_widths", torch.zeros(n_lines))
         self.embed = nn.Embedding(n_lines, line_dim)
         nn.init.normal_(self.embed.weight, std=0.1)
         self.cond = CondNet(n_params, cond_hidden, cond_layers, cond_hidden)
@@ -174,6 +215,34 @@ class LineHead(nn.Module):
         out[:, sel] = combined
         return out
 
+    def all_line_amplitudes(self, tnorm):
+        """log10 flux density (training grid) of every line, shape (B, n_lines)."""
+        B = tnorm.shape[0]
+        emb = self.embed.weight
+        c = self.cond(tnorm)
+        h = torch.cat([emb.unsqueeze(0).expand(B, -1, -1),
+                       c.unsqueeze(1).expand(-1, self.n_lines, -1)], dim=-1)
+        return self.mlp(h).squeeze(-1) + self.floor
+
+    def deposit(self, tnorm, bin_edges, trunk_int):
+        """Add the lines' integrated fluxes onto an arbitrary instrument grid.
+
+        tnorm: (B, n_params); bin_edges: (M+1,) target bin edges in keV,
+        ascending; trunk_int: (B, M) LINEAR integrated trunk flux per bin.
+        Each line contributes its full integrated flux
+        (10^amp * its training bin width) to whichever target bin contains
+        its energy, so line flux is conserved exactly. Returns linear
+        integrated flux per bin, shape (B, M).
+        """
+        amp = self.all_line_amplitudes(tnorm)                      # (B, n_lines)
+        flux = torch.pow(10.0, amp) * self.line_widths             # integrated
+        j = torch.searchsorted(bin_edges, self.line_energies) - 1  # target bin
+        inside = (j >= 0) & (j < bin_edges.shape[0] - 1)
+        j_in = j[inside].clamp(min=0)
+        out = trunk_int.clone()
+        out.index_add_(1, j_in, flux[:, inside])
+        return out
+
 
 class CondNet(nn.Module):
     """Small MLP embedding of the (normalised) physical parameters."""
@@ -195,7 +264,7 @@ class CondNet(nn.Module):
 class SpectralOperator(nn.Module):
     """log10-flux(x; theta) with optional Fourier features, FiLM and trend head."""
 
-    def __init__(self, config=None, line_ids=None, **kwargs):
+    def __init__(self, config=None, line_ids=None, energy_grid=None, **kwargs):
         super().__init__()
         if config is None:
             config = OperatorConfig(**kwargs)
@@ -216,7 +285,8 @@ class SpectralOperator(nn.Module):
             if line_ids is None:
                 raise ValueError("use_linehead requires line_ids")
             self.line_head = LineHead(line_ids, c.n_params, c.cond_hidden,
-                                      c.cond_layers, c.line_dim, c.line_hidden)
+                                      c.cond_layers, c.line_dim, c.line_hidden,
+                                      energy_grid=energy_grid)
         else:
             self.line_head = None
 
@@ -237,12 +307,19 @@ class SpectralOperator(nn.Module):
             self.trunk.append(nn.Linear(d, c.hidden_size))
             d = c.hidden_size
         self.head = nn.Linear(d, 1)
-        self.act = nn.GELU()
+        self.act = make_activation(c.activation)
 
         if c.use_trend:
             self.trend = CondNet(c.n_params, c.cond_hidden, c.cond_layers, 2)
         else:
             self.trend = None
+
+        # training grid (centers and derived edges): the trunk is only
+        # constrained AT the training centers (the SPEX grid is adaptive,
+        # not log-uniform), so forward_on_grid evaluates there and rebins
+        if energy_grid is not None:
+            self.register_buffer("train_energy", energy_grid.clone())
+            self.register_buffer("train_edges", edges_from_centers(energy_grid))
 
         # normalisation constants, stored so the model is self-contained
         self.register_buffer("x_lo", torch.tensor(float(c.x_lo)))
@@ -260,10 +337,11 @@ class SpectralOperator(nn.Module):
         return 2.0 * (t - self.t_lo) / (self.t_hi - self.t_lo) - 1.0
 
     # -- forward passes -------------------------------------------------------
-    def forward_norm(self, tnorm, x, alpha=1.0, bins=None):
+    def forward_norm(self, tnorm, x, alpha=1.0, bins=None, add_lines=True):
         """tnorm: (B, n_params); x: (B, P, 1) normalised coordinates.
         bins: (P,) long bin indices on the training grid (only needed by
-        the line head)."""
+        the line head). add_lines=False returns the trunk-only output
+        (used by forward_on_grid, which deposits the lines itself)."""
         B, P, _ = x.shape
         h = self.embed(x, alpha) if self.embed is not None else x
 
@@ -288,7 +366,7 @@ class SpectralOperator(nn.Module):
             ab = self.trend(tnorm)  # (B, 2)
             out = out + ab[:, 0:1] * x.squeeze(-1) + ab[:, 1:2]
 
-        if self.line_head is not None:
+        if self.line_head is not None and add_lines:
             if bins is None:
                 bins = torch.arange(x.shape[1], device=x.device)
             out = self.line_head(tnorm, bins, out)
@@ -306,6 +384,57 @@ class SpectralOperator(nn.Module):
             energy_kev = energy_kev.unsqueeze(0).expand(tnorm.shape[0], -1)
         x = self.norm_energy(energy_kev).unsqueeze(-1)
         return self.forward_norm(tnorm, x, alpha=alpha, bins=bins)
+
+    def forward_on_grid(self, temp_kev, bin_edges):
+        """Evaluate the emulator as an X-ray model on an instrument grid.
+
+        temp_kev: (B,) temperatures in keV; bin_edges: (M+1,) ascending
+        bin edges in keV. Returns the INTEGRATED flux per bin (linear, not
+        log), shape (B, M) - i.e. the quantity proportional to the
+        expected photon counts per bin, which is what response folding
+        consumes.
+
+        Method: the trunk (a flux density) is only constrained at the
+        training-grid energies - the SPEX grid is adaptive, not uniform -
+        so it is evaluated exactly there, converted to integrated fluxes
+        on the training bins, and rebinned onto the target edges via the
+        cumulative flux (flux-conserving for both finer and coarser
+        target grids). If the model has a line head, each line's
+        integrated flux is then added to the target bin containing its
+        energy, so line fluxes land in single bins rather than being
+        smeared over their training bin.
+        """
+        if not hasattr(self, "train_energy"):
+            raise RuntimeError("forward_on_grid needs the training grid; "
+                               "construct the model with energy_grid=...")
+        tnorm = self.norm_temp(temp_kev).view(-1, self.config.n_params)
+        B = tnorm.shape[0]
+
+        # integrated flux on the training bins
+        x = self.norm_energy(self.train_energy).view(1, -1, 1).expand(B, -1, -1)
+        dens = torch.pow(10.0, self.forward_norm(tnorm, x, add_lines=False))
+        widths = self.train_edges[1:] - self.train_edges[:-1]
+        f_train = dens * widths                                     # (B, K)
+
+        # flux-conserving rebin: piecewise-linear cumulative flux evaluated
+        # at the target edges. float64 throughout - recovering faint bins
+        # by differencing a cumulative sum cancels catastrophically in
+        # float32 (the total flux is ~10 decades above the faintest bins)
+        f64 = f_train.double()
+        cum = torch.cat([torch.zeros(B, 1, dtype=torch.float64,
+                                     device=f_train.device),
+                         torch.cumsum(f64, dim=1)], dim=1)
+        edges_tr = self.train_edges.double()
+        k = torch.searchsorted(edges_tr, bin_edges.double()).clamp(
+            1, len(edges_tr) - 1)
+        e_lo = edges_tr[k - 1]
+        frac = ((bin_edges.double() - e_lo) / (edges_tr[k] - e_lo)).clamp(0., 1.)
+        c_at = cum[:, k - 1] + f64[:, (k - 1).clamp(max=f64.shape[1] - 1)] * frac
+        trunk_int = (c_at[:, 1:] - c_at[:, :-1]).float()            # (B, M)
+
+        if self.line_head is not None:
+            return self.line_head.deposit(tnorm, bin_edges, trunk_int)
+        return trunk_int
 
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
