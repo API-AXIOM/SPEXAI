@@ -17,7 +17,10 @@ import argparse
 import glob
 import json
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import matplotlib
 matplotlib.use("Agg")
@@ -41,13 +44,26 @@ def load_model(ckpt_path, data):
 
 
 @torch.no_grad()
+def predict_full_grid(model, temps, energy, fixed_grid, echunk=4096):
+    """Predict all bins for a batch of temperatures, chunking the energy
+    grid so peak memory stays bounded (the coordinate embedding is
+    batch x points x embed_dim and grows very large otherwise)."""
+    if fixed_grid:
+        return model(temps)
+    parts = [model(temps, energy[lo:lo + echunk], bins=torch.arange(
+        lo, min(lo + echunk, len(energy)), device=energy.device))
+        for lo in range(0, len(energy), echunk)]
+    return torch.cat(parts, dim=1)
+
+
+@torch.no_grad()
 def predict_all(model, data, idx, device, fixed_grid, batch=64):
     energy = data.energy.to(device)
     preds = []
     for i in range(0, len(idx), batch):
         sel = idx[i:i + batch]
         temps = data.temps[sel].to(device)
-        p = model(temps) if fixed_grid else model(temps, energy)
+        p = predict_full_grid(model, temps, energy, fixed_grid)
         preds.append(p.cpu())
     return torch.cat(preds).numpy()
 
@@ -76,11 +92,11 @@ def speed_benchmark(model, data, device, fixed_grid, nrep=50):
         for batch in (1, 256):
             t = temps[:batch]
             for _ in range(5):
-                _ = model(t) if fixed_grid else model(t, energy)
+                _ = predict_full_grid(model, t, energy, fixed_grid)
             sync()
             t0 = time.time()
             for _ in range(nrep):
-                _ = model(t) if fixed_grid else model(t, energy)
+                _ = predict_full_grid(model, t, energy, fixed_grid)
             sync()
             dt = (time.time() - t0) / nrep
             yield batch, dt
