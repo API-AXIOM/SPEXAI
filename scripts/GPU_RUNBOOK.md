@@ -67,6 +67,30 @@ Notes:
   `--variants no_film fixed_grid hash_grid line_head` to resume the rest;
   the summary table only needs the finished variants' history files.
 
+## 3b. Hyperparameter search on the winning combination
+
+The `combo` variant is the ablation winner: line head on, Sobolev off
+(trend head switchable via `--use_trend 0/1`). Two-stage random search:
+
+```bash
+nohup python scripts/hpo_combo.py \
+    --trials 24 --stage1_steps 3000 --stage2_steps 20000 --top 4 \
+    --cachedir $CACHE --outdir $RUNS/hpo \
+    > $RUNS/hpo/hpo.log 2>&1 &
+```
+
+- Stage 1 (24 x 3000 steps) takes roughly as long as ~4 full runs; stage 2
+  retrains the top 4 configs at 20k steps. Total on the order of a day.
+- Fully resumable: rerun the same command after an interruption and it
+  skips finished trials (state in `hpo_results.json`).
+- `python scripts/hpo_combo.py --report --outdir $RUNS/hpo` prints the
+  ranking table at any time (`hpo_results.md`).
+- The search covers: lr, batch, points/spectrum, trunk width x depth,
+  activation (gelu / silu / sine), Fourier n_freqs & f_max, line-embedding
+  size, trend head on/off, log-space stabiliser, curriculum length.
+- Benchmark the finished trials like any checkpoint:
+  `python scripts/benchmark_operator.py --rundir $RUNS/hpo --cachedir $CACHE`
+
 ## 4. Benchmark on the held-out test set
 
 ```bash

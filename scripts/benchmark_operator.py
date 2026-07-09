@@ -38,7 +38,14 @@ def load_model(ckpt_path, data):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     args = argparse.Namespace(**ckpt["args"])
     model = make_variant(ckpt["variant"], data, args)
-    model.load_state_dict(ckpt["state_dict"])
+    # older checkpoints predate the line_energies/line_widths buffers; the
+    # freshly built model already computed them from the cache, so it is
+    # safe to leave them at their constructed values
+    missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
+    allowed = {"line_head.line_energies", "line_head.line_widths", "train_energy", "train_edges"}
+    if unexpected or not set(missing) <= allowed:
+        raise RuntimeError(f"checkpoint mismatch: missing={missing} "
+                           f"unexpected={unexpected}")
     model.eval()
     return model, ckpt["variant"]
 
@@ -131,7 +138,9 @@ def main():
     os.makedirs(figdir, exist_ok=True)
 
     for ckpt_path in sorted(glob.glob(os.path.join(args.rundir, "*.pt"))):
-        model, variant = load_model(ckpt_path, data)
+        model, _ = load_model(ckpt_path, data)
+        # key results by file stem so tagged runs (e.g. HPO trials) don't collide
+        variant = os.path.splitext(os.path.basename(ckpt_path))[0]
         model = model.to(device)
         fixed_grid = isinstance(model, FixedGridMLP)
         pred = predict_all(model, data, idx, device, fixed_grid)
