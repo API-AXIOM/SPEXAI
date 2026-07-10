@@ -74,10 +74,11 @@ The `combo` variant is the ablation winner: line head on, Sobolev off
 (trend head switchable via `--use_trend 0/1`). Two-stage random search:
 
 ```bash
+mkdir -p $RUNS/hpo
 nohup python scripts/hpo_combo.py \
     --trials 24 --stage1_steps 3000 --stage2_steps 20000 --top 4 \
     --cachedir $CACHE --outdir $RUNS/hpo \
-    > $HPO/hpo/hpo.log 2>&1 &
+    > $RUNS/hpo/hpo.log 2>&1 &
 ```
 
 - Stage 1 (24 x 3000 steps) takes roughly as long as ~4 full runs; stage 2
@@ -91,6 +92,34 @@ nohup python scripts/hpo_combo.py \
   size, trend head on/off, log-space stabiliser, curriculum length.
 - Benchmark the finished trials like any checkpoint:
   `python scripts/benchmark_operator.py --rundir $RUNS/hpo --cachedir $CACHE`
+
+## 3c. Broadened (T, v) emulator + broadening comparison
+
+Train the option-2 emulator of velocity-broadened spectra (targets are
+generated on the fly from the original spectra; the first run builds a
+~4.4 GB uniform-grid flux cache next to the preprocessed data). The
+script defaults are the t04 HPO winner (hidden 384 x 5 layers, n_freqs
+512, f_max 4000, lr 3e-3, batch 128, 2048 points/spectrum), so no
+hyperparameter flags are needed:
+
+```bash
+nohup python -m spexai.train.train_broadened \
+    --steps 20000 \
+    --cachedir $CACHE --outdir $RUNS/broadened \
+    > $RUNS/broadened.log 2>&1 &
+```
+
+Then compare all broadening options (exact erf reference vs the current
+sparse-matrix implementation, FFT convolution, the (T,v) emulator, and
+the hybrid analytic-line scheme; the emulator methods are picked up
+automatically if their checkpoints exist):
+
+```bash
+python scripts/benchmark_broadening.py --cachedir $CACHE --rundir $RUNS \
+    --nspec 32
+```
+
+Results land in `$RUNS/benchmark_broadening.json`.
 
 ## 4. Benchmark on the held-out test set
 
@@ -111,7 +140,7 @@ metrics, timing, per-variant residual plots in `figures/`) and
 
 ```bash
 # from your Mac
-rsync -avP <gpu-host>:~/spexai_data/runs/element26/ \
+rsync -avP dhuppenkot2@spexaitrain.spexcalculation.src.surf-hosted.nl:/home/dhuppenkot2/data/spexai_data/runs/element26/ \
       /Users/danielahuppenkothen/work/data/spexai/runs/element26/
 ```
 
