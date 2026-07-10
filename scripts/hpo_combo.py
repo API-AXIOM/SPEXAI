@@ -22,6 +22,7 @@ Run (GPU machine):
 """
 
 import argparse
+import gc
 import json
 import os
 import random
@@ -33,9 +34,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spexai.train.train_operator import build_parser, train
 
-# cap on batch * points per training step: activation memory scales with it
-# (batch 256 x points 8192 x a wide trunk needs >20 GiB with autograd)
-MAX_POINTS_TOTAL = 256 * 1024
+# cap on estimated activation memory per training step: autograd stores
+# roughly (embedding + ~3 tensors of `hidden` per layer) floats per sampled
+# point, so the footprint scales with batch * points * network size
+MAX_ACT_BYTES = 8 * 1024**3
+
+
+def activation_bytes(cfg):
+    embed_dim = 1 + 2 * cfg["n_freqs"]
+    per_point = embed_dim + 3 * cfg["hidden"] * cfg["layers"]
+    return cfg["batch"] * cfg["points"] * per_point * 4
 
 SPACE = {
     "lr": [3e-4, 5e-4, 1e-3, 2e-3, 3e-3],
@@ -55,9 +63,11 @@ SPACE = {
 
 def sample_config(rng):
     cfg = {k: rng.choice(v) for k, v in SPACE.items()}
-    # keep activation memory bounded: shrink points to fit the cap
-    while cfg["batch"] * cfg["points"] > MAX_POINTS_TOTAL and cfg["points"] > 1024:
+    # keep activation memory bounded: shrink points (then batch) to fit
+    while activation_bytes(cfg) > MAX_ACT_BYTES and cfg["points"] > 1024:
         cfg["points"] //= 2
+    while activation_bytes(cfg) > MAX_ACT_BYTES and cfg["batch"] > 32:
+        cfg["batch"] //= 2
     return cfg
 
 
@@ -69,17 +79,22 @@ def run_trial(tag, cfg, steps, args):
         argv += [f"--{k}", str(v)]
     try:
         _, best = train(build_parser().parse_args(argv))
-    except torch.OutOfMemoryError:
+        out = {"tag": tag, "config": cfg, "steps": steps,
+               "val_yield_1pct": best["val_yield_1pct"],
+               "val_mre_mean": best.get("val_mre_mean"),
+               "best_step": best.get("step")}
+    except torch.cuda.OutOfMemoryError:
         # a too-large configuration fails this trial, not the whole search
+        print(f"=== trial {tag} failed: CUDA out of memory", flush=True)
+        out = {"tag": tag, "config": cfg, "steps": steps, "failed": "oom",
+               "val_yield_1pct": -1.0, "val_mre_mean": None}
+    finally:
+        # drop the trial's cached blocks so shape changes between trials
+        # don't fragment the allocator
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        print(f"=== trial {tag} failed: CUDA out of memory", flush=True)
-        return {"tag": tag, "config": cfg, "steps": steps, "failed": "oom",
-                "val_yield_1pct": -1.0, "val_mre_mean": None}
-    return {"tag": tag, "config": cfg, "steps": steps,
-            "val_yield_1pct": best["val_yield_1pct"],
-            "val_mre_mean": best.get("val_mre_mean"),
-            "best_step": best.get("step")}
+    return out
 
 
 def rank(records):

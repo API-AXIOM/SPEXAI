@@ -126,8 +126,13 @@ def sobolev_loss(pred, target, x, valid):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate(model, data, idx, device, batch=64, fixed_grid=False, return_bins=False):
-    """Per-spectrum mean relative error over non-empty bins, plus yields."""
+def evaluate(model, data, idx, device, batch=64, fixed_grid=False,
+             return_bins=False, echunk=4096):
+    """Per-spectrum mean relative error over non-empty bins, plus yields.
+
+    The energy grid is evaluated in chunks of `echunk` points: the
+    coordinate embedding is batch x points x embed_dim, which for wide
+    configurations does not fit in GPU memory all at once."""
     model.eval()
     energy = data.energy.to(device)
     mre = []
@@ -140,7 +145,11 @@ def evaluate(model, data, idx, device, batch=64, fixed_grid=False, return_bins=F
         if fixed_grid:
             pred = model(temps)
         else:
-            pred = model(temps, energy)
+            pred = torch.cat(
+                [model(temps, energy[lo:lo + echunk],
+                       bins=torch.arange(lo, min(lo + echunk, len(energy)),
+                                         device=device))
+                 for lo in range(0, len(energy), echunk)], dim=1)
         valid = target > FLOOR
         d = torch.clamp(pred - torch.clamp(target, min=FLOOR), -4.0, 4.0)
         eps = torch.abs(torch.pow(10.0, d) - 1.0)
