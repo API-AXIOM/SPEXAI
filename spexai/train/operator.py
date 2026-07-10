@@ -29,6 +29,7 @@ class OperatorConfig:
     use_trend: bool = True
     use_grid: bool = False      # multi-resolution grid encoding instead of Fourier
     use_linehead: bool = False  # dedicated per-line amplitude head
+    use_binnorm: bool = False   # per-training-bin normalisation of the target
     # fourier embedding
     n_freqs: int = 256
     f_min: float = 0.25
@@ -264,11 +265,23 @@ class CondNet(nn.Module):
 class SpectralOperator(nn.Module):
     """log10-flux(x; theta) with optional Fourier features, FiLM and trend head."""
 
-    def __init__(self, config=None, line_ids=None, energy_grid=None, **kwargs):
+    def __init__(self, config=None, line_ids=None, energy_grid=None,
+                 bin_stats=None, **kwargs):
         super().__init__()
         if config is None:
             config = OperatorConfig(**kwargs)
         self.config = c = config
+
+        if c.use_binnorm:
+            # per-training-bin mean/std of the (floor-clamped) log flux: the
+            # network predicts the z-scored residual, so the static line
+            # forest lives in bn_mu and the trunk only models O(1)
+            # temperature-dependent deviations around it
+            if bin_stats is None:
+                raise ValueError("use_binnorm requires bin_stats=(mu, sigma)")
+            mu, sigma = bin_stats
+            self.register_buffer("bn_mu", mu.clone())
+            self.register_buffer("bn_sigma", sigma.clamp(min=0.05).clone())
 
         if c.use_grid:
             self.embed = GridFeatures(c.grid_levels, c.grid_base_res,
@@ -365,6 +378,13 @@ class SpectralOperator(nn.Module):
         if self.trend is not None:
             ab = self.trend(tnorm)  # (B, 2)
             out = out + ab[:, 0:1] * x.squeeze(-1) + ab[:, 1:2]
+
+        if self.config.use_binnorm:
+            # map the z-scored prediction back to log10 flux; bins index the
+            # training grid (assumed to be the full grid when omitted)
+            if bins is None:
+                bins = torch.arange(x.shape[1], device=x.device)
+            out = out * self.bn_sigma[bins] + self.bn_mu[bins]
 
         if self.line_head is not None and add_lines:
             if bins is None:

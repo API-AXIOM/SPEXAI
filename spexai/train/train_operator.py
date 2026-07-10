@@ -205,9 +205,11 @@ def make_variant(variant, data, args):
         line_head=dict(use_linehead=True),
         # winning combination from the element-26 ablation:
         # line head on, Sobolev off (handled by use_sobolev in train());
-        # trend head switchable for hyperparameter search
+        # trend head and per-bin normalisation switchable for the
+        # hyperparameter search
         combo=dict(use_linehead=True,
-                   use_trend=bool(getattr(args, "use_trend", 1))),
+                   use_trend=bool(getattr(args, "use_trend", 1)),
+                   use_binnorm=bool(getattr(args, "use_binnorm", 0))),
     )[variant]
     line_ids = None
     if flags.get("use_linehead"):
@@ -215,8 +217,13 @@ def make_variant(variant, data, args):
         n_lines = int((line_ids >= 0).sum())
         print(f"line head: {n_lines} line bins "
               f"({100.0 * n_lines / data.n_bins:.1f}% of grid)", flush=True)
+    bin_stats = None
+    if flags.get("use_binnorm"):
+        lf = torch.clamp(data.logflux[data.train_idx], min=FLOOR)
+        bin_stats = (lf.mean(dim=0), lf.std(dim=0))
     return SpectralOperator(OperatorConfig(**{**kw, **flags}),
-                            line_ids=line_ids, energy_grid=data.energy)
+                            line_ids=line_ids, energy_grid=data.energy,
+                            bin_stats=bin_stats)
 
 
 def train(args):
@@ -348,6 +355,8 @@ def build_parser():
     ap.add_argument("--line_dim", type=int, default=16)
     ap.add_argument("--use_trend", type=int, default=1,
                     help="combo variant only: include the trend head (1/0)")
+    ap.add_argument("--use_binnorm", type=int, default=0,
+                    help="combo variant only: per-bin target normalisation (1/0)")
     ap.add_argument("--fg_hidden", type=int, default=512)
     ap.add_argument("--fg_layers", type=int, default=4)
     ap.add_argument("--w_sobolev", type=float, default=1e-3)

@@ -77,7 +77,7 @@ The `combo` variant is the ablation winner: line head on, Sobolev off
 nohup python scripts/hpo_combo.py \
     --trials 24 --stage1_steps 3000 --stage2_steps 20000 --top 4 \
     --cachedir $CACHE --outdir $RUNS/hpo \
-    > $RUNS/hpo/hpo.log 2>&1 &
+    > $HPO/hpo/hpo.log 2>&1 &
 ```
 
 - Stage 1 (24 x 3000 steps) takes roughly as long as ~4 full runs; stage 2

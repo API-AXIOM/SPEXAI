@@ -56,6 +56,7 @@ SPACE = {
     "f_max": [4000.0, 8000.0, 16000.0],
     "line_dim": [16, 32],
     "use_trend": [0, 1],
+    "use_binnorm": [0, 1],
     "w_log": [0.0, 0.1],
     "curriculum_frac": [0.15, 0.3],
 }
@@ -106,24 +107,18 @@ def report(outdir):
     with open(os.path.join(outdir, "hpo_results.json")) as f:
         res = json.load(f)
     rows = ["| tag | steps | yield1% | MRE | lr | batch | pts | HxL | act "
-            "| K | f_max | line_dim | trend | w_log | curr |",
-            "|" + "---|" * 15]
+            "| K | f_max | line_dim | trend | binnorm | w_log | curr |",
+            "|" + "---|" * 16]
     for r in rank(res):
         c = r["config"]
-        if r.get("failed"):
-            rows.append(f"| {r['tag']} | {r['steps']} | FAILED ({r['failed']}) "
-                        f"| - | {c['lr']:g} | {c['batch']} | {c['points']} "
-                        f"| {c['hidden']}x{c['layers']} | {c['activation']} "
-                        f"| {c['n_freqs']} | {c['f_max']:g} | {c['line_dim']} "
-                        f"| {c['use_trend']} | {c['w_log']:g} "
-                        f"| {c['curriculum_frac']:g} |")
-            continue
+        perf = (f"FAILED ({r['failed']}) | -" if r.get("failed") else
+                f"{r['val_yield_1pct']:.2f} | {r['val_mre_mean']:.4f}")
         rows.append(
-            f"| {r['tag']} | {r['steps']} | {r['val_yield_1pct']:.2f} "
-            f"| {r['val_mre_mean']:.4f} | {c['lr']:g} | {c['batch']} "
-            f"| {c['points']} | {c['hidden']}x{c['layers']} "
+            f"| {r['tag']} | {r['steps']} | {perf} | {c['lr']:g} "
+            f"| {c['batch']} | {c['points']} | {c['hidden']}x{c['layers']} "
             f"| {c['activation']} | {c['n_freqs']} | {c['f_max']:g} "
-            f"| {c['line_dim']} | {c['use_trend']} | {c['w_log']:g} "
+            f"| {c['line_dim']} | {c['use_trend']} "
+            f"| {c.get('use_binnorm', 0)} | {c['w_log']:g} "
             f"| {c['curriculum_frac']:g} |")
     md = "\n".join(rows)
     with open(os.path.join(outdir, "hpo_results.md"), "w") as f:

@@ -90,6 +90,27 @@ def metrics_from_eps(eps, mask):
     }
 
 
+def floor_violations(pred, target):
+    """Check the empty-bin contract on unseen data: wherever the true flux
+    is at/below FLOOR (invisible with a real telescope), the emulator must
+    also predict below FLOOR. These bins are excluded from the error
+    metrics, so violations would otherwise go unnoticed."""
+    floor_mask = target <= FLOOR
+    n = int(floor_mask.sum())
+    if n == 0:
+        return {"n_floor_bins": 0, "violation_pct": 0.0,
+                "violation_gt1dex_pct": 0.0, "max_excess_dex": 0.0,
+                "spectra_with_violation_pct": 0.0}
+    excess = np.where(floor_mask, pred - FLOOR, -np.inf)
+    return {
+        "n_floor_bins": n,
+        "violation_pct": float((excess > 0).sum() / n * 100),
+        "violation_gt1dex_pct": float((excess > 1).sum() / n * 100),
+        "max_excess_dex": float(excess.max()),
+        "spectra_with_violation_pct": float((excess > 0).any(axis=1).mean() * 100),
+    }
+
+
 def speed_benchmark(model, data, device, fixed_grid, nrep=50):
     energy = data.energy.to(device)
     temps = data.temps[:256].to(device)
@@ -152,14 +173,18 @@ def main():
             "overall": metrics_from_eps(eps, valid),
             "lines": metrics_from_eps(eps, line_mask),
             "continuum": metrics_from_eps(eps, cont_mask),
+            "floor": floor_violations(pred, target),
             "params": model.count_parameters(),
         }
         for batch, dt in speed_benchmark(model, data, device, fixed_grid):
             res[f"eval_time_batch{batch}_ms"] = dt * 1e3
         results[variant] = res
+        fv = res["floor"]
         print(f"{variant}: overall MRE={res['overall']['mre_mean']:.4f} "
               f"lines={res['lines']['mre_mean']:.4f} "
-              f"cont={res['continuum']['mre_mean']:.4f}", flush=True)
+              f"cont={res['continuum']['mre_mean']:.4f} "
+              f"floor viol={fv['violation_pct']:.2f}% "
+              f"(max +{fv['max_excess_dex']:.1f} dex)", flush=True)
 
         # residual-vs-energy percentile bands (cf. Fig. 6 of Ricketts et al.)
         eps_masked = np.where(valid, eps, np.nan)
@@ -181,13 +206,15 @@ def main():
 
     # summary table
     rows = ["| Variant | params | overall MRE | line MRE | cont MRE | "
-            "yield1% | yield10% | t(1 spec) ms |",
-            "|---|---|---|---|---|---|---|---|"]
+            "yield1% | yield10% | floor viol % | max excess dex | t(1 spec) ms |",
+            "|---|---|---|---|---|---|---|---|---|---|"]
     for v, r in results.items():
         rows.append(
             f"| {v} | {r['params']:,} | {r['overall']['mre_mean']:.4f} "
             f"| {r['lines']['mre_mean']:.4f} | {r['continuum']['mre_mean']:.4f} "
             f"| {r['overall']['yield_1pct']:.2f} | {r['overall']['yield_10pct']:.2f} "
+            f"| {r['floor']['violation_pct']:.2f} "
+            f"| {r['floor']['max_excess_dex']:.2f} "
             f"| {r['eval_time_batch1_ms']:.1f} |")
     md = "\n".join(rows)
     with open(os.path.join(args.rundir, f"benchmark_{args.split}.md"), "w") as f:
