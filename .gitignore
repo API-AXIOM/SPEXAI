@@ -1,0 +1,11 @@
+.DS_Store
+master_thesis_jip_matthijsse_a3vknpje.pdf
+__pycache__/
+spexai.egg-info/
+spexai/.ipynb_checkpoints/
+spexai/__pycache__/
+spexai/inference/__pycache__/
+spexai/train/__pycache__/
+tutorials/.ipynb_checkpoints/
+tutorials/log/
+

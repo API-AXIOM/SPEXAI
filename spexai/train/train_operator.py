@@ -166,6 +166,7 @@ def evaluate(model, data, idx, device, batch=64, fixed_grid=False,
     out = {
         "mre_mean": float(mre.mean()),
         "mre_median": float(np.median(mre)),
+        "yield_01pct": float((mre <= 0.001).mean() * 100),
         "yield_1pct": float((mre <= 0.01).mean() * 100),
         "yield_10pct": float((mre <= 0.10).mean() * 100),
     }

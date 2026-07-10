@@ -76,17 +76,25 @@ def predict_all(model, data, idx, device, fixed_grid, batch=64):
 
 
 def metrics_from_eps(eps, mask):
-    """Per-spectrum mean rel. error over `mask` bins -> summary dict."""
+    """Per-spectrum mean rel. error over `mask` bins -> summary dict.
+
+    Also reports the per-POINT statistic of Matthijsse's thesis (Eq. 6.4):
+    the percentage of masked points with relative error above 1e-3 / 1e-2.
+    """
     cnt = mask.sum(axis=1)
     ok = cnt > 0
     mre = np.where(ok, (eps * mask).sum(axis=1) / np.maximum(cnt, 1), np.nan)
     mre = mre[ok]
+    eps_pts = eps[mask]
     return {
         "n_spectra": int(ok.sum()),
         "mre_mean": float(np.mean(mre)),
         "mre_median": float(np.median(mre)),
+        "yield_01pct": float((mre <= 0.001).mean() * 100),
         "yield_1pct": float((mre <= 0.01).mean() * 100),
         "yield_10pct": float((mre <= 0.10).mean() * 100),
+        "points_above_01pct": float((eps_pts > 1e-3).mean() * 100),
+        "points_above_1pct": float((eps_pts > 1e-2).mean() * 100),
     }
 
 
@@ -206,13 +214,17 @@ def main():
 
     # summary table
     rows = ["| Variant | params | overall MRE | line MRE | cont MRE | "
-            "yield1% | yield10% | floor viol % | max excess dex | t(1 spec) ms |",
-            "|---|---|---|---|---|---|---|---|---|---|"]
+            "yield0.1% | yield1% | yield10% | pts>0.1% | pts>1% | "
+            "floor viol % | max excess dex | t(1 spec) ms |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for v, r in results.items():
         rows.append(
             f"| {v} | {r['params']:,} | {r['overall']['mre_mean']:.4f} "
             f"| {r['lines']['mre_mean']:.4f} | {r['continuum']['mre_mean']:.4f} "
+            f"| {r['overall']['yield_01pct']:.2f} "
             f"| {r['overall']['yield_1pct']:.2f} | {r['overall']['yield_10pct']:.2f} "
+            f"| {r['overall']['points_above_01pct']:.2f} "
+            f"| {r['overall']['points_above_1pct']:.2f} "
             f"| {r['floor']['violation_pct']:.2f} "
             f"| {r['floor']['max_excess_dex']:.2f} "
             f"| {r['eval_time_batch1_ms']:.1f} |")
