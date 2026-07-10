@@ -42,8 +42,9 @@ No `pip install -e .` needed as long as you run from the repo root.
 
 ```bash
 cd spexai
-CACHE=~/spexai_data/processed/element26
-RUNS=~/spexai_data/runs/element26
+CACHE=/home/dhuppenkot2/data/spexai_data/processed/element26
+RUNS=/home/dhuppenkot2/data/spexai_data/runs/element26
+HPO=/home/dhuppenkot2/data/spexai_data/runs
 
 nohup python scripts/run_ablation.py \
     --steps 20000 --lr 1e-3 \

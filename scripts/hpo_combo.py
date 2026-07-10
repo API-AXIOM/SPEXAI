@@ -27,9 +27,15 @@ import os
 import random
 import sys
 
+import torch
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spexai.train.train_operator import build_parser, train
+
+# cap on batch * points per training step: activation memory scales with it
+# (batch 256 x points 8192 x a wide trunk needs >20 GiB with autograd)
+MAX_POINTS_TOTAL = 256 * 1024
 
 SPACE = {
     "lr": [3e-4, 5e-4, 1e-3, 2e-3, 3e-3],
@@ -48,7 +54,11 @@ SPACE = {
 
 
 def sample_config(rng):
-    return {k: rng.choice(v) for k, v in SPACE.items()}
+    cfg = {k: rng.choice(v) for k, v in SPACE.items()}
+    # keep activation memory bounded: shrink points to fit the cap
+    while cfg["batch"] * cfg["points"] > MAX_POINTS_TOTAL and cfg["points"] > 1024:
+        cfg["points"] //= 2
+    return cfg
 
 
 def run_trial(tag, cfg, steps, args):
@@ -57,7 +67,15 @@ def run_trial(tag, cfg, steps, args):
             "--eval_every", str(max(500, steps // 6))]
     for k, v in cfg.items():
         argv += [f"--{k}", str(v)]
-    _, best = train(build_parser().parse_args(argv))
+    try:
+        _, best = train(build_parser().parse_args(argv))
+    except torch.OutOfMemoryError:
+        # a too-large configuration fails this trial, not the whole search
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"=== trial {tag} failed: CUDA out of memory", flush=True)
+        return {"tag": tag, "config": cfg, "steps": steps, "failed": "oom",
+                "val_yield_1pct": -1.0, "val_mre_mean": None}
     return {"tag": tag, "config": cfg, "steps": steps,
             "val_yield_1pct": best["val_yield_1pct"],
             "val_mre_mean": best.get("val_mre_mean"),
@@ -77,6 +95,14 @@ def report(outdir):
             "|" + "---|" * 15]
     for r in rank(res):
         c = r["config"]
+        if r.get("failed"):
+            rows.append(f"| {r['tag']} | {r['steps']} | FAILED ({r['failed']}) "
+                        f"| - | {c['lr']:g} | {c['batch']} | {c['points']} "
+                        f"| {c['hidden']}x{c['layers']} | {c['activation']} "
+                        f"| {c['n_freqs']} | {c['f_max']:g} | {c['line_dim']} "
+                        f"| {c['use_trend']} | {c['w_log']:g} "
+                        f"| {c['curriculum_frac']:g} |")
+            continue
         rows.append(
             f"| {r['tag']} | {r['steps']} | {r['val_yield_1pct']:.2f} "
             f"| {r['val_mre_mean']:.4f} | {c['lr']:g} | {c['batch']} "
@@ -131,7 +157,8 @@ def main():
             json.dump(results, f, indent=2)
 
     # stage 2: retrain the top configurations with the full budget
-    stage1 = [r for r in results if r["steps"] == args.stage1_steps]
+    stage1 = [r for r in results if r["steps"] == args.stage1_steps
+              and not r.get("failed")]
     for r in rank(stage1)[:args.top]:
         tag = r["tag"] + "_long"
         if tag in done:
