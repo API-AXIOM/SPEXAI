@@ -109,6 +109,17 @@ nohup python -m spexai.train.train_broadened \
     > $RUNS/broadened.log 2>&1 &
 ```
 
+The revised option-2 model (Gaussian line head with analytic sigma(v),
+line-aware point sampling, full-velocity-range validation, wing masking
+-- see the train_broadened2 docstring) trains the same way:
+
+```bash
+nohup python -m spexai.train.train_broadened2 \
+    --steps 20000 \
+    --cachedir $CACHE --outdir $RUNS/broadened2 \
+    > $RUNS/broadened2.log 2>&1 &
+```
+
 Then compare all broadening options (exact erf reference vs the current
 sparse-matrix implementation, FFT convolution, the (T,v) emulator, and
 the hybrid analytic-line scheme; the emulator methods are picked up
@@ -131,14 +142,19 @@ winner (script defaults); validation is always the frozen SPEX val split.
 
 ```bash
 mkdir -p $RUNS/adaptive
-for mode in baseline reweight adaptive; do
-  nohup python -m spexai.train.train_adaptive \
+nohup bash -c 'for mode in baseline reweight adaptive; do
+  python -m spexai.train.train_adaptive \
       --mode $mode --n_train 300 \
-      --cachedir $CACHE --outdir $RUNS/adaptive \
-      > $RUNS/adaptive/$mode.log 2>&1 &
-  wait
-done
+      --cachedir '"$CACHE"' --outdir '"$RUNS"'/adaptive \
+      > '"$RUNS"'/adaptive/$mode.log 2>&1
+done' > /dev/null 2>&1 &
 ```
+
+(The loop itself must live inside the detached process: with a plain
+`for ... do nohup ... & wait; done` the running arm survives an SSH
+drop but the loop dies with the login shell and the remaining arms
+never start. Arms are independent -- if the sequence is interrupted,
+relaunch only the modes without a `<mode>_history.json`.)
 
 - Each `<mode>_history.json` records the acquired temperatures and the
   trust-gate-rejected intervals (the shortlist for real new SPEX runs).
@@ -163,6 +179,17 @@ done
 This produces `benchmark_test.{json,md}` (overall + line vs continuum
 metrics, timing, per-variant residual plots in `figures/`) and
 `baselines_test*.json`.
+
+Emulator accuracy on instrument energy grids (XRISM Resolve, Chandra
+ACIS, HETG/HEG and MEG; resolution-matched binning, truth = SPEX rebinned
+to the same grid, erf-broadened for the (T,v) emulators):
+
+```bash
+python scripts/benchmark_instruments.py --cachedir $CACHE --rundir $RUNS \
+    --nspec 16 --linehead_ckpt $RUNS/hpo/t04_long.pt
+```
+
+Writes `benchmark_instruments_test.{json,md}`.
 
 ## 5. Copy results back
 

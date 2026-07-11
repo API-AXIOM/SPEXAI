@@ -28,8 +28,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.benchmark_operator import load_model, predict_full_grid
 from spexai.train.broadening import (broaden_native, direct_broaden,
-                                     hybrid_broadened_on_grid)
-from spexai.train.operator import edges_from_centers
+                                     hybrid_broadened_on_grid, rebin_flux,
+                                     uniform_log_edges)
+from spexai.train.operator import OperatorConfig, SpectralOperator, \
+    edges_from_centers
 from spexai.train.train_operator import SpectrumData
 
 SURFACE = "#fcfcfb"
@@ -41,7 +43,40 @@ STYLE = {  # color, linestyle, linewidth, zorder
     "exact+FFT": ("#2a78d6", "--", 1.3, 5),
     "emu+FFT":   ("#eda100", "-",  1.1, 3),
     "hybrid":    ("#4a3aa7", "-",  1.1, 2),
+    "emu(T,v)":  ("#c23b2a", "-",  1.1, 1),
 }
+
+
+def load_broadened(path, edges):
+    """(T, v) emulator of broadened spectra (train_broadened checkpoint);
+    returns model plus its uniform grid and velocity normalisation."""
+    b = torch.load(path, map_location="cpu", weights_only=False)
+    cfg = OperatorConfig(**b["config"])
+    uni = uniform_log_edges(float(edges[0]), float(edges[-1]),
+                            b["args"]["dlx"])
+    uni_cen = torch.sqrt(uni[:-1] * uni[1:])
+    stats = ((b["state_dict"]["bn_mu"], b["state_dict"]["bn_sigma"])
+             if cfg.use_binnorm else None)
+    model = SpectralOperator(cfg, energy_grid=uni_cen, bin_stats=stats)
+    model.load_state_dict(b["state_dict"])
+    return model.eval(), uni, uni_cen, b["args"]["vmin"], b["args"]["vmax"]
+
+
+def predict_broadened(model, uni, uni_cen, vmin, vmax, T, v,
+                      edges, chunk=8192):
+    """Native-grid integrated flux predicted by the (T, v) emulator."""
+    tn = model.norm_temp(T)
+    lv = torch.log10(torch.tensor(float(v)))
+    vn = 2.0 * (lv - np.log10(vmin)) / np.log10(vmax / vmin) - 1.0
+    theta = torch.stack([tn, vn.expand(len(T))], dim=1)
+    K = len(uni_cen)
+    x = model.norm_energy(uni_cen).view(1, -1, 1)
+    dens_u = torch.cat(
+        [torch.pow(10.0, model.forward_norm(
+            theta, x[:, lo:lo + chunk].expand(len(T), -1, -1),
+            bins=torch.arange(lo, min(lo + chunk, K))))
+         for lo in range(0, K, chunk)], dim=1)
+    return rebin_flux(dens_u * (uni[1:] - uni[:-1]), uni, edges)
 
 
 def main():
@@ -52,6 +87,9 @@ def main():
                     default="/Users/danielahuppenkothen/work/data/spexai/runs/element26")
     ap.add_argument("--ckpt", default=None,
                     help="line-head checkpoint (default <rundir>/line_head.pt)")
+    ap.add_argument("--broadened_ckpt", default=None,
+                    help="(T,v) emulator checkpoint (default "
+                         "<rundir>/broadened/broadened.pt; skipped if absent)")
     ap.add_argument("--temp", type=float, default=3.0)
     ap.add_argument("--velocity", type=float, default=300.0)
     args = ap.parse_args()
@@ -80,6 +118,11 @@ def main():
         flux_emu = torch.pow(10.0, pred) * widths
         curves["emu+FFT"] = broaden_native(flux_emu, edges, v)
         curves["hybrid"] = hybrid_broadened_on_grid(model, T, v, edges)
+        bckpt = args.broadened_ckpt or os.path.join(args.rundir, "broadened",
+                                                    "broadened.pt")
+        if os.path.exists(bckpt):
+            curves["emu(T,v)"] = predict_broadened(
+                *load_broadened(bckpt, edges), T, v, edges)
     dens = {k: (c / widths).squeeze(0).numpy() for k, c in curves.items()}
 
     # strongest line (by head amplitude at this T) in each sub-band
