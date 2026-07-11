@@ -37,6 +37,16 @@ from spexai.train.train_operator import (FLOOR, LINE_THRESHOLD_DEX,
 def load_model(ckpt_path, data):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     args = argparse.Namespace(**ckpt["args"])
+    if getattr(args, "n_train", 0):
+        # train_adaptive checkpoint: line bins and bin-norm shapes derive
+        # from the subsampled training grid, so rebuild on the same grid
+        import copy
+        data = copy.copy(data)
+        tr = data.train_idx.numpy()
+        tr = tr[np.argsort(data.temps.numpy()[tr])]
+        if args.n_train < len(tr):
+            tr = tr[np.linspace(0, len(tr) - 1, args.n_train).astype(int)]
+        data.train_idx = torch.from_numpy(tr).long()
     model = make_variant(ckpt["variant"], data, args)
     # older checkpoints predate the line_energies/line_widths buffers; the
     # freshly built model already computed them from the cache, so it is

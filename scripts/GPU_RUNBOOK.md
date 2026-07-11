@@ -186,10 +186,14 @@ to the same grid, erf-broadened for the (T,v) emulators):
 
 ```bash
 python scripts/benchmark_instruments.py --cachedir $CACHE --rundir $RUNS \
-    --nspec 16 --linehead_ckpt $RUNS/hpo/t04_long.pt
+    --nspec 16 --linehead_ckpt $RUNS/hpo/t04_long.pt \
+    --responses_dir <dir with RMFs>
 ```
 
-Writes `benchmark_instruments_test.{json,md}`.
+The RMF-folded pass needs the instrument response files (see the script
+docstring for sources); rsync `~/work/data/spexai/responses/` from the
+Mac, or let the pass skip if they are absent. Writes
+`benchmark_instruments_test.{json,md}`.
 
 ## 5. Copy results back
 
