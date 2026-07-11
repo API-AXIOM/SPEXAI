@@ -131,10 +131,16 @@ def train(args):
         if step < warmup:
             return step / warmup
         p = (step - warmup) / max(1, args.steps - warmup)
-        return 0.5 * (1 + math.cos(math.pi * p))
+        return max(args.lr_min_frac, 0.5 * (1 + math.cos(math.pi * p)))
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
     x_grid = model.norm_energy(data.energy.to(device)).unsqueeze(-1)  # (M, 1)
+
+    wema = None
+    if args.ema_decay > 0:
+        from spexai.train.diagnostics import EMAWeights
+        wema = EMAWeights(model, args.ema_decay)
+    train_sub = grid[torch.linspace(0, n_grid - 1, min(384, n_grid)).long()]
 
     # running per-grid-point error estimate (optimistic init -> coverage)
     ema = torch.full((n_grid,), args.ema_init)
@@ -211,16 +217,22 @@ def train(args):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         sched.step()
+        if wema is not None:
+            wema.update(model)
 
         with torch.no_grad():
             mre = per_sample_mre(pred[:nr], target[:nr]).cpu()
             ema[pos] = (1 - args.ema_beta) * ema[pos] + args.ema_beta * mre
 
         if step % args.eval_every == 0 or step == args.steps:
+            if wema is not None:
+                wema.swap_in(model)
             val = evaluate(model, data, data.val_idx, device)
+            trn = evaluate(model, data, train_sub, device)
             rec = {"step": step, "loss": float(loss.item()),
                    "pool_n": len(pool_flux), "ema_mean": float(ema.mean()),
                    "elapsed_s": time.time() - t0,
+                   "train_mre_mean": trn["mre_mean"],
                    **{f"val_{k}": v for k, v in val.items()}}
             history.append(rec)
             print(f"[{args.mode}] step {step}/{args.steps} "
@@ -233,6 +245,8 @@ def train(args):
                 torch.save({"state_dict": model.state_dict(),
                             "variant": "combo", "args": vars(args)},
                            os.path.join(args.outdir, f"{tag}.pt"))
+            if wema is not None:
+                wema.swap_out(model)
 
     rejected = [{"logT_lo": float(lt_grid[j]), "logT_hi": float(lt_grid[j + 1]),
                  "loo": float(max(loo[j], loo[j + 1]))}
@@ -247,6 +261,12 @@ def train(args):
     print(f"[{args.mode}] done in {(time.time()-t0)/60:.1f} min; best "
           f"val yield1%={best['val_yield_1pct']:.2f} "
           f"(synthetic spectra generated: {len(acquired)})", flush=True)
+    if args.diag_plots:
+        from spexai.train.diagnostics import run_diagnostics
+        ckpt = torch.load(os.path.join(args.outdir, f"{tag}.pt"),
+                          map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["state_dict"])
+        run_diagnostics(model, data, history, args.outdir, tag, device=device)
     return model, best
 
 
@@ -300,6 +320,13 @@ def build_parser():
                     help="prioritized fraction of real-sample draws")
     ap.add_argument("--ema_beta", type=float, default=0.1)
     ap.add_argument("--ema_init", type=float, default=1.0)
+    ap.add_argument("--ema_decay", type=float, default=0.999,
+                    help="Polyak weight averaging (0 disables); checkpoints "
+                         "hold the averaged weights")
+    ap.add_argument("--lr_min_frac", type=float, default=0.02,
+                    help="cosine schedule floor as a fraction of --lr")
+    ap.add_argument("--diag_plots", type=int, default=1,
+                    help="write history + spectrum diagnostics at the end")
     return ap
 
 

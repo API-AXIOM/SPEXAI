@@ -165,6 +165,31 @@ relaunch only the modes without a `<mode>_history.json`.)
 - Repeat with `--n_train 100/1000` for the data-efficiency version
   (`--tag <mode>_n100` to keep the outputs apart).
 
+## 3e. Tier-1 optimisation run (full grid)
+
+Best-known recipe for pushing the full-grid emulator below t04_long's
+0.31% MRE: t04 architecture + error-prioritized sampling of the training
+grid + Polyak weight averaging (on by default, `--ema_decay 0.999`) +
+a 5x longer cosine schedule with a floor (`--lr_min_frac`):
+
+```bash
+nohup python -m spexai.train.train_adaptive \
+    --mode reweight --n_train 0 --pr_mix 0.3 \
+    --steps 100000 --eval_every 2000 --tag reweight_full \
+    --cachedir $CACHE --outdir $RUNS/tier1 \
+    > $RUNS/tier1.log 2>&1 &
+```
+
+Every training run (train_operator and train_adaptive) now also writes
+standard diagnostics to `<outdir>/figures/`: `<tag>_history.png`
+(training loss, train-vs-val MRE, val yield) and three
+`<tag>_spectra_T*.png` (SPEX vs emulator with residuals, full band +
+three line zooms, at low/mid/high test temperatures). For older
+checkpoints or comparison experiments, generate the same figures with
+`python scripts/plot_model_diagnostics.py --ckpt <file>.pt --cachedir $CACHE`.
+Note: with EMA enabled, early evals (first ~3k steps) lag the live
+weights; judge convergence from step ~5k onward.
+
 ## 4. Benchmark on the held-out test set
 
 ```bash

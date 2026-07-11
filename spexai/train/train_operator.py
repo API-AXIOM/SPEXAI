@@ -243,14 +243,21 @@ def train(args):
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     warmup = max(1, int(0.02 * args.steps))
+    lr_min = getattr(args, "lr_min_frac", 0.0)
 
     def lr_at(step):
         if step < warmup:
             return step / warmup
         p = (step - warmup) / max(1, args.steps - warmup)
-        return 0.5 * (1 + math.cos(math.pi * p))
+        return max(lr_min, 0.5 * (1 + math.cos(math.pi * p)))
 
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
+
+    # Polyak-averaged weights: evaluated and saved instead of the live ones
+    ema = None
+    if getattr(args, "ema_decay", 0.0) > 0:
+        from spexai.train.diagnostics import EMAWeights
+        ema = EMAWeights(model, args.ema_decay)
 
     x_grid = None
     if not fixed_grid:
@@ -259,6 +266,9 @@ def train(args):
     train_idx = data.train_idx
     target_all = data.logflux
     temps_all = data.temps
+    # fixed train subset for the train-vs-val curve
+    train_sub = train_idx[torch.linspace(0, len(train_idx) - 1,
+                                         min(384, len(train_idx))).long()]
 
     os.makedirs(args.outdir, exist_ok=True)
     runname = getattr(args, "tag", None) or args.variant
@@ -304,11 +314,17 @@ def train(args):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         sched.step()
+        if ema is not None:
+            ema.update(model)
 
         if step % args.eval_every == 0 or step == args.steps:
+            if ema is not None:
+                ema.swap_in(model)
             val = evaluate(model, data, data.val_idx, device, fixed_grid=fixed_grid)
+            trn = evaluate(model, data, train_sub, device, fixed_grid=fixed_grid)
             rec = {"step": step, "loss": float(loss.item()),
                    "elapsed_s": time.time() - t0,
+                   "train_mre_mean": trn["mre_mean"],
                    **{f"val_{k}": v for k, v in val.items()}}
             history.append(rec)
             print(f"[{args.variant}] step {step}/{args.steps} loss={rec['loss']:.4f} "
@@ -322,6 +338,8 @@ def train(args):
                             "variant": args.variant,
                             "args": vars(args)},
                            os.path.join(args.outdir, f"{runname}.pt"))
+            if ema is not None:
+                ema.swap_out(model)
 
     with open(os.path.join(args.outdir, f"{runname}_history.json"), "w") as f:
         json.dump({"history": history, "best": best,
@@ -330,6 +348,13 @@ def train(args):
     print(f"[{args.variant}] done in {(time.time()-t0)/60:.1f} min; "
           f"best val yield1%={best['val_yield_1pct']:.2f} at step {best.get('step')}",
           flush=True)
+    if getattr(args, "diag_plots", 1):
+        from spexai.train.diagnostics import run_diagnostics
+        ckpt = torch.load(os.path.join(args.outdir, f"{runname}.pt"),
+                          map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["state_dict"])
+        run_diagnostics(model, data, history, args.outdir, runname,
+                        device=device, spectra=not fixed_grid)
     return model, best
 
 
@@ -367,6 +392,13 @@ def build_parser():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--tag", default=None,
                     help="checkpoint/history name (defaults to variant)")
+    ap.add_argument("--ema_decay", type=float, default=0.999,
+                    help="Polyak weight averaging (0 disables); checkpoints "
+                         "hold the averaged weights")
+    ap.add_argument("--lr_min_frac", type=float, default=0.02,
+                    help="cosine schedule floor as a fraction of --lr")
+    ap.add_argument("--diag_plots", type=int, default=1,
+                    help="write history + spectrum diagnostics at the end")
     return ap
 
 
