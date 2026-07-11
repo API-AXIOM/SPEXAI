@@ -121,6 +121,34 @@ python scripts/benchmark_broadening.py --cachedir $CACHE --rundir $RUNS \
 
 Results land in `$RUNS/benchmark_broadening.json`.
 
+## 3d. Adaptive-data test run (unbroadened emulator)
+
+Three-arm experiment on a subsampled training grid: does dynamically
+generating extra training spectra (per-bin PCHIP interpolation, gated by
+leave-one-out interpolation error) beat plain training and
+error-prioritized sampling of the existing grid? Model is the t04 HPO
+winner (script defaults); validation is always the frozen SPEX val split.
+
+```bash
+mkdir -p $RUNS/adaptive
+for mode in baseline reweight adaptive; do
+  nohup python -m spexai.train.train_adaptive \
+      --mode $mode --n_train 300 \
+      --cachedir $CACHE --outdir $RUNS/adaptive \
+      > $RUNS/adaptive/$mode.log 2>&1 &
+  wait
+done
+```
+
+- Each `<mode>_history.json` records the acquired temperatures and the
+  trust-gate-rejected intervals (the shortlist for real new SPEX runs).
+- Interpretation: adaptive > reweight means the synthetic data genuinely
+  adds information; reweight > baseline means it was attention, not data.
+- Checkpoints benchmark like any other:
+  `python scripts/benchmark_operator.py --rundir $RUNS/adaptive --cachedir $CACHE`
+- Repeat with `--n_train 100/1000` for the data-efficiency version
+  (`--tag <mode>_n100` to keep the outputs apart).
+
 ## 4. Benchmark on the held-out test set
 
 ```bash
