@@ -127,9 +127,16 @@ def train(args):
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     warmup = max(1, int(0.02 * args.steps))
 
+    decay_start = int((1.0 - args.wsd_decay_frac) * args.steps)
+
     def lr_at(step):
         if step < warmup:
             return step / warmup
+        if args.schedule == "wsd":
+            if step < decay_start:
+                return 1.0
+            p = (step - decay_start) / max(1, args.steps - decay_start)
+            return max(args.lr_min_frac, 1.0 - p * (1.0 - args.lr_min_frac))
         p = (step - warmup) / max(1, args.steps - warmup)
         return max(args.lr_min_frac, 0.5 * (1 + math.cos(math.pi * p)))
 
@@ -294,6 +301,15 @@ def build_parser():
     ap.add_argument("--activation", default="gelu",
                     choices=["gelu", "silu", "tanh", "sine"])
     ap.add_argument("--line_dim", type=int, default=16)
+    ap.add_argument("--line_hidden", type=int, default=128)
+    ap.add_argument("--line_t_freqs", type=int, default=0,
+                    help="Fourier embedding of T in the line head "
+                         "(0 = plain MLP conditioning)")
+    ap.add_argument("--line_t_fmax", type=float, default=64.0)
+    ap.add_argument("--schedule", default="cosine", choices=["cosine", "wsd"],
+                    help="wsd = warmup-stable-decay: flat LR, linear decay "
+                         "over the last --wsd_decay_frac of the run")
+    ap.add_argument("--wsd_decay_frac", type=float, default=0.15)
     ap.add_argument("--use_trend", type=int, default=1)
     ap.add_argument("--use_binnorm", type=int, default=1)
     ap.add_argument("--w_log", type=float, default=0.1)

@@ -190,6 +190,40 @@ checkpoints or comparison experiments, generate the same figures with
 Note: with EMA enabled, early evals (first ~3k steps) lag the live
 weights; judge convergence from step ~5k onward.
 
+## 3f. Tier-2 capacity runs (full grid)
+
+Tier 1 ended with train MRE == val MRE (0.15%): capacity-limited, not
+data-limited. Two capacity hypotheses, both on the Tier-1 recipe
+(reweighted sampling, EMA, `--pr_mix 0.4` to protect the faint low-T
+band the gratings exposed). The `wsd` schedule holds the LR flat and
+only anneals over the last 15% -- if a run is still improving, restart
+it with a larger `--steps` and it re-pays only the decay leg:
+
+```bash
+# (a) bigger trunk at a stable LR (the HPO never gave large models a
+#     fair run: t16 diverged at lr 3e-3)
+nohup python -m spexai.train.train_adaptive \
+    --mode reweight --n_train 0 --pr_mix 0.4 \
+    --hidden 512 --layers 6 --n_freqs 1024 --lr 1e-3 \
+    --schedule wsd --steps 100000 --eval_every 2000 --tag big_trunk \
+    --cachedir $CACHE --outdir $RUNS/tier2 > $RUNS/tier2_a.log 2>&1 &
+
+# (b) line-head capacity: wider embeddings + Fourier-embedded T
+#     conditioning (per-line emissivity curves have sharp ionisation
+#     features), trunk unchanged from t04
+nohup python -m spexai.train.train_adaptive \
+    --mode reweight --n_train 0 --pr_mix 0.4 \
+    --line_dim 48 --line_hidden 256 --line_t_freqs 32 \
+    --schedule wsd --steps 100000 --eval_every 2000 --tag line_heavy \
+    --cachedir $CACHE --outdir $RUNS/tier2 > $RUNS/tier2_b.log 2>&1 &
+```
+
+(~1.9M params for (b), ~3.3M for (a); run sequentially if GPU memory is
+tight.) Compare against `$RUNS/tier1/reweight_full` (0.16% test MRE,
+99.0% yield@1%) with `benchmark_operator.py --rundir $RUNS/tier2`; check
+the low-T grating regression specifically with
+`benchmark_instruments.py --linehead_ckpt $RUNS/tier2/<tag>.pt`.
+
 ## 4. Benchmark on the held-out test set
 
 ```bash

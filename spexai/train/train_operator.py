@@ -187,6 +187,9 @@ def make_variant(variant, data, args):
         n_freqs=args.n_freqs, f_max=args.f_max,
         activation=getattr(args, "activation", "gelu"),
         line_dim=getattr(args, "line_dim", 16),
+        line_hidden=getattr(args, "line_hidden", 128),
+        line_t_freqs=getattr(args, "line_t_freqs", 0),
+        line_t_fmax=getattr(args, "line_t_fmax", 64.0),
         x_lo=math.log10(data.energy[0].item()),
         x_hi=math.log10(data.energy[-1].item()),
         t_lo=math.log10(data.temps.min().item()),
@@ -244,10 +247,20 @@ def train(args):
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     warmup = max(1, int(0.02 * args.steps))
     lr_min = getattr(args, "lr_min_frac", 0.0)
+    schedule = getattr(args, "schedule", "cosine")
+    decay_start = int((1.0 - getattr(args, "wsd_decay_frac", 0.15))
+                      * args.steps)
 
     def lr_at(step):
         if step < warmup:
             return step / warmup
+        if schedule == "wsd":
+            # warmup-stable-decay: flat until decay_start, then linear;
+            # extending a run only re-pays the decay leg, not the schedule
+            if step < decay_start:
+                return 1.0
+            p = (step - decay_start) / max(1, args.steps - decay_start)
+            return max(lr_min, 1.0 - p * (1.0 - lr_min))
         p = (step - warmup) / max(1, args.steps - warmup)
         return max(lr_min, 0.5 * (1 + math.cos(math.pi * p)))
 
@@ -379,6 +392,15 @@ def build_parser():
     ap.add_argument("--activation", default="gelu",
                     choices=["gelu", "silu", "tanh", "sine"])
     ap.add_argument("--line_dim", type=int, default=16)
+    ap.add_argument("--line_hidden", type=int, default=128)
+    ap.add_argument("--line_t_freqs", type=int, default=0,
+                    help="Fourier embedding of T in the line head "
+                         "(0 = plain MLP conditioning)")
+    ap.add_argument("--line_t_fmax", type=float, default=64.0)
+    ap.add_argument("--schedule", default="cosine", choices=["cosine", "wsd"],
+                    help="wsd = warmup-stable-decay: flat LR, linear decay "
+                         "over the last --wsd_decay_frac of the run")
+    ap.add_argument("--wsd_decay_frac", type=float, default=0.15)
     ap.add_argument("--use_trend", type=int, default=1,
                     help="combo variant only: include the trend head (1/0)")
     ap.add_argument("--use_binnorm", type=int, default=0,

@@ -42,6 +42,8 @@ class OperatorConfig:
     # line head
     line_dim: int = 16
     line_hidden: int = 128
+    line_t_freqs: int = 0   # Fourier embedding of theta in the line head
+    line_t_fmax: float = 64.0
     # trunk
     hidden_size: int = 256
     n_hidden: int = 6
@@ -165,7 +167,8 @@ class LineHead(nn.Module):
     """
 
     def __init__(self, line_ids, n_params, cond_hidden, cond_layers,
-                 line_dim=16, hidden=128, floor=-12.0, energy_grid=None):
+                 line_dim=16, hidden=128, floor=-12.0, energy_grid=None,
+                 t_freqs=0, t_fmax=64.0):
         super().__init__()
         # line_ids: (n_bins,) long, slot index for line bins, -1 elsewhere
         self.register_buffer("line_ids", line_ids)
@@ -187,12 +190,22 @@ class LineHead(nn.Module):
             self.register_buffer("line_widths", torch.zeros(n_lines))
         self.embed = nn.Embedding(n_lines, line_dim)
         nn.init.normal_(self.embed.weight, std=0.1)
-        self.cond = CondNet(n_params, cond_hidden, cond_layers, cond_hidden)
+        # optional Fourier embedding of theta: per-line emissivity curves
+        # have sharp ionisation features in T that a plain MLP underfits
+        self.t_embed = (FourierFeatures(t_freqs, 0.25, t_fmax)
+                        if t_freqs > 0 else None)
+        cond_in = n_params * (1 + 2 * t_freqs) if t_freqs > 0 else n_params
+        self.cond = CondNet(cond_in, cond_hidden, cond_layers, cond_hidden)
         self.mlp = nn.Sequential(
             nn.Linear(line_dim + cond_hidden, hidden), nn.GELU(),
             nn.Linear(hidden, hidden), nn.GELU(),
             nn.Linear(hidden, 1))
         self.floor = floor
+
+    def _cond_input(self, tnorm):
+        if self.t_embed is None:
+            return tnorm
+        return self.t_embed(tnorm.unsqueeze(-1)).flatten(start_dim=1)
 
     def forward(self, tnorm, bins, trunk_out):
         """tnorm: (B, n_params); bins: (P,) long bin indices;
@@ -203,7 +216,7 @@ class LineHead(nn.Module):
             return trunk_out
         B = tnorm.shape[0]
         emb = self.embed(lid[sel])          # (Nl, D)
-        c = self.cond(tnorm)                # (B, C)
+        c = self.cond(self._cond_input(tnorm))  # (B, C)
         nl = emb.shape[0]
         h = torch.cat([emb.unsqueeze(0).expand(B, -1, -1),
                        c.unsqueeze(1).expand(-1, nl, -1)], dim=-1)
@@ -220,7 +233,7 @@ class LineHead(nn.Module):
         """log10 flux density (training grid) of every line, shape (B, n_lines)."""
         B = tnorm.shape[0]
         emb = self.embed.weight
-        c = self.cond(tnorm)
+        c = self.cond(self._cond_input(tnorm))
         h = torch.cat([emb.unsqueeze(0).expand(B, -1, -1),
                        c.unsqueeze(1).expand(-1, self.n_lines, -1)], dim=-1)
         return self.mlp(h).squeeze(-1) + self.floor
@@ -299,7 +312,9 @@ class SpectralOperator(nn.Module):
                 raise ValueError("use_linehead requires line_ids")
             self.line_head = LineHead(line_ids, c.n_params, c.cond_hidden,
                                       c.cond_layers, c.line_dim, c.line_hidden,
-                                      energy_grid=energy_grid)
+                                      energy_grid=energy_grid,
+                                      t_freqs=c.line_t_freqs,
+                                      t_fmax=c.line_t_fmax)
         else:
             self.line_head = None
 
