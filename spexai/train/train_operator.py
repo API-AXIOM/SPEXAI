@@ -95,9 +95,14 @@ class SpectrumData:
 # losses
 # ---------------------------------------------------------------------------
 
-def relative_error_loss(pred, target, valid, huber_delta=1.0):
+def relative_error_loss(pred, target, valid, huber_delta=1.0,
+                        sample_weight=None):
     """Huber loss on |10^(pred - target) - 1| for valid bins,
-    one-sided floor penalty for empty bins (target at FLOOR)."""
+    one-sided floor penalty for empty bins (target at FLOOR).
+
+    sample_weight: optional (B,) per-spectrum weights (e.g. InfoBatch-style
+    importance-sampling corrections). When given, the loss is the mean over
+    points then the weighted mean over spectra, instead of a flat mean."""
     d = torch.clamp(pred - target, -4.0, 4.0)
     # valid bins: symmetric relative error in linear flux
     eps_valid = torch.abs(torch.pow(10.0, torch.where(valid, d, torch.zeros_like(d))) - 1.0)
@@ -105,7 +110,11 @@ def relative_error_loss(pred, target, valid, huber_delta=1.0):
     d_floor = torch.clamp(torch.relu(pred - FLOOR), max=4.0)
     eps_floor = torch.pow(10.0, d_floor) - 1.0
     eps = torch.where(valid, eps_valid, eps_floor)
-    return F.huber_loss(eps, torch.zeros_like(eps), delta=huber_delta)
+    if sample_weight is None:
+        return F.huber_loss(eps, torch.zeros_like(eps), delta=huber_delta)
+    per = F.huber_loss(eps, torch.zeros_like(eps), delta=huber_delta,
+                       reduction="none").mean(dim=1)          # (B,)
+    return (per * sample_weight).mean()
 
 
 def sobolev_loss(pred, target, x, valid):
@@ -186,6 +195,8 @@ def make_variant(variant, data, args):
         hidden_size=args.hidden, n_hidden=args.layers,
         n_freqs=args.n_freqs, f_max=args.f_max,
         activation=getattr(args, "activation", "gelu"),
+        finer_k=getattr(args, "finer_k", 10.0),
+        use_fourier=bool(getattr(args, "use_fourier", 1)),
         line_dim=getattr(args, "line_dim", 16),
         line_hidden=getattr(args, "line_hidden", 128),
         line_t_freqs=getattr(args, "line_t_freqs", 0),

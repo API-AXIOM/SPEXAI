@@ -24,7 +24,8 @@ exact erf-integral broadening of the SPEX spectrum at each test velocity.
 Instrument grids for (1):
 
   resolve - XRISM Resolve microcalorimeter: 4.5 eV FWHM (composite,
-            in-flight), 1.7-12 keV (Be window / closed gate valve band;
+            in-flight), 1.8-12 keV (analyses below ~1.8 keV are precluded
+            by the closed gate valve / Be window;
             the design band extends to 0.3 keV)
   acis    - Chandra ACIS CCD: FWHM interpolated linearly between the
             canonical 96 eV @ 1.49 keV and 150 eV @ 5.9 keV, 0.3-10 keV
@@ -64,7 +65,7 @@ from spexai.train.train_operator import SpectrumData
 HC_KEV_A = 12.398425  # keV * Angstrom
 
 
-def resolve_edges(oversample, lo=1.7, hi=12.0, fwhm_kev=0.0045):
+def resolve_edges(oversample, lo=1.8, hi=12.0, fwhm_kev=0.0045):
     return torch.arange(lo, hi, fwhm_kev / oversample, dtype=torch.float64)
 
 
@@ -94,7 +95,7 @@ def instrument_grids(oversample):
     }
 
 
-BANDS = {"resolve": (1.7, 12.0), "acis": (0.3, 10.0),
+BANDS = {"resolve": (1.8, 12.0), "acis": (0.3, 10.0),
          "heg": (0.8, 10.0), "meg": (0.4, 5.0)}
 RMF_FILES = {"resolve": "rsl_Hp_L_2025.rmf", "acis": "aciss_aimpt_cy28.rmf",
              "heg": "aciss_heg1_cy28.grmf", "meg": "aciss_meg1_cy28.grmf"}

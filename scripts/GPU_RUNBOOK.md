@@ -224,6 +224,74 @@ tight.) Compare against `$RUNS/tier1/reweight_full` (0.16% test MRE,
 the low-T grating regression specifically with
 `benchmark_instruments.py --linehead_ckpt $RUNS/tier2/<tag>.pt`.
 
+**Verdict (2026-07-13): big_trunk won** - 0.13% test MRE, 99.2%/52.6%
+yield@1%/@0.1%, and it fixes the Tier-1 grating regression (HEG/MEG RMF
+means 0.20%/0.09%, better than t04_long). line_heavy regressed (0.21%)
+and is rejected: line error is not amplitude-head capacity. Use
+big_trunk (`--hidden 512 --layers 6 --n_freqs 1024 --lr 1e-3`) as the
+backbone where accuracy matters (21.5 ms/spec, 1.7x t04); keep the t04
+architecture for cheap sweeps. Scaling is ~25% MRE per parameter
+doubling and both runs were still improving at 100k steps - the cheap
+next move is the same command with `--steps 200000` (WSD re-pays only
+the decay leg).
+
+## 3g. All-element sweep
+
+Trains the current best recipe (Tier 1: reweighted sampling + EMA + WSD,
+t04 architecture) for every element sequentially, then benchmarks each on
+its held-out test set and runs the interpolation baselines. Resumable:
+finished stages are detected by their outputs, so rerun the same command
+after any interruption. Expects raw data in `<dataroot>/element_<Z>/`
+(`Z<Z>_*keV.txt`); preprocessing runs automatically on first use.
+
+```bash
+nohup python scripts/run_all_elements.py \
+    --dataroot ~/data/spexai_data --runroot $RUNS_ROOT \
+    > $RUNS_ROOT/all_elements.log 2>&1 &
+```
+
+- Per-element outputs land in `<runroot>/element<Z>/tier1/` (checkpoint,
+  history, diagnostics figures, `benchmark_test.{json,md}`); the
+  cross-element table is rebuilt after every element at
+  `<runroot>/elements_summary.{json,md}`.
+- A failing element is recorded in the summary and skipped (check its
+  `pipeline.log`); very low-Z elements may need attention if they lack
+  enough line bins for the line head.
+- When a Tier-2 config wins, update `TRAIN_FLAGS` in the script or pass
+  e.g. `--train_flags "--line_dim 48 --line_hidden 256 --line_t_freqs 32"`.
+- At ~7 h/element on the A100 the full sweep is on the order of 9 days;
+  use `--elements 8 14 26 ...` to prioritise, or `--train_flags
+  "--steps 20000"` for a first faster pass over all elements.
+
+## 3h. Training-recipe screening program
+
+Screens the candidate improvements from the technical report's related-work
+section (InfoBatch-style unbiased sampling, optimizer bake-off, muP width
+transfer, FINER activations) in 14 short runs at t04 architecture. Needs
+`pip install schedulefree` for the Schedule-Free arm (that arm errors out
+otherwise; the rest are unaffected). Selection is on validation and a
+shared fresh off-grid PCHIP probe -- the Fe test set is never touched.
+
+```bash
+mkdir -p $RUNS/recipe
+nohup python scripts/run_recipe_program.py \
+    --cachedir $CACHE --progdir $RUNS/recipe --steps 20000 \
+    > $RUNS/recipe/program.log 2>&1 &
+```
+
+- Resumable (per-arm; skips arms whose history exists). ~20k steps/arm
+  on the full grid, so ~1--2 GPU-days total.
+- Live table at `$RUNS/recipe/recipe_summary.md` (val and off-grid MRE
+  per arm), rebuilt after every arm.
+- Compose winners by hand and confirm once at big_trunk scale on a
+  DIFFERENT element (e.g. Z=8 or 14), not the Fe test set -- this both
+  avoids test reuse and checks cross-element transfer.
+- Interpretation: exp1 (ib_*) -- does the grating regression vanish with
+  `pr_correct 1`? Rerun `benchmark_instruments.py` on the two winners to
+  check. exp2 (opt_*) -- lowest val MRE at equal budget. exp3 (mup_w*) --
+  does w768 stay stable and beat w384? exp4 (fin_*) -- does FINER match
+  or beat gelu, and does it remove the need for the curriculum?
+
 ## 4. Benchmark on the held-out test set
 
 ```bash

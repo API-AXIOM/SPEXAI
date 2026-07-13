@@ -47,7 +47,8 @@ class OperatorConfig:
     # trunk
     hidden_size: int = 256
     n_hidden: int = 6
-    activation: str = "gelu"  # gelu | silu | tanh | sine
+    activation: str = "gelu"  # gelu | silu | tanh | sine | finer
+    finer_k: float = 10.0     # finer only: trunk bias init U(-k, k)
     # conditioning network (FiLM generator / theta embedding)
     cond_hidden: int = 128
     cond_layers: int = 3
@@ -110,9 +111,19 @@ class Sine(nn.Module):
         return torch.sin(self.w0 * x)
 
 
+class Finer(nn.Module):
+    """Variable-periodic activation sin((1+|x|) x) (Liu et al. 2024,
+    CVPR): local frequency grows with pre-activation magnitude, so the
+    reachable frequency range is set by the bias initialisation
+    (see OperatorConfig.finer_k) instead of a fixed f_max."""
+
+    def forward(self, x):
+        return torch.sin((1.0 + torch.abs(x)) * x)
+
+
 def make_activation(name):
     return {"gelu": nn.GELU, "silu": nn.SiLU, "tanh": nn.Tanh,
-            "sine": Sine}[name]()
+            "sine": Sine, "finer": Finer}[name]()
 
 
 class GridFeatures(nn.Module):
@@ -336,6 +347,10 @@ class SpectralOperator(nn.Module):
             d = c.hidden_size
         self.head = nn.Linear(d, 1)
         self.act = make_activation(c.activation)
+        if c.activation == "finer":
+            # wide bias init sets the reachable local frequencies
+            for lin in self.trunk:
+                nn.init.uniform_(lin.bias, -c.finer_k, c.finer_k)
 
         if c.use_trend:
             self.trend = CondNet(c.n_params, c.cond_hidden, c.cond_layers, 2)

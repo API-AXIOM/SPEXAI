@@ -124,10 +124,36 @@ def train(args):
     print(f"adaptive[{args.mode}] params={model.count_parameters():,} "
           f"grid={n_grid} device={device}", flush=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # optimizer: adamw (default) | schedulefree | muon. schedule-free and
+    # its own averaging replace the external LR schedule and the EMA;
+    # muon drives 2-D matrices with an AdamW companion for the rest.
     warmup = max(1, int(0.02 * args.steps))
-
     decay_start = int((1.0 - args.wsd_decay_frac) * args.steps)
+    is_sf = args.optimizer == "schedulefree"
+    aux_opt = None
+    if args.optimizer == "adamw":
+        if args.mup:
+            from spexai.train.optim import mup_param_groups
+            groups = mup_param_groups(model, args.lr, args.mup_base_width)
+            opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
+        else:
+            opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                    weight_decay=1e-4)
+    elif is_sf:
+        try:
+            from schedulefree import AdamWScheduleFree
+        except ImportError:
+            raise SystemExit("optimizer=schedulefree needs `pip install "
+                             "schedulefree`; arm skipped by the driver if absent")
+        opt = AdamWScheduleFree(model.parameters(), lr=args.lr,
+                                weight_decay=1e-4, warmup_steps=warmup)
+    elif args.optimizer == "muon":
+        from spexai.train.optim import Muon, split_matrix_params
+        mats, rest = split_matrix_params(model)
+        opt = Muon(mats, lr=args.lr_muon)
+        aux_opt = torch.optim.AdamW(rest, lr=args.lr, weight_decay=1e-4)
+    else:
+        raise ValueError(args.optimizer)
 
     def lr_at(step):
         if step < warmup:
@@ -140,11 +166,14 @@ def train(args):
         p = (step - warmup) / max(1, args.steps - warmup)
         return max(args.lr_min_frac, 0.5 * (1 + math.cos(math.pi * p)))
 
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
+    # schedule-free carries its own warmup/averaging and takes no scheduler
+    scheds = ([] if is_sf else
+              [torch.optim.lr_scheduler.LambdaLR(o, lr_at)
+               for o in (opt, aux_opt) if o is not None])
     x_grid = model.norm_energy(data.energy.to(device)).unsqueeze(-1)  # (M, 1)
 
     wema = None
-    if args.ema_decay > 0:
+    if args.ema_decay > 0 and not is_sf:
         from spexai.train.diagnostics import EMAWeights
         wema = EMAWeights(model, args.ema_decay)
     train_sub = grid[torch.linspace(0, n_grid - 1, min(384, n_grid)).long()]
@@ -188,10 +217,17 @@ def train(args):
             ns = min(int(round(args.synth_frac * args.batch)), len(pool_flux))
         nr = args.batch - ns
 
+        w_real = None
         if prioritize:
             p = (ema + 1e-4) ** args.pr_alpha
             p = (1 - args.pr_mix) / n_grid + args.pr_mix * p / p.sum()
             pos = torch.multinomial(p, nr, replacement=True)
+            if args.pr_correct > 0:
+                # InfoBatch-style importance-sampling correction: weight
+                # each draw by (uniform / sampling prob)^beta so the
+                # expected gradient stays unbiased despite oversampling
+                w = ((1.0 / n_grid) / p[pos]) ** args.pr_correct
+                w_real = (w / w.mean()).to(device)
         else:
             pos = torch.randint(n_grid, (nr,))
         target = data.logflux[grid[pos]]
@@ -211,7 +247,7 @@ def train(args):
 
         target_c = torch.clamp(target, min=FLOOR)
         loss = relative_error_loss(pred[:nr], target_c[:nr],
-                                   target[:nr] > FLOOR)
+                                   target[:nr] > FLOOR, sample_weight=w_real)
         if ns > 0:
             loss = loss + args.synth_weight * relative_error_loss(
                 pred[nr:], target_c[nr:], target[nr:] > FLOOR)
@@ -219,11 +255,18 @@ def train(args):
         if w_log > 0:
             loss = loss + w_log * F.mse_loss(pred, target_c)
 
+        if is_sf:
+            opt.train()
         opt.zero_grad()
+        if aux_opt is not None:
+            aux_opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
-        sched.step()
+        if aux_opt is not None:
+            aux_opt.step()
+        for s in scheds:
+            s.step()
         if wema is not None:
             wema.update(model)
 
@@ -234,6 +277,8 @@ def train(args):
         if step % args.eval_every == 0 or step == args.steps:
             if wema is not None:
                 wema.swap_in(model)
+            if is_sf:
+                opt.eval()  # swap params to the schedule-free average
             val = evaluate(model, data, data.val_idx, device)
             trn = evaluate(model, data, train_sub, device)
             rec = {"step": step, "loss": float(loss.item()),
@@ -254,7 +299,11 @@ def train(args):
                            os.path.join(args.outdir, f"{tag}.pt"))
             if wema is not None:
                 wema.swap_out(model)
+            if is_sf:
+                opt.train()  # restore the training iterate
 
+    if is_sf:
+        opt.eval()  # leave the model holding the averaged weights
     rejected = [{"logT_lo": float(lt_grid[j]), "logT_hi": float(lt_grid[j + 1]),
                  "loo": float(max(loo[j], loo[j + 1]))}
                 for j in np.where(~eligible)[0]]
@@ -299,7 +348,19 @@ def build_parser():
     ap.add_argument("--n_freqs", type=int, default=512)
     ap.add_argument("--f_max", type=float, default=4000.0)
     ap.add_argument("--activation", default="gelu",
-                    choices=["gelu", "silu", "tanh", "sine"])
+                    choices=["gelu", "silu", "tanh", "sine", "finer"])
+    ap.add_argument("--finer_k", type=float, default=10.0,
+                    help="finer activation: trunk bias init U(-k, k)")
+    ap.add_argument("--optimizer", default="adamw",
+                    choices=["adamw", "schedulefree", "muon"])
+    ap.add_argument("--lr_muon", type=float, default=0.02,
+                    help="Muon learning rate for matrix params")
+    ap.add_argument("--mup", type=int, default=0,
+                    help="approximate muP LR scaling (adamw only)")
+    ap.add_argument("--mup_base_width", type=int, default=128)
+    ap.add_argument("--pr_correct", type=float, default=0.0,
+                    help="InfoBatch-style importance-sampling correction "
+                         "exponent (0 = biased oversampling, 1 = unbiased)")
     ap.add_argument("--line_dim", type=int, default=16)
     ap.add_argument("--line_hidden", type=int, default=128)
     ap.add_argument("--line_t_freqs", type=int, default=0,
