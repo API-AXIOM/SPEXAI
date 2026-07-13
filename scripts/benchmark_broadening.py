@@ -103,6 +103,9 @@ def main():
     ap.add_argument("--broadened_ckpt", default=None,
                     help="(T,v) emulator checkpoint (default: "
                          "<rundir>/broadened/broadened.pt)")
+    ap.add_argument("--broadened2_ckpt", default=None,
+                    help="revised Gaussian-line (T,v) emulator (default: "
+                         "<rundir>/broadened2/broadened2.pt)")
     ap.add_argument("--nspec", type=int, default=16)
     ap.add_argument("--velocities", nargs="+", type=float,
                     default=[100.0, 300.0, 1000.0])
@@ -149,6 +152,17 @@ def main():
         broadened_model = broadened_model.eval().to(device)
         bvmin, bvmax = b["args"]["vmin"], b["args"]["vmax"]
         print(f"(T,v) emulator uses {os.path.basename(bckpt)}")
+
+    # revised Gaussian-line (T, v) emulator (train_broadened2)
+    b2_model = b2_uni = None
+    b2ckpt = args.broadened2_ckpt or os.path.join(args.rundir, "broadened2",
+                                                  "broadened2.pt")
+    if os.path.exists(b2ckpt):
+        from spexai.train.train_broadened2 import load_broadened2
+        b2_model, b2_margs = load_broadened2(b2ckpt, data)
+        b2_model = b2_model.to(device)
+        b2_uni = edges_from_centers(b2_model.centers)
+        print(f"(T,v) emulator v2 uses {os.path.basename(b2ckpt)}")
 
     results = {}
     for v in args.velocities:
@@ -220,6 +234,23 @@ def main():
                 hybrid_model, temps.to(device), v, edges.to(device)).cpu()
             res["hybrid"] = {**accuracy(pred, ref, widths),
                              "t_ms": t_hyb * 1e3, "device": device}
+
+        # revised (T, v) emulator v2, end-to-end vs broadened truth
+        if b2_model is not None:
+            from scripts.benchmark_instruments import predict_broadened2_uniflux
+            t0 = time.time()
+            for _ in range(args.nrep):
+                pu = predict_broadened2_uniflux(b2_model, b2_margs,
+                                                temps[:1], v, device)
+            if device == "mps":
+                torch.mps.synchronize()
+            t_b2 = (time.time() - t0) / args.nrep
+            pu = predict_broadened2_uniflux(b2_model, b2_margs, temps, v,
+                                            device)
+            pred = rebin_flux(pu.to(device), b2_uni.to(device),
+                              edges.to(device)).cpu()
+            res["emulator_Tv2"] = {**accuracy(pred, ref, widths),
+                                   "t_ms": t_b2 * 1e3, "device": device}
 
         for m, r in res.items():
             print(f"  {m:12s} MRE={r['mre']:.4f} median={r['rel_median']:.5f} "
