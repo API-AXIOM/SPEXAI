@@ -263,9 +263,46 @@ head} with analytic width $\sigma_u = v/c$ and $T$-only amplitudes
 (broadening conserves line flux; the factorisation is structural),
 line-aware point sampling with offsets $\sim\mathcal{N}(0,\sigma(v'))$
 at random velocities, validation at $\{50,100,250,600,1000\}\kms$, and
-wing masking with a one-sided cap. Results pending at the time of
-writing. Independent of its outcome, the hybrid already establishes that
-broadening belongs \emph{outside} the network.
+wing masking with a one-sided cap. These fixes more than halved the
+error -- v2 reaches $0.46$--$0.77\%$ end-to-end MRE
+(Table~\ref{tab:broad2}) versus v1's $1.1$--$1.8\%$, a
+$\sim$2.4$\times$ improvement at every velocity, confirming that each
+diagnosed cause was real. But v2 remains $4$--$6\times$ worse than the
+hybrid ($0.11$--$0.13\%$) and is the slowest method of all (it evaluates
+the trunk on the full uniform grid plus the line deposits), so the
+revised option~2 is competent but not competitive.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+method & $100\kms$ & $300\kms$ & $1000\kms$ & note\\
+\midrule
+FFT (true input) & 0.03\% & 0.03\% & 0.06\% & accuracy ceiling\\
+\textbf{hybrid} & \textbf{0.13\%} & \textbf{0.11\%} & \textbf{0.12\%} &
+emulate $+$ analytic broaden\\
+emulator\_Tv2 (v2) & 0.49\% & 0.46\% & 0.77\% & monolithic, fixed\\
+sparse (true input) & 0.45\% & 0.30\% & 2.8\% & legacy production\\
+emulator\_Tv (v1) & 1.17\% & 1.06\% & 1.77\% & monolithic, original\\
+\bottomrule
+\end{tabular}
+\caption{End-to-end broadening MRE vs exact erf broadening. FFT and
+sparse take the true spectrum as input (isolating the broadening
+operation); the three emulator methods are end-to-end. The revised
+monolithic $(T,v)$ emulator (v2) more than halves v1's error but stays
+$4$--$6\times$ above the hybrid.}
+\label{tab:broad2}
+\end{table}
+
+The conclusion is therefore structural, not a training-quality
+artifact: even a well-executed monolithic $(T,v)$ emulator cannot beat
+the hybrid, because the hybrid performs the convolution \emph{exactly}
+(FFT plus analytic line deposit) while the monolith must \emph{learn}
+the broadened continuum shape. Broadening belongs \emph{outside} the
+network; the hybrid on the best unbroadened backbone is the deployment
+choice, and option~2 is settled as the losing branch -- retained here
+because v2 is the controlled demonstration that the $8\times$ v1 gap was
+structural.
 
 \section{Training-data experiments: active learning and augmentation}
 \label{sec:adaptive}
@@ -545,8 +582,8 @@ PCA(64)+GP baseline/generator & saturates at 0.2\%; 9--17\% at small
 $n$ & per-bin PCHIP\\
 Sparse-matrix broadening & 2.8\% MRE, 20\% flux misplaced at
 $1000\kms$ & FFT / hybrid\\
-Monolithic $(T,v)$ emulator (v1) & 2.6\% val MRE; $8\times$ worse than
-hybrid & hybrid; Gaussian-line v2 pending\\
+Monolithic $(T,v)$ emulator (v1, v2) & v1 $8\times$, v2 (fixed)
+$4$--$6\times$ worse than hybrid & hybrid (broaden outside the net)\\
 Line-head enlargement & 0.21\% vs 0.16\% (worse incl.\ line MRE) &
 trunk scaling (big\_trunk)\\
 Uniform batch sampling & 0.45\% vs 0.32\% (reweight) at $n=300$ &

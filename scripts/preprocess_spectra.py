@@ -29,6 +29,9 @@ def main():
     ap.add_argument("--emin", type=float, default=0.1)
     ap.add_argument("--emax", type=float, default=12.0)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--skip-bad", action="store_true",
+                    help="drop files whose grid does not match file 0 "
+                         "(empty/truncated spectra) instead of aborting")
     args = ap.parse_args()
 
     files = sorted(glob.glob(os.path.join(args.datadir, "Z*_*keV.txt")))
@@ -52,21 +55,48 @@ def main():
         dtype=np.float32, shape=(len(files), nbins))
 
     t0 = time.time()
+    w = 0            # write cursor: valid rows are packed at the front
+    bad = []
     for i, f in enumerate(files):
         d = pd.read_csv(f, sep=r"\s+", names=["e", "f"], engine="c",
                         dtype=np.float64, skiprows=lo, nrows=nbins)
-        logflux[i] = d["f"].values
+        vals = d["f"].values
+        if len(vals) != nbins:
+            # empty or truncated spectrum: its grid does not match file 0
+            bad.append((os.path.basename(f), len(vals)))
+            continue
+        logflux[w] = vals
+        temps[w] = temps[i]
+        w += 1
         if (i + 1) % 1000 == 0:
             print(f"  {i+1}/{len(files)}  ({time.time()-t0:.0f}s)", flush=True)
     logflux.flush()
 
+    if bad:
+        preview = ", ".join(f"{n}({r} rows)" for n, r in bad[:6])
+        msg = (f"{len(bad)} file(s) do not match the {nbins}-bin grid of "
+               f"{os.path.basename(files[0])}: {preview}"
+               f"{' ...' if len(bad) > 6 else ''}")
+        if not args.skip_bad:
+            raise SystemExit(
+                "ERROR: " + msg + "\n  These are empty/truncated spectra. "
+                "Regenerate them, or rerun with --skip-bad to drop them.")
+        print(f"WARNING: dropping {len(bad)} bad file(s): {preview}", flush=True)
+
+    # keep only the valid rows (packed at the front)
+    temps = temps[:w]
+    if w != len(files):
+        keep = np.array(logflux[:w])                 # w x nbins into RAM
+        np.save(os.path.join(args.outdir, "logflux.npy"), keep)
     np.save(os.path.join(args.outdir, "energy.npy"), energy)
     np.save(os.path.join(args.outdir, "temps.npy"), temps)
 
     # 81/9/10 split as in Ricketts et al.: 90/10 train/test, train split 90/10 again
+    # (over the valid spectra only, after any bad files were dropped)
+    nspec = len(temps)
     rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(len(files))
-    ntest = int(round(0.1 * len(files)))
+    perm = rng.permutation(nspec)
+    ntest = int(round(0.1 * nspec))
     test = perm[:ntest]
     rest = perm[ntest:]
     nval = int(round(0.1 * len(rest)))
