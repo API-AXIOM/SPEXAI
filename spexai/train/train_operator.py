@@ -222,7 +222,8 @@ def make_variant(variant, data, args):
         # line head on, Sobolev off (handled by use_sobolev in train());
         # trend head and per-bin normalisation switchable for the
         # hyperparameter search
-        combo=dict(use_linehead=True,
+        combo=dict(use_linehead=str(getattr(args, "use_linehead", "auto"))
+                   != "off",
                    use_trend=bool(getattr(args, "use_trend", 1)),
                    use_binnorm=bool(getattr(args, "use_binnorm", 0))),
     )[variant]
@@ -230,8 +231,20 @@ def make_variant(variant, data, args):
     if flags.get("use_linehead"):
         line_ids = find_line_bins(data)
         n_lines = int((line_ids >= 0).sum())
-        print(f"line head: {n_lines} line bins "
-              f"({100.0 * n_lines / data.n_bins:.1f}% of grid)", flush=True)
+        # a fully ionised element (e.g. H over 0.5-20 keV) has no lines;
+        # the line head would be useless and cannot build a 0-line
+        # embedding, so auto-disable it and train a trunk-only continuum
+        # model. Same model class, different config.
+        lh_mode = str(getattr(args, "use_linehead", "auto"))
+        min_lb = getattr(args, "min_line_bins", 32)
+        if lh_mode == "auto" and n_lines < min_lb:
+            print(f"line head auto-disabled: {n_lines} line bins < {min_lb} "
+                  f"-> trunk-only continuum model", flush=True)
+            flags = {**flags, "use_linehead": False}
+            line_ids = None
+        else:
+            print(f"line head: {n_lines} line bins "
+                  f"({100.0 * n_lines / data.n_bins:.1f}% of grid)", flush=True)
     bin_stats = None
     if flags.get("use_binnorm"):
         lf = torch.clamp(data.logflux[data.train_idx], min=FLOOR)

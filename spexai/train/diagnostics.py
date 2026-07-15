@@ -109,6 +109,9 @@ def plot_spectra(model, data, outdir, tag, device="cpu", n_lines=3,
     energy = data.energy
     e_np = energy.numpy()
     lb_all = torch.nonzero(find_line_bins(data) >= 0).squeeze(-1).numpy()
+    # pure-continuum elements (e.g. H) have no line bins; fall back to the
+    # brightest bins so the zoom panels still show continuum detail
+    zoom_lines = lb_all.size >= n_lines
 
     idx = data.test_idx.numpy()
     order = idx[np.argsort(data.temps.numpy()[idx])]
@@ -122,8 +125,10 @@ def plot_spectra(model, data, outdir, tag, device="cpu", n_lines=3,
         resid = 100.0 * (10.0 ** np.clip(pred - np.clip(truth, FLOOR, None),
                                          -4, 4) - 1.0)
 
-        # three bright lines for this spectrum, seeded
-        bright = lb_all[np.argsort(truth[lb_all])[-300:]]
+        # three bright features for this spectrum, seeded: lines if the
+        # element has them, else the brightest continuum bins
+        pool = lb_all if zoom_lines else np.nonzero(truth > FLOOR)[0]
+        bright = pool[np.argsort(truth[pool])[-300:]]
         lines = np.sort(rng.choice(bright, size=min(n_lines, len(bright)),
                                    replace=False))
 
@@ -156,7 +161,8 @@ def plot_spectra(model, data, outdir, tag, device="cpu", n_lines=3,
                      color=INK, lw=1.6)
             axp.plot(e_np[lo:hi], np.clip(pred[lo:hi], FLOOR, None),
                      color=EMU, lw=1.2, ls="--")
-            axp.set_title(f"line at {e_np[j]:.4f} keV", fontsize=9,
+            axp.set_title(f"{'line' if zoom_lines else 'detail'} at "
+                          f"{e_np[j]:.4f} keV", fontsize=9,
                           color=INK2)
             axp.tick_params(labelsize=8, labelbottom=False)
             v = valid[lo:hi]

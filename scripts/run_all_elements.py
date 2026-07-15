@@ -104,7 +104,10 @@ def main():
         cache = os.path.join(args.dataroot, "processed", f"element{z}")
         outdir = os.path.join(args.runroot, f"element{z}", "tier1")
         eldir = os.path.dirname(outdir)
-        os.makedirs(eldir, exist_ok=True)
+        # create every output dir up front so no step depends on a
+        # hand-made folder (outdir also creates its eldir parent)
+        os.makedirs(outdir, exist_ok=True)
+        os.makedirs(cache, exist_ok=True)
         log = os.path.join(eldir, "pipeline.log")
         t0 = time.time()
         print(f"=== element {z}", flush=True)
@@ -116,7 +119,10 @@ def main():
                 summarize(args.runroot, args.elements)
                 continue
             print("  preprocessing ...", flush=True)
-            if run([py, "scripts/preprocess_spectra.py",
+            # --skip-bad: scattered SPEX generation failures (~1% per
+            # element) should not abort an unattended sweep; the count of
+            # dropped files is recorded in the element's pipeline.log
+            if run([py, "scripts/preprocess_spectra.py", "--skip-bad",
                     "--datadir", raw, "--outdir", cache], log):
                 print("  PREPROCESS FAILED (see pipeline.log)", flush=True)
                 summarize(args.runroot, args.elements)

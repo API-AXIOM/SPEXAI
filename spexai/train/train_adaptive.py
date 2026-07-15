@@ -371,6 +371,12 @@ def build_parser():
                     help="wsd = warmup-stable-decay: flat LR, linear decay "
                          "over the last --wsd_decay_frac of the run")
     ap.add_argument("--wsd_decay_frac", type=float, default=0.15)
+    ap.add_argument("--use_linehead", default="auto",
+                    choices=["auto", "on", "off"],
+                    help="line head: 'off' for pure-continuum elements "
+                         "(e.g. H); 'auto' disables it below --min_line_bins")
+    ap.add_argument("--min_line_bins", type=int, default=32,
+                    help="auto mode: fewer line bins than this -> no line head")
     ap.add_argument("--use_trend", type=int, default=1)
     ap.add_argument("--use_binnorm", type=int, default=1)
     ap.add_argument("--w_log", type=float, default=0.1)
