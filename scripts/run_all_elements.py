@@ -38,11 +38,43 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 
-# Tier-1 recipe; --train_flags appends/overrides
+# Tier-1 recipe; --train_flags and the size preset append/override
 TRAIN_FLAGS = ["--mode", "reweight", "--n_train", "0", "--pr_mix", "0.4",
                "--schedule", "wsd", "--steps", "100000",
                "--eval_every", "2000", "--tag", "reweight_full"]
+
+# --size auto presets, keyed to spectral complexity. Elements with edges
+# but no lines KEEP a high n_freqs (edges are sharp, high-frequency
+# content) while shrinking the trunk; only truly smooth elements (H, He,
+# whose recombination edges lie below the band) drop n_freqs. Step count
+# is NOT set here: --steps in TRAIN_FLAGS is only an upper bound, and
+# early stopping (on by default in train_adaptive) ends each element when
+# its validation MRE plateaus -- so easy elements finish early on their
+# own without a hand-tuned budget.
+SIZE_PRESETS = {
+    "standard": ["--hidden", "384", "--layers", "5", "--n_freqs", "512",
+                 "--use_linehead", "auto"],
+    "edged":    ["--hidden", "192", "--layers", "4", "--n_freqs", "384",
+                 "--use_linehead", "off"],
+    "smooth":   ["--hidden", "128", "--layers", "3", "--n_freqs", "128",
+                 "--use_linehead", "off"],
+}
+
+
+def classify_size(cache, min_line_bins=32):
+    """Pick a size preset from the element's spectral complexity: lines ->
+    standard; edges but no lines -> edged (keep n_freqs high); neither ->
+    smooth."""
+    from spexai.train.train_operator import (SpectrumData, find_edge_bins,
+                                             find_line_bins)
+    data = SpectrumData(cache)
+    n_lines = int((find_line_bins(data) >= 0).sum())
+    n_edges = int(len(find_edge_bins(data)))
+    name = ("standard" if n_lines >= min_line_bins
+            else "edged" if n_edges > 0 else "smooth")
+    return name, n_lines, n_edges
 
 
 def run(cmd, log, cwd=REPO):
@@ -89,9 +121,13 @@ def main():
     ap.add_argument("--runroot", required=True)
     ap.add_argument("--elements", nargs="+", type=int,
                     default=list(range(1, 31)))
+    ap.add_argument("--size", default="auto", choices=["auto", "fixed"],
+                    help="auto: pick model size per element from spectral "
+                         "complexity (smooth/edged/standard); fixed: use the "
+                         "same TRAIN_FLAGS (plus --train_flags) for all")
     ap.add_argument("--train_flags", default="",
-                    help="extra flags appended to the training command, "
-                         'e.g. "--steps 200000 --line_t_freqs 32"')
+                    help="extra flags appended to the training command "
+                         "(override the preset), e.g. \"--steps 200000\"")
     ap.add_argument("--baseline_methods", nargs="+",
                     default=["linear", "pchip"])
     args = ap.parse_args()
@@ -131,9 +167,15 @@ def main():
         # 2. train
         if not os.path.exists(os.path.join(outdir,
                                            "reweight_full_history.json")):
+            preset = []
+            if args.size == "auto":
+                name, nl, ne = classify_size(cache)
+                preset = SIZE_PRESETS[name]
+                print(f"  size={name} ({nl} lines, {ne} edges)", flush=True)
             print("  training ...", flush=True)
+            # preset overrides TRAIN_FLAGS; user --train_flags overrides both
             cmd = [py, "-m", "spexai.train.train_adaptive",
-                   *TRAIN_FLAGS, *args.train_flags.split(),
+                   *TRAIN_FLAGS, *preset, *args.train_flags.split(),
                    "--cachedir", cache, "--outdir", outdir]
             if run(cmd, log):
                 print("  TRAINING FAILED (see pipeline.log)", flush=True)

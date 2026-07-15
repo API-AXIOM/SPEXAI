@@ -39,7 +39,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # base flags shared by every arm (t04 architecture, full grid, screening)
 BASE = ["--mode", "reweight", "--n_train", "0",
         "--hidden", "384", "--layers", "5", "--n_freqs", "512",
-        "--f_max", "4000", "--lr", "3e-3", "--diag_plots", "0"]
+        "--f_max", "4000", "--lr", "3e-3", "--diag_plots", "0",
+        "--early_stop_patience", "0"]  # fixed budget: arms must be comparable
 
 
 def arms(steps, eval_every):

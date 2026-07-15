@@ -255,13 +255,30 @@ nohup python scripts/run_all_elements.py \
   cross-element table is rebuilt after every element at
   `<runroot>/elements_summary.{json,md}`.
 - A failing element is recorded in the summary and skipped (check its
-  `pipeline.log`); very low-Z elements may need attention if they lack
-  enough line bins for the line head.
-- When a Tier-2 config wins, update `TRAIN_FLAGS` in the script or pass
-  e.g. `--train_flags "--line_dim 48 --line_hidden 256 --line_t_freqs 32"`.
-- At ~7 h/element on the A100 the full sweep is on the order of 9 days;
-  use `--elements 8 14 26 ...` to prioritise, or `--train_flags
-  "--steps 20000"` for a first faster pass over all elements.
+  `pipeline.log`).
+- **Per-element sizing (`--size auto`, default).** Each element is probed
+  for spectral complexity and given an *architecture* preset: `standard`
+  (has lines -> full t04 model + line head), `edged` (no lines but in-band
+  recombination edges, e.g. Li/Be/B -> smaller trunk but **n_freqs kept
+  at 384**, since edges are sharp high-frequency features; line head off),
+  or `smooth` (H/He, edges below band -> small trunk, n_freqs 128, line
+  head off). `--size fixed` uses one config for all.
+- **Early stopping governs the step count** (not the preset). `--steps`
+  (100k) is only an upper bound; training monitors the smoothed
+  validation MRE and, once it plateaus, triggers the WSD decay early and
+  finishes. So each element runs exactly as long as it needs -- H stops
+  itself in ~25k steps, iron runs longer -- with no hand-tuned budgets.
+  The log line reports both `yield1%` and `yield0.1%`; checkpoints are
+  selected on lowest val MRE.
+- **Edge-aware training** is automatic: recombination edges are detected
+  empirically (`find_edge_bins`) and ~15% of loss points are drawn from
+  edge regions so the sharp RRC steps are supervised. Off for edge-free
+  elements. Every run also writes `<tag>_edges.png` (each edge shown at
+  its own peak temperature) and logs the edge/overall MRE ratio.
+- When a Tier-2 config wins, update `SIZE_PRESETS["standard"]` in the
+  script or pass `--train_flags "..."` (overrides the preset).
+- Early stopping + auto sizing make the sweep much cheaper than a uniform
+  100k-step pass. Use `--elements 8 14 26 ...` to prioritise.
 
 ## 3h. Training-recipe screening program
 

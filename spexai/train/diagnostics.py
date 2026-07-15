@@ -181,9 +181,114 @@ def plot_spectra(model, data, outdir, tag, device="cpu", n_lines=3,
         print(f"saved {out}", flush=True)
 
 
+@torch.no_grad()
+def edge_diagnostics(model, data, outdir, tag, device="cpu", radius=6,
+                     max_panels=8, window=40):
+    """Recombination-edge fidelity. Each edge is temperature-dependent (it
+    is present only where its recombining ion is abundant), so every edge
+    is shown at ITS OWN peak temperature and the fidelity metric is
+    measured there, not at one global temperature. Writes <tag>_edges.png
+    (per-edge zoom + residual) and returns the ratio of edge-region MRE
+    (at peak T) to the model's overall test MRE. No-op for edge-free
+    elements (H/He)."""
+    from spexai.train.train_operator import (FLOOR, LINE_THRESHOLD_DEX,
+                                             continuum_estimate, evaluate,
+                                             find_edge_bins)
+    edges = find_edge_bins(data)
+    if len(edges) == 0:
+        return None
+    energy, e_np = data.energy, data.energy.numpy()
+
+    # per-edge peak temperature: where its continuum step is strongest,
+    # over a temperature-ordered sample of the training spectra
+    tr = data.train_idx.numpy()
+    tr = tr[np.argsort(data.temps.numpy()[tr])]
+    samp = tr[np.linspace(0, len(tr) - 1, min(256, len(tr))).astype(int)]
+    lf = data.logflux[torch.from_numpy(samp)].numpy()
+    cont = continuum_estimate(lf)
+    dl = np.where((np.clip(lf, FLOOR, None) - cont > LINE_THRESHOLD_DEX)
+                  | (lf <= FLOOR), cont, lf)
+    peak_row, strength = [], []
+    for b in edges.tolist():
+        below = dl[:, max(0, b - window):b].mean(1)
+        above = dl[:, b:b + window].mean(1)
+        j = int(np.argmax(above - below))
+        peak_row.append(int(samp[j]))
+        strength.append(float((above - below)[j]))
+    peak_row, strength = np.array(peak_row), np.array(strength)
+
+    def predict_window(temp, lo, hi):
+        return model(temp.view(1).to(device), energy[lo:hi].to(device),
+                     bins=torch.arange(lo, hi, device=device)
+                     ).squeeze(0).cpu().numpy()
+
+    # metric: mean relative error in each edge neighbourhood AT its peak T,
+    # relative to the model's overall test MRE
+    eps_edge = []
+    for b, row in zip(edges.tolist(), peak_row):
+        lo, hi = max(0, b - radius), min(data.n_bins, b + radius + 1)
+        truth = data.logflux[row].numpy()[lo:hi]
+        pred = predict_window(data.temps[row], lo, hi)
+        v = truth > FLOOR
+        if v.any():
+            eps_edge.append(np.abs(
+                10.0 ** np.clip(pred[v] - truth[v], -4, 4) - 1.0).mean())
+    edge_mre = float(np.mean(eps_edge)) if eps_edge else float("nan")
+    overall = evaluate(model, data, data.test_idx, device)["mre_mean"]
+    ratio = edge_mre / max(overall, 1e-9)
+
+    # panels: strongest edges, each at its own peak temperature
+    pick = np.argsort(strength)[::-1][:max_panels]
+    pick = pick[np.argsort(edges.numpy()[pick])]     # left-to-right in energy
+    ncol = min(4, len(pick))
+    nrow = int(np.ceil(len(pick) / ncol))
+    fig = plt.figure(figsize=(3.0 * ncol, 2.7 * nrow), facecolor=SURFACE)
+    gs = fig.add_gridspec(nrow * 2, ncol, height_ratios=[0.8, 0.5] * nrow,
+                          hspace=0.55, wspace=0.32)
+    zb = 5 * radius
+    for k, idx in enumerate(pick):
+        b, row = int(edges[idx]), int(peak_row[idx])
+        Te = float(data.temps[row])
+        rr, cc = divmod(k, ncol)
+        axp = fig.add_subplot(gs[rr * 2, cc])
+        axz = fig.add_subplot(gs[rr * 2 + 1, cc], sharex=axp)
+        lo, hi = max(0, b - zb), min(len(e_np), b + zb)
+        truth = data.logflux[row].numpy()[lo:hi]
+        pred = predict_window(data.temps[row], lo, hi)
+        axp.plot(e_np[lo:hi], np.clip(truth, FLOOR, None), color=INK, lw=1.6,
+                 label="SPEX")
+        axp.plot(e_np[lo:hi], np.clip(pred, FLOOR, None), color=EMU, lw=1.2,
+                 ls="--", label="emulator")
+        axp.axvline(e_np[b], color=RESID, lw=0.7, ls=":")
+        axp.set_title(f"{e_np[b]:.3f} keV · peak T={Te:.2f} keV",
+                      fontsize=8.5, color=INK2)
+        axp.tick_params(labelsize=7.5, labelbottom=False)
+        v = truth > FLOOR
+        resid = 100.0 * (10.0 ** np.clip(pred[v] - truth[v], -4, 4) - 1.0)
+        axz.plot(e_np[lo:hi][v], resid, color=RESID, lw=1.0)
+        axz.axhline(0.0, color=INK2, lw=0.6, ls=":")
+        axz.tick_params(labelsize=7.5)
+        if cc == 0:
+            axp.set_ylabel("log10 f", fontsize=8)
+            axz.set_ylabel("resid %", fontsize=8)
+        if k == 0:
+            axp.legend(loc="upper left", fontsize=7, frameon=False)
+    fig.suptitle(f"{tag}: recombination edges (each at its peak T) · "
+                 f"edge/overall MRE = {ratio:.1f}×", x=0.01, ha="left",
+                 fontsize=11, color=INK)
+    _style(fig)
+    out = os.path.join(outdir, f"{tag}_edges.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved {out}  (edge/overall MRE at peak T = {ratio:.2f})",
+          flush=True)
+    return {"edge_mre": edge_mre, "overall_mre": overall, "ratio": ratio,
+            "n_edges": int(len(edges))}
+
+
 def run_diagnostics(model, data, history, outdir, tag, device="cpu",
                     spectra=True):
-    """Standard end-of-run bundle: history curves + spectrum figures."""
+    """Standard end-of-run bundle: history curves + spectrum + edge figures."""
     figdir = os.path.join(outdir, "figures")
     os.makedirs(figdir, exist_ok=True)
     if history:
@@ -191,3 +296,4 @@ def run_diagnostics(model, data, history, outdir, tag, device="cpu",
         print(f"saved {figdir}/{tag}_history.png", flush=True)
     if spectra:
         plot_spectra(model, data, figdir, tag, device=device)
+        edge_diagnostics(model, data, figdir, tag, device=device)

@@ -40,7 +40,8 @@ import torch
 import torch.nn.functional as F
 
 from spexai.train.train_operator import (FLOOR, SpectrumData, evaluate,
-                                         make_variant, relative_error_loss)
+                                         find_edge_bins, make_variant,
+                                         relative_error_loss)
 
 
 def loo_interpolation_error(lt, Y, chunk=512):
@@ -129,6 +130,10 @@ def train(args):
     # muon drives 2-D matrices with an AdamW companion for the rest.
     warmup = max(1, int(0.02 * args.steps))
     decay_start = int((1.0 - args.wsd_decay_frac) * args.steps)
+    decay_len = max(1, args.steps - decay_start)
+    # early stopping may move the WSD decay earlier; `sched_state` lets the
+    # LR schedule read a decay start chosen at run time
+    sched_state = {"decay_from": None}
     is_sf = args.optimizer == "schedulefree"
     aux_opt = None
     if args.optimizer == "adamw":
@@ -159,9 +164,11 @@ def train(args):
         if step < warmup:
             return step / warmup
         if args.schedule == "wsd":
-            if step < decay_start:
+            ds = (sched_state["decay_from"] if sched_state["decay_from"]
+                  is not None else decay_start)
+            if step < ds:
                 return 1.0
-            p = (step - decay_start) / max(1, args.steps - decay_start)
+            p = min(1.0, (step - ds) / decay_len)
             return max(args.lr_min_frac, 1.0 - p * (1.0 - args.lr_min_frac))
         p = (step - warmup) / max(1, args.steps - warmup)
         return max(args.lr_min_frac, 0.5 * (1 + math.cos(math.pi * p)))
@@ -178,14 +185,29 @@ def train(args):
         wema = EMAWeights(model, args.ema_decay)
     train_sub = grid[torch.linspace(0, n_grid - 1, min(384, n_grid)).long()]
 
+    # edge-aware point sampling: force supervision on recombination-edge
+    # bins (empty for edge-free elements like H/He -> plain sampling)
+    edge_pool = torch.empty(0, dtype=torch.long)
+    if args.use_edges != "off" and args.edge_frac > 0:
+        core = find_edge_bins(data)
+        if len(core):
+            r = args.edge_radius
+            edge_pool = torch.unique(torch.clamp(
+                core[:, None] + torch.arange(-r, r + 1), 0, data.n_bins - 1))
+            print(f"edge-aware sampling: {len(core)} edges, "
+                  f"{len(edge_pool)} bins supervised", flush=True)
+
     # running per-grid-point error estimate (optimistic init -> coverage)
     ema = torch.full((n_grid,), args.ema_init)
     prioritize = args.mode in ("reweight", "adaptive")
 
     os.makedirs(args.outdir, exist_ok=True)
     tag = args.tag or args.mode
-    best = {"val_yield_1pct": -1.0}
+    best = {"val_mre_mean": float("inf")}   # checkpoint on lowest val MRE
     history, acquired = [], []
+    # early stopping on a smoothed validation-MRE plateau
+    stop_at = args.steps
+    mre_hist, best_smoothed, no_improve = [], float("inf"), 0
     t0 = time.time()
 
     for step in range(1, args.steps + 1):
@@ -237,7 +259,13 @@ def train(args):
             target = torch.cat([target, pool_flux[sidx]])
             temps = torch.cat([temps, pool_temps[sidx]])
 
-        pts, _ = torch.sort(torch.randperm(data.n_bins)[:args.points])
+        n_edge = int(args.edge_frac * args.points) if len(edge_pool) else 0
+        rand_pts = torch.randperm(data.n_bins)[:args.points - n_edge]
+        if n_edge:
+            ep = edge_pool[torch.randint(len(edge_pool), (n_edge,))]
+            pts = torch.sort(torch.unique(torch.cat([rand_pts, ep]))).values
+        else:
+            pts, _ = torch.sort(rand_pts)
         target = target[:, pts].to(device)
         alpha = min(1.0, step / (args.curriculum_frac * args.steps))
         tnorm = model.norm_temp(temps.to(device)).view(-1, 1)
@@ -287,20 +315,46 @@ def train(args):
                    "train_mre_mean": trn["mre_mean"],
                    **{f"val_{k}": v for k, v in val.items()}}
             history.append(rec)
-            print(f"[{args.mode}] step {step}/{args.steps} "
+            print(f"[{args.mode}] step {step}/{stop_at} "
                   f"loss={rec['loss']:.4f} val MRE={val['mre_mean']:.4f} "
-                  f"yield1%={val['yield_1pct']:.2f} pool={len(pool_flux)} "
-                  f"({rec['elapsed_s']:.0f}s)", flush=True)
-            if val["yield_1pct"] >= best["val_yield_1pct"]:
+                  f"yield1%={val['yield_1pct']:.1f} "
+                  f"yield0.1%={val['yield_01pct']:.1f} "
+                  f"pool={len(pool_flux)} ({rec['elapsed_s']:.0f}s)", flush=True)
+            # checkpoint the lowest val MRE (post-decay evals win naturally)
+            if val["mre_mean"] <= best["val_mre_mean"]:
                 best = {"step": step,
                         **{f"val_{k}": v for k, v in val.items()}}
                 torch.save({"state_dict": model.state_dict(),
                             "variant": "combo", "args": vars(args)},
                            os.path.join(args.outdir, f"{tag}.pt"))
+            # early stopping: trigger the WSD decay (or hard-stop) once the
+            # smoothed val MRE has plateaued in the stable phase
+            mre_hist.append(val["mre_mean"])
+            smoothed = float(np.mean(mre_hist[-args.mre_smooth:]))
+            if (args.early_stop_patience and sched_state["decay_from"] is None
+                    and step < decay_start):
+                if smoothed < best_smoothed * (1 - args.early_stop_rel):
+                    best_smoothed, no_improve = smoothed, 0
+                else:
+                    no_improve += 1
+                if no_improve >= args.early_stop_patience:
+                    if args.schedule == "wsd":
+                        sched_state["decay_from"] = step
+                        stop_at = min(args.steps, step + decay_len)
+                        print(f"[{args.mode}] early stop: smoothed MRE "
+                              f"plateaued at step {step}; decaying, will "
+                              f"finish at {stop_at}", flush=True)
+                    else:
+                        stop_at = step
+                        print(f"[{args.mode}] early stop at step {step} "
+                              f"(smoothed MRE plateaued)", flush=True)
             if wema is not None:
                 wema.swap_out(model)
             if is_sf:
                 opt.train()  # restore the training iterate
+
+        if step >= stop_at:
+            break
 
     if is_sf:
         opt.eval()  # leave the model holding the averaged weights
@@ -314,9 +368,11 @@ def train(args):
                    "gate_rejected_intervals": rejected,
                    "loo_median": float(np.median(loo)),
                    "args": vars(args)}, f, indent=2)
-    print(f"[{args.mode}] done in {(time.time()-t0)/60:.1f} min; best "
-          f"val yield1%={best['val_yield_1pct']:.2f} "
-          f"(synthetic spectra generated: {len(acquired)})", flush=True)
+    print(f"[{args.mode}] done in {(time.time()-t0)/60:.1f} min at step "
+          f"{history[-1]['step'] if history else 0}; best val MRE="
+          f"{best['val_mre_mean']:.4f} yield1%={best.get('val_yield_1pct', 0):.1f} "
+          f"yield0.1%={best.get('val_yield_01pct', 0):.1f} "
+          f"(synthetic spectra: {len(acquired)})", flush=True)
     if args.diag_plots:
         from spexai.train.diagnostics import run_diagnostics
         ckpt = torch.load(os.path.join(args.outdir, f"{tag}.pt"),
@@ -371,12 +427,28 @@ def build_parser():
                     help="wsd = warmup-stable-decay: flat LR, linear decay "
                          "over the last --wsd_decay_frac of the run")
     ap.add_argument("--wsd_decay_frac", type=float, default=0.15)
+    ap.add_argument("--early_stop_patience", type=int, default=5,
+                    help="evals with no smoothed-MRE improvement before "
+                         "triggering the decay (wsd) or a hard stop; 0 = off. "
+                         "--steps is then just an upper bound.")
+    ap.add_argument("--early_stop_rel", type=float, default=0.02,
+                    help="relative val-MRE improvement needed to reset "
+                         "early-stop patience")
+    ap.add_argument("--mre_smooth", type=int, default=3,
+                    help="evals averaged for the early-stop MRE signal")
     ap.add_argument("--use_linehead", default="auto",
                     choices=["auto", "on", "off"],
                     help="line head: 'off' for pure-continuum elements "
                          "(e.g. H); 'auto' disables it below --min_line_bins")
     ap.add_argument("--min_line_bins", type=int, default=32,
                     help="auto mode: fewer line bins than this -> no line head")
+    ap.add_argument("--use_edges", default="auto", choices=["auto", "off"],
+                    help="edge-aware sampling on detected recombination "
+                         "edges (auto = on when any edge is found)")
+    ap.add_argument("--edge_frac", type=float, default=0.15,
+                    help="fraction of loss points drawn from edge regions")
+    ap.add_argument("--edge_radius", type=int, default=4,
+                    help="bins each side of an edge to supervise")
     ap.add_argument("--use_trend", type=int, default=1)
     ap.add_argument("--use_binnorm", type=int, default=1)
     ap.add_argument("--w_log", type=float, default=0.1)

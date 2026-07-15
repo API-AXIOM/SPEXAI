@@ -72,6 +72,61 @@ def find_line_bins(data, n_sample=256):
     return line_ids
 
 
+# hydrogenic ionisation potential: the H-like recombination edge sits here
+EDGE_RYD_KEV = 0.0136057  # 1 Rydberg in keV; I(H-like) = EDGE_RYD_KEV * Z^2
+
+
+def edge_element_guess(energy_kev):
+    """Nearest element whose H-like recombination edge (13.6 Z^2 eV) lies at
+    this energy; a label for diagnostics, not a physical identification."""
+    return int(round((float(energy_kev) / EDGE_RYD_KEV) ** 0.5))
+
+
+def find_edge_bins(data, n_sample=256, window=40, jump_dex=0.25,
+                   min_count=8, min_gap=30):
+    """Empirically locate radiative-recombination edges: sharp, persistent
+    upward steps in the line-removed continuum (flux jumps up at an ion's
+    ionisation threshold and decays above it). Detected from a
+    temperature-ordered sample -- an edge appears only where its recombining
+    ion is abundant, so we union over temperature. Deterministic given the
+    cache. Returns a sorted LongTensor of edge bin indices (empty for
+    elements whose edges lie outside the band, e.g. H, He)."""
+    idx = data.train_idx.numpy()
+    idx = idx[np.argsort(data.temps.numpy()[idx])]
+    sel = idx[np.linspace(0, len(idx) - 1, min(n_sample, len(idx))).astype(int)]
+    lf = data.logflux[torch.from_numpy(sel)].numpy()
+    cont = continuum_estimate(lf)
+    # de-line: replace line / empty bins with the smooth continuum so only
+    # genuine continuum steps (edges) survive
+    line = np.clip(lf, FLOOR, None) - cont > LINE_THRESHOLD_DEX
+    d = np.where(line | (lf <= FLOOR), cont, lf).astype(np.float64)
+    S, N = d.shape
+    if N < 2 * window + 2:
+        return torch.empty(0, dtype=torch.long)
+    # windowed-mean step at each boundary: mean of the `window` bins above
+    # minus the `window` bins below. Smooth bremsstrahlung falls with energy
+    # (step < 0); an edge is a strongly positive step.
+    csum = np.zeros((S, N + 1))
+    np.cumsum(d, axis=1, out=csum[:, 1:])
+    i = np.arange(window, N - window)
+    below = (csum[:, i] - csum[:, i - window]) / window
+    above = (csum[:, i + window] - csum[:, i]) / window
+    step = above - below
+    count = (step > jump_dex).sum(axis=0)
+    strength = step.max(axis=0)
+    cand = np.where(count >= min_count)[0]
+    if len(cand) == 0:
+        return torch.empty(0, dtype=torch.long)
+    # cluster adjacent candidates; keep the strongest boundary per cluster
+    edges, start = [], 0
+    for j in range(1, len(cand) + 1):
+        if j == len(cand) or i[cand[j]] - i[cand[j - 1]] > min_gap:
+            grp = cand[start:j]
+            edges.append(int(i[grp[np.argmax(strength[grp])]]))
+            start = j
+    return torch.tensor(sorted(set(edges)), dtype=torch.long)
+
+
 # ---------------------------------------------------------------------------
 # data
 # ---------------------------------------------------------------------------
@@ -365,8 +420,8 @@ def train(args):
                    **{f"val_{k}": v for k, v in val.items()}}
             history.append(rec)
             print(f"[{args.variant}] step {step}/{args.steps} loss={rec['loss']:.4f} "
-                  f"val MRE={val['mre_mean']:.4f} yield1%={val['yield_1pct']:.2f} "
-                  f"yield10%={val['yield_10pct']:.2f} ({rec['elapsed_s']:.0f}s)",
+                  f"val MRE={val['mre_mean']:.4f} yield1%={val['yield_1pct']:.1f} "
+                  f"yield0.1%={val['yield_01pct']:.1f} ({rec['elapsed_s']:.0f}s)",
                   flush=True)
             if val["yield_1pct"] >= best["val_yield_1pct"]:
                 best = {"step": step, **{f"val_{k}": v for k, v in val.items()},
