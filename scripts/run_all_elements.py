@@ -54,27 +54,55 @@ TRAIN_FLAGS = ["--mode", "reweight", "--n_train", "0", "--pr_mix", "0.4",
 # its validation MRE plateaus -- so easy elements finish early on their
 # own without a hand-tuned budget.
 SIZE_PRESETS = {
-    "standard": ["--hidden", "384", "--layers", "5", "--n_freqs", "512",
-                 "--use_linehead", "auto"],
-    "edged":    ["--hidden", "192", "--layers", "4", "--n_freqs", "384",
-                 "--use_linehead", "off"],
-    "smooth":   ["--hidden", "128", "--layers", "3", "--n_freqs", "128",
-                 "--use_linehead", "off"],
+    "standard":     ["--hidden", "384", "--layers", "5", "--n_freqs", "512",
+                     "--use_linehead", "auto"],
+    # floor-dominated spectra with a few sharp lines (Li/Be/B): the signal is
+    # ENTIRELY in a handful of high-frequency line bins, so keep the line head
+    # ON and place most of the point loss on the signal bins (see the
+    # signal_frac discriminator below). Trunk stays small -- there is little
+    # continuum to fit -- but n_freqs stays high for the sharp lines.
+    "sparse_lines": ["--hidden", "192", "--layers", "4", "--n_freqs", "512",
+                     "--use_linehead", "on", "--signal_frac", "0.5"],
+    "edged":        ["--hidden", "192", "--layers", "4", "--n_freqs", "384",
+                     "--use_linehead", "off"],
+    "smooth":       ["--hidden", "128", "--layers", "3", "--n_freqs", "128",
+                     "--use_linehead", "off"],
 }
 
 
-def classify_size(cache, min_line_bins=32):
-    """Pick a size preset from the element's spectral complexity: lines ->
-    standard; edges but no lines -> edged (keep n_freqs high); neither ->
-    smooth."""
-    from spexai.train.train_operator import (SpectrumData, find_edge_bins,
-                                             find_line_bins)
+def classify_size(cache, min_line_bins=32, sparse_signal_frac=0.05):
+    """Pick a size preset from the element's spectral complexity.
+
+    Routing keys on line count AND signal density (fraction of bins ever
+    above the floor), because line count alone cannot tell a broad smooth
+    continuum (He: few/no line bins, easy) from a floor-dominated spectrum
+    with a few sharp lines (Be: few line bins, but the signal is ENTIRELY
+    in them -- the hardest case). Order: rich line spectrum -> standard;
+    sparse lines on a mostly-floor spectrum -> sparse_lines (line head on,
+    signal-weighted sampling); edges but no lines -> edged; otherwise the
+    genuinely smooth continua -> smooth."""
+    import numpy as np
+    import torch
+    from spexai.train.train_operator import (FLOOR, SpectrumData,
+                                             find_edge_bins, find_line_bins)
     data = SpectrumData(cache)
     n_lines = int((find_line_bins(data) >= 0).sum())
     n_edges = int(len(find_edge_bins(data)))
-    name = ("standard" if n_lines >= min_line_bins
-            else "edged" if n_edges > 0 else "smooth")
-    return name, n_lines, n_edges
+    # signal density: fraction of bins ever above floor over a T-ordered sample
+    idx = data.train_idx.numpy()
+    idx = idx[np.argsort(data.temps.numpy()[idx])]
+    sel = idx[np.linspace(0, len(idx) - 1, min(256, len(idx))).astype(int)]
+    signal_frac = float((data.logflux[torch.from_numpy(sel)].numpy()
+                         > FLOOR).any(axis=0).mean())
+    if n_lines >= min_line_bins:
+        name = "standard"
+    elif n_lines > 0 and signal_frac < sparse_signal_frac:
+        name = "sparse_lines"
+    elif n_edges > 0:
+        name = "edged"
+    else:
+        name = "smooth"
+    return name, n_lines, n_edges, signal_frac
 
 
 def run(cmd, log, cwd=REPO):
@@ -169,9 +197,10 @@ def main():
                                            "reweight_full_history.json")):
             preset = []
             if args.size == "auto":
-                name, nl, ne = classify_size(cache)
+                name, nl, ne, sf = classify_size(cache)
                 preset = SIZE_PRESETS[name]
-                print(f"  size={name} ({nl} lines, {ne} edges)", flush=True)
+                print(f"  size={name} ({nl} lines, {ne} edges, "
+                      f"{sf * 100:.2f}% signal bins)", flush=True)
             print("  training ...", flush=True)
             # preset overrides TRAIN_FLAGS; user --train_flags overrides both
             cmd = [py, "-m", "spexai.train.train_adaptive",

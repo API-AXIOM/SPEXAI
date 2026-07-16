@@ -40,8 +40,8 @@ import torch
 import torch.nn.functional as F
 
 from spexai.train.train_operator import (FLOOR, SpectrumData, evaluate,
-                                         find_edge_bins, make_variant,
-                                         relative_error_loss)
+                                         find_edge_bins, find_line_bins,
+                                         make_variant, relative_error_loss)
 
 
 def loo_interpolation_error(lt, Y, chunk=512):
@@ -185,17 +185,32 @@ def train(args):
         wema = EMAWeights(model, args.ema_decay)
     train_sub = grid[torch.linspace(0, n_grid - 1, min(384, n_grid)).long()]
 
-    # edge-aware point sampling: force supervision on recombination-edge
-    # bins (empty for edge-free elements like H/He -> plain sampling)
-    edge_pool = torch.empty(0, dtype=torch.long)
-    if args.use_edges != "off" and args.edge_frac > 0:
-        core = find_edge_bins(data)
-        if len(core):
-            r = args.edge_radius
-            edge_pool = torch.unique(torch.clamp(
-                core[:, None] + torch.arange(-r, r + 1), 0, data.n_bins - 1))
-            print(f"edge-aware sampling: {len(core)} edges, "
-                  f"{len(edge_pool)} bins supervised", flush=True)
+    # signal-aware point sampling: guarantee supervision on the sparse
+    # non-floor bins (spectral lines + recombination edges). Uniform sampling
+    # almost never hits a line on floor-dominated low-Z spectra (Li/Be/B have
+    # < 1.2% of bins above floor), so those bins are both forced into every
+    # batch and, via `point_weight`, given `signal_frac` of the loss so they
+    # are not drowned by the floor bins in the per-point mean.
+    signal_pool = torch.empty(0, dtype=torch.long)
+    if args.signal_frac > 0:
+        pools = []
+        line_bins = torch.nonzero(find_line_bins(data) >= 0).flatten()
+        if len(line_bins):
+            pools.append(line_bins)
+        if args.use_edges != "off":
+            core = find_edge_bins(data)
+            if len(core):
+                r = args.edge_radius
+                pools.append(torch.unique(torch.clamp(
+                    core[:, None] + torch.arange(-r, r + 1),
+                    0, data.n_bins - 1)))
+        if pools:
+            signal_pool = torch.unique(torch.cat(pools))
+            print(f"signal-aware sampling: {len(signal_pool)} signal bins "
+                  f"({100 * len(signal_pool) / data.n_bins:.2f}% of grid), "
+                  f"target loss share {args.signal_frac:.0%}", flush=True)
+    is_signal = torch.zeros(data.n_bins, dtype=torch.bool)
+    is_signal[signal_pool] = True
 
     # running per-grid-point error estimate (optimistic init -> coverage)
     ema = torch.full((n_grid,), args.ema_init)
@@ -259,13 +274,31 @@ def train(args):
             target = torch.cat([target, pool_flux[sidx]])
             temps = torch.cat([temps, pool_temps[sidx]])
 
-        n_edge = int(args.edge_frac * args.points) if len(edge_pool) else 0
-        rand_pts = torch.randperm(data.n_bins)[:args.points - n_edge]
-        if n_edge:
-            ep = edge_pool[torch.randint(len(edge_pool), (n_edge,))]
-            pts = torch.sort(torch.unique(torch.cat([rand_pts, ep]))).values
+        # draw points, guaranteeing the signal bins are present. n_sig caps
+        # how many signal bins we force in (all of them for sparse elements,
+        # a signal_frac slice for signal-rich ones); their loss *influence*
+        # is set separately by point_weight below, not by their count.
+        if len(signal_pool):
+            n_sig = min(len(signal_pool), int(args.signal_frac * args.points))
+            sig_pts = signal_pool[torch.randperm(len(signal_pool))[:n_sig]]
+            rand_pts = torch.randperm(data.n_bins)[:max(0, args.points - n_sig)]
+            pts = torch.unique(torch.cat([rand_pts, sig_pts]))  # sorted
         else:
-            pts, _ = torch.sort(rand_pts)
+            pts, _ = torch.sort(torch.randperm(data.n_bins)[:args.points])
+
+        # per-point loss weight: hold `signal_frac` of the loss on the signal
+        # bins regardless of how few of them there are (decouples influence
+        # from count, so it self-tunes across Be's ~6 and B's ~292 bins).
+        point_weight = None
+        if len(signal_pool) and 0 < args.signal_frac < 1:
+            sig_mask = is_signal[pts]
+            n_s = int(sig_mask.sum())
+            n_r = len(pts) - n_s
+            if n_s > 0 and n_r > 0:
+                w_sig = (args.signal_frac / (1 - args.signal_frac)) * (n_r / n_s)
+                point_weight = torch.where(
+                    sig_mask, torch.full((len(pts),), w_sig),
+                    torch.ones(len(pts))).to(device)
         target = target[:, pts].to(device)
         alpha = min(1.0, step / (args.curriculum_frac * args.steps))
         tnorm = model.norm_temp(temps.to(device)).view(-1, 1)
@@ -275,10 +308,12 @@ def train(args):
 
         target_c = torch.clamp(target, min=FLOOR)
         loss = relative_error_loss(pred[:nr], target_c[:nr],
-                                   target[:nr] > FLOOR, sample_weight=w_real)
+                                   target[:nr] > FLOOR, sample_weight=w_real,
+                                   point_weight=point_weight)
         if ns > 0:
             loss = loss + args.synth_weight * relative_error_loss(
-                pred[nr:], target_c[nr:], target[nr:] > FLOOR)
+                pred[nr:], target_c[nr:], target[nr:] > FLOOR,
+                point_weight=point_weight)
         w_log = args.w_log * max(0.0, 1.0 - step / (0.2 * args.steps))
         if w_log > 0:
             loss = loss + w_log * F.mse_loss(pred, target_c)
@@ -443,12 +478,17 @@ def build_parser():
     ap.add_argument("--min_line_bins", type=int, default=32,
                     help="auto mode: fewer line bins than this -> no line head")
     ap.add_argument("--use_edges", default="auto", choices=["auto", "off"],
-                    help="edge-aware sampling on detected recombination "
-                         "edges (auto = on when any edge is found)")
-    ap.add_argument("--edge_frac", type=float, default=0.15,
-                    help="fraction of loss points drawn from edge regions")
+                    help="include detected recombination edges in the signal "
+                         "pool (auto = on when any edge is found)")
+    ap.add_argument("--signal_frac", type=float, default=0.15,
+                    help="target share of the point loss placed on signal "
+                         "bins (spectral lines + edges); 0 = plain uniform "
+                         "sampling. Self-tunes the per-point weight so the "
+                         "share holds whether an element has ~6 or ~300 "
+                         "non-floor bins. Raise for floor-dominated low-Z "
+                         "elements (Li/Be/B).")
     ap.add_argument("--edge_radius", type=int, default=4,
-                    help="bins each side of an edge to supervise")
+                    help="bins each side of an edge to add to the signal pool")
     ap.add_argument("--use_trend", type=int, default=1)
     ap.add_argument("--use_binnorm", type=int, default=1)
     ap.add_argument("--w_log", type=float, default=0.1)

@@ -151,13 +151,18 @@ class SpectrumData:
 # ---------------------------------------------------------------------------
 
 def relative_error_loss(pred, target, valid, huber_delta=1.0,
-                        sample_weight=None):
+                        sample_weight=None, point_weight=None):
     """Huber loss on |10^(pred - target) - 1| for valid bins,
     one-sided floor penalty for empty bins (target at FLOOR).
 
     sample_weight: optional (B,) per-spectrum weights (e.g. InfoBatch-style
     importance-sampling corrections). When given, the loss is the mean over
-    points then the weighted mean over spectra, instead of a flat mean."""
+    points then the weighted mean over spectra, instead of a flat mean.
+
+    point_weight: optional (P,) per-point (per-bin) weights. Used to up-weight
+    sparse signal bins so they are not drowned by the floor bins in the
+    per-point mean (essential for floor-dominated low-Z spectra); the
+    per-spectrum loss becomes a weighted mean over points."""
     d = torch.clamp(pred - target, -4.0, 4.0)
     # valid bins: symmetric relative error in linear flux
     eps_valid = torch.abs(torch.pow(10.0, torch.where(valid, d, torch.zeros_like(d))) - 1.0)
@@ -165,11 +170,18 @@ def relative_error_loss(pred, target, valid, huber_delta=1.0,
     d_floor = torch.clamp(torch.relu(pred - FLOOR), max=4.0)
     eps_floor = torch.pow(10.0, d_floor) - 1.0
     eps = torch.where(valid, eps_valid, eps_floor)
-    if sample_weight is None:
+    if sample_weight is None and point_weight is None:
         return F.huber_loss(eps, torch.zeros_like(eps), delta=huber_delta)
-    per = F.huber_loss(eps, torch.zeros_like(eps), delta=huber_delta,
-                       reduction="none").mean(dim=1)          # (B,)
-    return (per * sample_weight).mean()
+    h = F.huber_loss(eps, torch.zeros_like(eps), delta=huber_delta,
+                     reduction="none")                        # (B, P)
+    if point_weight is not None:
+        w = point_weight.view(1, -1)
+        per = (h * w).sum(dim=1) / w.sum()                    # (B,)
+    else:
+        per = h.mean(dim=1)                                   # (B,)
+    if sample_weight is not None:
+        return (per * sample_weight).mean()
+    return per.mean()
 
 
 def sobolev_loss(pred, target, x, valid):

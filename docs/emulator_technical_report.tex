@@ -60,7 +60,8 @@ network. This report covers the single-element ($Z=26$, iron) testbed:
 data, architecture, training, broadening, and evaluation, in the order
 decisions were made. Scaling to all 30 elements uses an automated sweep
 (\code{scripts/run\_all\_elements.py}) with the recipe fixed by the
-experiments below.
+experiments below; the sweep and a failure mode it exposed on low-$Z$
+elements are in Section~\ref{sec:multielement}.
 
 \paragraph{Data.} $14{,}246$ SPEX spectra on an adaptive energy grid of
 $24{,}212$ bins over $0.1$--$12\kev$, with temperatures
@@ -434,6 +435,72 @@ the trunk under-resolving inter-line pseudo-continuum. (Minor caveat:
 this arm ran at the default learning rate $3\times10^{-3}$; given it
 regressed rather than plateaued, we did not spend a further run on the
 learning-rate confound.)
+
+\subsection{Multi-element generalisation: floor-dominated spectra}
+\label{sec:multielement}
+Fixing the recipe on iron and sweeping the low-$Z$ elements ($Z=2$--$6$)
+with the automated per-element sizing exposed a failure mode absent from
+iron. Two sharply separated tiers emerged (Table~\ref{tab:multielement}):
+helium and carbon reach $\le0.04\%$ MRE at $100\%$ yield on both
+thresholds, while lithium, beryllium, and boron land at $1.3$--$9.9\%$
+MRE with essentially no spectra under $0.1\%$.
+
+The split is explained entirely by \emph{signal sparsity}, not atomic
+number. On the shared $24{,}212$-bin grid the fraction of bins ever above
+the $-10$ floor is $\sim97\%$ for He/C (broad continua) but under $1.2\%$
+for Li/Be/B -- beryllium carries flux in only $\sim6$ bins per spectrum,
+the rest at floor. This is not intrinsic difficulty: classical linear
+interpolation in $T$ reaches $\sim10^{-6}$ MRE on all five elements (the
+trust gate reports $100\%$ of intervals interpolable), so the targets are
+trivially learnable and the poor emulator numbers are a training
+pathology.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+ & $Z$ & signal bins/spec & signal frac. & emul.\ MRE & interp.\ MRE\\
+\midrule
+He & 2 & $23{,}703$ & $97.9\%$   & $3.2\times10^{-4}$ & $8.8\times10^{-7}$\\
+C  & 6 & $23{,}444$ & $96.8\%$   & $4.0\times10^{-4}$ & $8.6\times10^{-7}$\\
+B  & 5 & $292$      & $1.2\%$    & $9.9\times10^{-2}$ & $1.1\times10^{-6}$\\
+Li & 3 & $15$       & $0.06\%$   & $1.3\times10^{-2}$ & $9.1\times10^{-7}$\\
+Be & 4 & $6$        & $0.03\%$   & $5.9\times10^{-2}$ & $9.9\times10^{-7}$\\
+\bottomrule
+\end{tabular}
+\caption{Low-$Z$ sweep before the signal-aware fix: emulator accuracy
+tracks signal density, while classical interpolation is uniformly
+excellent. Signal bins are per-spectrum bins above the floor (mean over
+the test set); MRE is the fraction of Eq.~\ref{eq:mre}.}
+\label{tab:multielement}
+\end{table}
+
+Two compounding causes. (i)~Uniform point sampling: each step draws
+\code{points}$=2048$ of the $24{,}212$ bins uniformly, so for beryllium
+the expected number of non-floor bins seen per step is
+$2048\times0.0003\approx0.5$ -- the model is supervised on the very bins
+it is scored on in only half of all steps. (ii)~Even when a line bin is
+drawn, the flat per-point mean in the training loss lets the $\sim2000$
+trivial floor bins dominate the gradient. Compounding both, the automated
+size classifier keyed on line-bin \emph{count} and routed Li/Be to a
+``smooth'' preset that switched the line head \emph{off} -- disabling the
+line machinery for precisely the spectra that are almost nothing but
+lines.
+
+\paragraph{Fix: signal-aware sampling.} We replace edge-only sampling
+with a \emph{signal pool} (union of detected line and
+recombination-edge bins) and (a)~force its members into every batch, and
+(b)~up-weight them per point so they hold a target share
+\code{signal\_frac} of the loss regardless of how few they are. This is
+one self-tuning knob that decouples a signal bin's loss \emph{influence}
+from its sampled \emph{count}, so the same setting holds across
+beryllium's $\sim6$ and boron's $\sim292$ signal bins. The size
+classifier is corrected to route on signal \emph{density}: a
+floor-dominated spectrum with any lines goes to a new \code{sparse\_lines}
+preset (line head on, \code{signal\_frac}~$=0.5$), which line-bin count
+alone cannot distinguish from a genuinely smooth continuum (He). The
+broad-continuum elements are unaffected -- their signal pool spans the
+band, so the weighting is a near-identity.
 
 \section{Instrument-level validation}
 \label{sec:instruments}
