@@ -62,7 +62,8 @@ SIZE_PRESETS = {
     # signal_frac discriminator below). Trunk stays small -- there is little
     # continuum to fit -- but n_freqs stays high for the sharp lines.
     "sparse_lines": ["--hidden", "192", "--layers", "4", "--n_freqs", "512",
-                     "--use_linehead", "on", "--signal_frac", "0.5"],
+                     "--use_linehead", "on", "--signal_frac", "0.25",
+                     "--lr", "1e-3"],
     "edged":        ["--hidden", "192", "--layers", "4", "--n_freqs", "384",
                      "--use_linehead", "off"],
     "smooth":       ["--hidden", "128", "--layers", "3", "--n_freqs", "128",
