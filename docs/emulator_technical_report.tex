@@ -502,6 +502,24 @@ alone cannot distinguish from a genuinely smooth continuum (He). The
 broad-continuum elements are unaffected -- their signal pool spans the
 band, so the weighting is a near-identity.
 
+\paragraph{Validation on beryllium.} Re-running the worst element
+($Z=4$, six signal bins per spectrum) with the corrected classifier and
+the \code{sparse\_lines} recipe (line head on, \code{signal\_frac}~$=0.25$,
+learning rate $10^{-3}$ -- the inherited $3\times10^{-3}$ reproduced the
+old bouncing divergence) transformed it. Held-out test MRE
+$5.9\%\to\mathbf{0.013\%}$, yield@1\% $0\to\mathbf{100\%}$, yield@0.1\%
+$0\to\mathbf{99.2\%}$, with the line-bin MRE collapsing from $4.2\%$ to
+$\sim0$ and floor violations to zero. The run was stable to step $86$k
+(the original diverged by $28$k, and its apparent $5.9\%$ was a lucky
+checkpoint dip before collapse to MRE $\approx1$). This confirms the
+failure was sampling starvation and optimiser instability, not
+capacity: six signal bins suffice for $99\%$ of spectra under $0.1\%$
+once they are actually supervised. The emulator now sits $\sim140\times$
+above the interpolation baseline (from $\sim6\times10^{4}\times$), the
+same regime as the well-behaved elements. Confirmation that the fix
+transfers to lithium ($Z=3$) and boron ($Z=5$), and that the changed
+default \code{signal\_frac} does not regress iron, is pending.
+
 \section{Instrument-level validation}
 \label{sec:instruments}
 
