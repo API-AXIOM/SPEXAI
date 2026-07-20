@@ -497,7 +497,8 @@ from its sampled \emph{count}, so the same setting holds across
 beryllium's $\sim6$ and boron's $\sim292$ signal bins. The size
 classifier is corrected to route on signal \emph{density}: a
 floor-dominated spectrum with any lines goes to a new \code{sparse\_lines}
-preset (line head on, \code{signal\_frac}~$=0.5$), which line-bin count
+preset (line head on, \code{signal\_frac}~$=0.25$ and learning rate
+$10^{-3}$, both set by validation below), which line-bin count
 alone cannot distinguish from a genuinely smooth continuum (He). The
 broad-continuum elements are unaffected -- their signal pool spans the
 band, so the weighting is a near-identity.
@@ -519,6 +520,35 @@ above the interpolation baseline (from $\sim6\times10^{4}\times$), the
 same regime as the well-behaved elements. Confirmation that the fix
 transfers to lithium ($Z=3$) and boron ($Z=5$), and that the changed
 default \code{signal\_frac} does not regress iron, is pending.
+
+\paragraph{Training throughput.} On one A100, per-step wall time scales
+with the preset: $\sim35$\,ms/step for \code{smooth} ($0.2$M params),
+$\sim100$\,ms/step for \code{sparse\_lines} ($0.6$M), and
+$\sim210$\,ms/step for \code{standard} ($1.6$M). With early stopping most
+elements converge in $40$--$95$k steps, so a single full-grid element
+trains end to end in roughly $0.7$--$4$ GPU-hours (smooth continua at the
+low end, line-rich \code{standard} elements at the high end).
+
+\paragraph{Early-stopping fragility on noisy runs.} Per-element step
+count is governed by a smoothed validation-MRE plateau detector, which is
+sensitive to the large eval-to-eval noise of the high-learning-rate
+\code{standard} runs (val MRE swings of $\pm100$--$300\%$ between evals).
+Two failure tails appear. On sodium and aluminium a single upward spike
+(Na hit MRE $0.14$ at step $40$k) made the smoothed signal read as
+plateaued and triggered the stop at $42$--$48$k; the models then kept
+improving $30$--$40\%$ per eval through the forced decay and finished
+$\sim60$k still descending, leaving them $3$--$5\times$ worse than their
+neighbours ($0.30$--$0.37\%$ MRE, $0\%$ yield@0.1\%, and for Al a
+$0.62\%$ floor-violation rate -- all hallmarks of an unconverged fit, the
+line and continuum shapes being correct). Conversely fluorine's noise
+\emph{prevented} the trigger, running it to the $100$k cap. Both tails are
+mitigated by widening the smoothing window (\code{mre\_smooth} $3\to5$) and
+the patience (\code{early\_stop\_patience} $5\to8$) so no single eval can
+move the decision; the affected elements are being re-run under the new
+defaults. Checkpoint-on-lowest-val-MRE ensures the shipped model is the
+best seen within a run, so noise never degrades it below the trajectory
+-- but a premature stop still forfeits the accuracy the remaining budget
+would have bought, which is exactly what cost Na and Al.
 
 \section{Instrument-level validation}
 \label{sec:instruments}

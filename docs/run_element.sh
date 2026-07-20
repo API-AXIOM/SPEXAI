@@ -1,13 +1,13 @@
 
-ELEMENT=7
+ELEMENT=8
 
 DATADIR=/home/dhuppenkot2/data/spexai_data/data/element_$ELEMENT
 CACHE=/home/dhuppenkot2/data/spexai_data/processed/element$ELEMENT
 RUNS=/home/dhuppenkot2/data/spexai_data/runs/element$ELEMENT/recipe_t04
 
-#mkdir /home/dhuppenkot2/data/spexai_data/runs/element$ELEMENT/
-#mkdir $CACHE
-#mkdir $RUNS
+mkdir /home/dhuppenkot2/data/spexai_data/runs/element$ELEMENT/
+mkdir $CACHE
+mkdir $RUNS
 
 python scripts/preprocess_spectra.py \
     --datadir $DATADIR \
@@ -18,8 +18,19 @@ DATAROOT=/home/dhuppenkot2/data/spexai_data
 RUNS=$DATAROOT/runs
 nohup python scripts/run_all_elements.py \
     --dataroot $DATAROOT --runroot $RUNS \
-    --elements 2 3 4 5 6\
-    > $RUNS/element2.log 2>&1 &
+    --elements 5 \
+    > $RUNS/element5.log 2>&1 &
+
+
+# Low-signal elements (e.g. 3, 4, 5) where the 
+# sampling didn't work otherwise
+nohup python scripts/run_all_elements.py \
+    --dataroot $DATAROOT \
+    --runroot $RUNS \
+    --elements 3 \
+    --train_flags "--lr 1e-3 --signal_frac 0.25" \
+    > $RUNS/element3.log 2>&1 &
+
  
 #nohup python -m spexai.train.train_adaptive \
 #    --mode reweight --n_train 0 --pr_mix 0.4 --use_linehead off \
