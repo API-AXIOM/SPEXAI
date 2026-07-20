@@ -48,5 +48,12 @@ def acis_response():
 
 
 @pytest.fixture
+def acis_paths():
+    if not ACIS_OK:
+        pytest.skip("Chandra ACIS response not present")
+    return ACIS_RMF, ACIS_ARF
+
+
+@pytest.fixture
 def edges():
     return torch.logspace(np.log10(0.3), np.log10(10.0), 201)
