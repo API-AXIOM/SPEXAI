@@ -229,10 +229,12 @@ def train(args):
     prioritize = args.mode in ("reweight", "adaptive")
 
     # Keep sampling/gather tensors resident on `ddev` so the (tiny) model is
-    # not stalled by per-step host<->device transfers and CPU-side gather.
-    # Forward inputs are moved to the model's `device` (a no-op when they
-    # already match, i.e. when data_on_gpu is on). ema stays on CPU (the
-    # multinomial draw is cheap there).
+    # not stalled by per-step host<->device transfers, CPU-side gather, OR
+    # per-step GPU->CPU syncs. The prioritized-sampling error estimate (ema),
+    # the multinomial draw, and the ema update all live on `ddev`, so nothing
+    # in the step reads a GPU result back to Python (which would serialize the
+    # otherwise-async CPU/GPU pipeline). Forward inputs are moved to the
+    # model's `device` (a no-op when they already match, i.e. data_on_gpu on).
     ddev = torch.device(device if use_data_gpu else "cpu")
     if use_data_gpu:
         data.logflux = data.logflux.to(ddev)
@@ -244,6 +246,7 @@ def train(args):
     train_sub = train_sub.to(ddev)
     signal_pool = signal_pool.to(ddev)
     is_signal = is_signal.to(ddev)
+    ema = ema.to(ddev)
 
     os.makedirs(args.outdir, exist_ok=True)
     tag = args.tag or args.mode
@@ -261,7 +264,7 @@ def train(args):
         if (args.mode == "adaptive" and step > args.acquire_warmup
                 and step % args.acquire_every == 0
                 and len(pool_flux) < args.max_synth):
-            interval_err = 0.5 * (ema[:-1] + ema[1:]).numpy()
+            interval_err = 0.5 * (ema[:-1] + ema[1:]).cpu().numpy()
             dens = np.where(eligible, interval_err ** args.rad_k, 0.0)
             if dens.sum() > 0:
                 pick = np.random.choice(n_grid - 1, size=args.acquire_n,
@@ -295,8 +298,8 @@ def train(args):
                 w = ((1.0 / n_grid) / p[pos]) ** args.pr_correct
                 w_real = (w / w.mean()).to(device)
         else:
-            pos = torch.randint(n_grid, (nr,))
-        gidx = grid[pos.to(ddev)]
+            pos = torch.randint(n_grid, (nr,), device=ddev)
+        gidx = grid[pos]          # pos already on ddev
         target = data.logflux[gidx]
         temps = data.temps[gidx]
         if ns > 0:
@@ -325,13 +328,13 @@ def train(args):
         point_weight = None
         if len(signal_pool) and 0 < args.signal_frac < 1:
             sig_mask = is_signal[pts]
-            n_s = int(sig_mask.sum())
-            n_r = len(pts) - n_s
-            if n_s > 0 and n_r > 0:
-                w_sig = (args.signal_frac / (1 - args.signal_frac)) * (n_r / n_s)
-                point_weight = torch.where(
-                    sig_mask, torch.full((len(pts),), w_sig, device=ddev),
-                    torch.ones(len(pts), device=ddev)).to(device)
+            # keep the counts as on-device tensors (no int()/.item()) so this
+            # doesn't force a per-step GPU->CPU sync; clamps guard the ratio.
+            n_s = sig_mask.sum().clamp(min=1)
+            n_r = (sig_mask.numel() - n_s).clamp(min=1)
+            w_sig = (args.signal_frac / (1 - args.signal_frac)) * (n_r / n_s)
+            point_weight = torch.where(
+                sig_mask, w_sig, torch.ones((), device=ddev)).to(device)
         pts_d = pts.to(device)
         target = target[:, pts].to(device)
         alpha = min(1.0, step / (args.curriculum_frac * args.steps))
@@ -371,7 +374,9 @@ def train(args):
             wema.update(model)
 
         with torch.no_grad():
-            mre = per_sample_mre(pred[:nr], target[:nr]).cpu()
+            # keep the ema update on `ddev` (no .cpu()) so it doesn't stall the
+            # async CPU/GPU pipeline every step; ema, pos and mre are all there.
+            mre = per_sample_mre(pred[:nr], target[:nr]).to(ddev)
             ema[pos] = (1 - args.ema_beta) * ema[pos] + args.ema_beta * mre
 
         if step % args.eval_every == 0 or step == args.steps:
