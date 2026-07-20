@@ -30,6 +30,7 @@ interesting regime for this test is a sparse grid (e.g. --n_train 300).
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -89,6 +90,11 @@ def per_sample_mre(pred, target):
 def train(args):
     device = ("mps" if torch.backends.mps.is_available()
               else "cuda" if torch.cuda.is_available() else "cpu")
+    # --- speed knobs (effective on CUDA; no-ops elsewhere) ---
+    if device == "cuda":
+        torch.set_float32_matmul_precision("high")   # TF32 matmuls (Ampere+)
+    use_amp = bool(args.amp) and device == "cuda"    # bf16 autocast on the fwd
+    use_data_gpu = bool(args.data_on_gpu) and device == "cuda"  # data resident
     data = SpectrumData(args.cachedir)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -123,7 +129,13 @@ def train(args):
 
     model = make_variant("combo", data, args).to(device)
     print(f"adaptive[{args.mode}] params={model.count_parameters():,} "
-          f"grid={n_grid} device={device}", flush=True)
+          f"grid={n_grid} device={device} (amp={use_amp} "
+          f"data_on_gpu={use_data_gpu} compile={bool(args.compile)})", flush=True)
+    if args.compile:
+        # compile the hot path only (training calls forward_norm, not
+        # forward); compiling the module would also prefix state_dict keys
+        # with _orig_mod. and break checkpoint loading.
+        model.forward_norm = torch.compile(model.forward_norm)
 
     # optimizer: adamw (default) | schedulefree | muon. schedule-free and
     # its own averaging replace the external LR schedule and the EMA;
@@ -216,6 +228,23 @@ def train(args):
     ema = torch.full((n_grid,), args.ema_init)
     prioritize = args.mode in ("reweight", "adaptive")
 
+    # Keep sampling/gather tensors resident on `ddev` so the (tiny) model is
+    # not stalled by per-step host<->device transfers and CPU-side gather.
+    # Forward inputs are moved to the model's `device` (a no-op when they
+    # already match, i.e. when data_on_gpu is on). ema stays on CPU (the
+    # multinomial draw is cheap there).
+    ddev = torch.device(device if use_data_gpu else "cpu")
+    if use_data_gpu:
+        data.logflux = data.logflux.to(ddev)
+        data.temps = data.temps.to(ddev)
+        data.val_idx = data.val_idx.to(ddev)
+        data.test_idx = data.test_idx.to(ddev)
+    grid = grid.to(ddev)
+    data.train_idx = grid
+    train_sub = train_sub.to(ddev)
+    signal_pool = signal_pool.to(ddev)
+    is_signal = is_signal.to(ddev)
+
     os.makedirs(args.outdir, exist_ok=True)
     tag = args.tag or args.mode
     best = {"val_mre_mean": float("inf")}   # checkpoint on lowest val MRE
@@ -267,24 +296,28 @@ def train(args):
                 w_real = (w / w.mean()).to(device)
         else:
             pos = torch.randint(n_grid, (nr,))
-        target = data.logflux[grid[pos]]
-        temps = data.temps[grid[pos]]
+        gidx = grid[pos.to(ddev)]
+        target = data.logflux[gidx]
+        temps = data.temps[gidx]
         if ns > 0:
             sidx = torch.randint(len(pool_flux), (ns,))
-            target = torch.cat([target, pool_flux[sidx]])
-            temps = torch.cat([temps, pool_temps[sidx]])
+            target = torch.cat([target, pool_flux[sidx].to(ddev)])
+            temps = torch.cat([temps, pool_temps[sidx].to(ddev)])
 
-        # draw points, guaranteeing the signal bins are present. n_sig caps
-        # how many signal bins we force in (all of them for sparse elements,
-        # a signal_frac slice for signal-rich ones); their loss *influence*
-        # is set separately by point_weight below, not by their count.
+        # draw a FIXED number of points with randint (on `ddev`) -- avoids a
+        # per-step randperm(n_bins) on the CPU and keeps shapes static for
+        # torch.compile -- guaranteeing the signal bins are represented. Rare
+        # duplicate bins are harmless (the loss is a mean over points).
         if len(signal_pool):
             n_sig = min(len(signal_pool), int(args.signal_frac * args.points))
-            sig_pts = signal_pool[torch.randperm(len(signal_pool))[:n_sig]]
-            rand_pts = torch.randperm(data.n_bins)[:max(0, args.points - n_sig)]
-            pts = torch.unique(torch.cat([rand_pts, sig_pts]))  # sorted
+            sig_pts = signal_pool[torch.randint(len(signal_pool), (n_sig,),
+                                                device=ddev)]
+            rand_pts = torch.randint(data.n_bins, (args.points - n_sig,),
+                                     device=ddev)
+            pts = torch.sort(torch.cat([rand_pts, sig_pts])).values
         else:
-            pts, _ = torch.sort(torch.randperm(data.n_bins)[:args.points])
+            pts = torch.sort(torch.randint(data.n_bins, (args.points,),
+                                           device=ddev)).values
 
         # per-point loss weight: hold `signal_frac` of the loss on the signal
         # bins regardless of how few of them there are (decouples influence
@@ -297,14 +330,18 @@ def train(args):
             if n_s > 0 and n_r > 0:
                 w_sig = (args.signal_frac / (1 - args.signal_frac)) * (n_r / n_s)
                 point_weight = torch.where(
-                    sig_mask, torch.full((len(pts),), w_sig),
-                    torch.ones(len(pts))).to(device)
+                    sig_mask, torch.full((len(pts),), w_sig, device=ddev),
+                    torch.ones(len(pts), device=ddev)).to(device)
+        pts_d = pts.to(device)
         target = target[:, pts].to(device)
         alpha = min(1.0, step / (args.curriculum_frac * args.steps))
         tnorm = model.norm_temp(temps.to(device)).view(-1, 1)
-        pred = model.forward_norm(
-            tnorm, x_grid[pts].unsqueeze(0).expand(args.batch, -1, -1),
-            alpha=alpha, bins=pts.to(device))
+        with (torch.autocast("cuda", dtype=torch.bfloat16) if use_amp
+              else contextlib.nullcontext()):
+            pred = model.forward_norm(
+                tnorm, x_grid[pts_d].unsqueeze(0).expand(args.batch, -1, -1),
+                alpha=alpha, bins=pts_d)
+        pred = pred.float()   # keep the loss / 10**() in fp32 for stability
 
         target_c = torch.clamp(target, min=FLOOR)
         loss = relative_error_loss(pred[:nr], target_c[:nr],
@@ -500,6 +537,18 @@ def build_parser():
     ap.add_argument("--curriculum_frac", type=float, default=0.3)
     ap.add_argument("--eval_every", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=42)
+    # --- speed knobs (effective on CUDA) ---
+    ap.add_argument("--amp", type=int, default=1,
+                    help="bf16 autocast on the forward pass (CUDA only); the "
+                         "loss stays fp32. 1=on")
+    ap.add_argument("--data_on_gpu", type=int, default=1,
+                    help="keep logflux/temps/indices resident on the GPU to "
+                         "avoid per-step host<->device transfers and CPU "
+                         "gather (CUDA only). 1=on; set 0 if GPU memory is "
+                         "tight (cache is ~1.4 GB)")
+    ap.add_argument("--compile", type=int, default=0,
+                    help="torch.compile the forward hot path (experimental; "
+                         "fixed-shape point sampling makes it viable). 1=on")
     # acquisition
     ap.add_argument("--gate_thresh", type=float, default=0.01,
                     help="max LOO interpolation error for synthetic "
