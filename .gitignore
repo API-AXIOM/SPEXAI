@@ -14,3 +14,6 @@ spexai/train/__pycache__/
 tutorials/.ipynb_checkpoints/
 tutorials/log/
 
+
+# trained emulator weights — do NOT commit until ship time (consider git-lfs then)
+spexai/models/*.pt

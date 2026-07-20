@@ -462,15 +462,20 @@ def build_parser():
                     help="wsd = warmup-stable-decay: flat LR, linear decay "
                          "over the last --wsd_decay_frac of the run")
     ap.add_argument("--wsd_decay_frac", type=float, default=0.15)
-    ap.add_argument("--early_stop_patience", type=int, default=5,
+    ap.add_argument("--early_stop_patience", type=int, default=8,
                     help="evals with no smoothed-MRE improvement before "
                          "triggering the decay (wsd) or a hard stop; 0 = off. "
-                         "--steps is then just an upper bound.")
+                         "--steps is then just an upper bound. Raised from 5 "
+                         "to 8 after noisy high-LR runs (Na/Al) false-triggered "
+                         "on a single eval spike and stopped while still "
+                         "improving 30-40%/eval.")
     ap.add_argument("--early_stop_rel", type=float, default=0.02,
                     help="relative val-MRE improvement needed to reset "
                          "early-stop patience")
-    ap.add_argument("--mre_smooth", type=int, default=3,
-                    help="evals averaged for the early-stop MRE signal")
+    ap.add_argument("--mre_smooth", type=int, default=5,
+                    help="evals averaged for the early-stop MRE signal "
+                         "(raised from 3 to 5 so a single noisy eval spike "
+                         "cannot dominate the plateau detector)")
     ap.add_argument("--use_linehead", default="auto",
                     choices=["auto", "on", "off"],
                     help="line head: 'off' for pure-continuum elements "

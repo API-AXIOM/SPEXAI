@@ -6,7 +6,9 @@ from torchinterp1d import interp1d as interp1d_torch
 import scipy.constants as constants
 
 from spexai.inference import write_tensors
-from spexai.train import FFN, CNN
+# TODO(operator-port): port CombinedModel off the per-element CNN/FFN nets
+# onto SpectralOperator. Bridged to spexai.deprecated until then.
+from spexai.deprecated import FFN, CNN
 import matplotlib.pyplot as plt
 
 torch.set_default_dtype(torch.float32)

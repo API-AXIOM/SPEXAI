@@ -5,7 +5,10 @@ import torch
 import re
 torch.set_default_dtype(torch.float32)
 
-from spexai.train import FFN, CNN
+# TODO(operator-port): load_models still builds CNN/FFN nets; replace with
+# SpectralOperator checkpoint loading. Bridged to spexai.deprecated so the
+# CNN path keeps working until the port lands.
+from spexai.deprecated import FFN, CNN
 
 
 
