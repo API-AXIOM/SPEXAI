@@ -136,7 +136,10 @@ def train(args):
         # architecture / cache) so training continues from those instead of
         # from scratch. Optimizer/schedule/step still start fresh -- this is a
         # warm start, not a seamless resume.
-        ck = torch.load(args.init_from, map_location=device, weights_only=False)
+        # expanduser so a `~` that slipped through quoting (e.g. inside a
+        # double-quoted --train_flags) still resolves.
+        ck = torch.load(os.path.expanduser(args.init_from),
+                        map_location=device, weights_only=False)
         missing, unexpected = model.load_state_dict(ck["state_dict"],
                                                     strict=False)
         print(f"warm-started from {args.init_from} "
