@@ -131,6 +131,17 @@ def train(args):
     print(f"adaptive[{args.mode}] params={model.count_parameters():,} "
           f"grid={n_grid} device={device} (amp={use_amp} "
           f"data_on_gpu={use_data_gpu} compile={bool(args.compile)})", flush=True)
+    if args.init_from:
+        # warm start: load weights from a previous checkpoint (same
+        # architecture / cache) so training continues from those instead of
+        # from scratch. Optimizer/schedule/step still start fresh -- this is a
+        # warm start, not a seamless resume.
+        ck = torch.load(args.init_from, map_location=device, weights_only=False)
+        missing, unexpected = model.load_state_dict(ck["state_dict"],
+                                                    strict=False)
+        print(f"warm-started from {args.init_from} "
+              f"({len(missing)} missing, {len(unexpected)} unexpected keys)",
+              flush=True)
     if args.compile:
         # compile the hot path only (training calls forward_norm, not
         # forward); compiling the module would also prefix state_dict keys
@@ -477,6 +488,11 @@ def build_parser():
                     default="/Users/danielahuppenkothen/work/data/spexai/runs/element26/adaptive")
     ap.add_argument("--tag", default=None,
                     help="checkpoint/history name (defaults to mode)")
+    ap.add_argument("--init_from", default=None,
+                    help="warm start: load model weights from this checkpoint "
+                         "(.pt) instead of random init, e.g. to continue a "
+                         "prematurely-stopped run. Same architecture/cache "
+                         "required. Optimizer/schedule/step start fresh.")
     ap.add_argument("--mode", default="adaptive",
                     choices=["baseline", "reweight", "adaptive"])
     ap.add_argument("--n_train", type=int, default=300,
