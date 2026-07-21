@@ -236,14 +236,12 @@ def train(args):
     # otherwise-async CPU/GPU pipeline). Forward inputs are moved to the
     # model's `device` (a no-op when they already match, i.e. data_on_gpu on).
     ddev = torch.device(device if use_data_gpu else "cpu")
-    if use_data_gpu:
-        data.logflux = data.logflux.to(ddev)
-        data.temps = data.temps.to(ddev)
-        data.val_idx = data.val_idx.to(ddev)
-        data.test_idx = data.test_idx.to(ddev)
-    grid = grid.to(ddev)
-    data.train_idx = grid
-    train_sub = train_sub.to(ddev)
+    # Separate GPU-resident copies for the training loop; `data.*` is left on
+    # the CPU so numpy-based eval/diagnostics (find_line_bins, plot_spectra,
+    # ...) keep working. When data_on_gpu is off these alias `data.*` (no copy).
+    train_flux = data.logflux.to(ddev) if use_data_gpu else data.logflux
+    train_temps = data.temps.to(ddev) if use_data_gpu else data.temps
+    train_grid = grid.to(ddev)
     signal_pool = signal_pool.to(ddev)
     is_signal = is_signal.to(ddev)
     ema = ema.to(ddev)
@@ -255,6 +253,7 @@ def train(args):
     # early stopping on a smoothed validation-MRE plateau
     stop_at = args.steps
     mre_hist, best_smoothed, no_improve = [], float("inf"), 0
+    early_stop_off = False   # set if a plateau is reached while still poor
     t0 = time.time()
 
     for step in range(1, args.steps + 1):
@@ -299,9 +298,9 @@ def train(args):
                 w_real = (w / w.mean()).to(device)
         else:
             pos = torch.randint(n_grid, (nr,), device=ddev)
-        gidx = grid[pos]          # pos already on ddev
-        target = data.logflux[gidx]
-        temps = data.temps[gidx]
+        gidx = train_grid[pos]    # GPU-resident copies; pos already on ddev
+        target = train_flux[gidx]
+        temps = train_temps[gidx]
         if ns > 0:
             sidx = torch.randint(len(pool_flux), (ns,))
             target = torch.cat([target, pool_flux[sidx].to(ddev)])
@@ -408,19 +407,30 @@ def train(args):
             # smoothed val MRE has plateaued in the stable phase
             mre_hist.append(val["mre_mean"])
             smoothed = float(np.mean(mre_hist[-args.mre_smooth:]))
-            if (args.early_stop_patience and sched_state["decay_from"] is None
+            if (args.early_stop_patience and not early_stop_off
+                    and sched_state["decay_from"] is None
                     and step < decay_start):
                 if smoothed < best_smoothed * (1 - args.early_stop_rel):
                     best_smoothed, no_improve = smoothed, 0
                 else:
                     no_improve += 1
                 if no_improve >= args.early_stop_patience:
-                    if args.schedule == "wsd":
+                    # A plateau reached while yield@0.1% is still poor is a
+                    # noise-triggered false alarm (cf. Na/Al/S): don't stop --
+                    # disable early stopping and run the full budget instead.
+                    if val["yield_01pct"] < args.early_stop_min_yield:
+                        early_stop_off = True
+                        print(f"[{args.mode}] plateau at step {step} but "
+                              f"yield0.1%={val['yield_01pct']:.1f} < "
+                              f"{args.early_stop_min_yield:.0f}: disabling early "
+                              f"stop, running to {args.steps}", flush=True)
+                    elif args.schedule == "wsd":
                         sched_state["decay_from"] = step
                         stop_at = min(args.steps, step + decay_len)
-                        print(f"[{args.mode}] early stop: smoothed MRE "
-                              f"plateaued at step {step}; decaying, will "
-                              f"finish at {stop_at}", flush=True)
+                        print(f"[{args.mode}] early stop: smoothed MRE plateaued "
+                              f"at step {step} (yield0.1%="
+                              f"{val['yield_01pct']:.1f}); decaying, finish at "
+                              f"{stop_at}", flush=True)
                     else:
                         stop_at = step
                         print(f"[{args.mode}] early stop at step {step} "
@@ -518,6 +528,12 @@ def build_parser():
                     help="evals averaged for the early-stop MRE signal "
                          "(raised from 3 to 5 so a single noisy eval spike "
                          "cannot dominate the plateau detector)")
+    ap.add_argument("--early_stop_min_yield", type=float, default=25.0,
+                    help="if the plateau detector fires while yield@0.1%% is "
+                         "below this, treat it as a noise-triggered false "
+                         "alarm: disable early stopping and run the full "
+                         "--steps budget instead (protects hard/noisy elements "
+                         "like Na/Al/S from premature stops)")
     ap.add_argument("--use_linehead", default="auto",
                     choices=["auto", "on", "off"],
                     help="line head: 'off' for pure-continuum elements "
