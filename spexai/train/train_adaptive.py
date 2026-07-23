@@ -131,16 +131,17 @@ def train(args):
     print(f"adaptive[{args.mode}] params={model.count_parameters():,} "
           f"grid={n_grid} device={device} (amp={use_amp} "
           f"data_on_gpu={use_data_gpu} compile={bool(args.compile)})", flush=True)
+    init_ck = None
     if args.init_from:
         # warm start: load weights from a previous checkpoint (same
         # architecture / cache) so training continues from those instead of
-        # from scratch. Optimizer/schedule/step still start fresh -- this is a
-        # warm start, not a seamless resume.
+        # from scratch. Optimizer/schedule/step still start fresh UNLESS
+        # --finetune (see below) and/or --resume_optimizer are set.
         # expanduser so a `~` that slipped through quoting (e.g. inside a
         # double-quoted --train_flags) still resolves.
-        ck = torch.load(os.path.expanduser(args.init_from),
-                        map_location=device, weights_only=False)
-        missing, unexpected = model.load_state_dict(ck["state_dict"],
+        init_ck = torch.load(os.path.expanduser(args.init_from),
+                             map_location=device, weights_only=False)
+        missing, unexpected = model.load_state_dict(init_ck["state_dict"],
                                                     strict=False)
         print(f"warm-started from {args.init_from} "
               f"({len(missing)} missing, {len(unexpected)} unexpected keys)",
@@ -154,8 +155,15 @@ def train(args):
     # optimizer: adamw (default) | schedulefree | muon. schedule-free and
     # its own averaging replace the external LR schedule and the EMA;
     # muon drives 2-D matrices with an AdamW companion for the rest.
-    warmup = max(1, int(0.02 * args.steps))
-    decay_start = int((1.0 - args.wsd_decay_frac) * args.steps)
+    # --finetune (continuation of a warm-started run): a fresh LR warmup and
+    # a flat WSD "stable" phase would re-ramp the LR to full strength and
+    # re-fade the Fourier curriculum from scratch, wrecking the loaded
+    # weights in the first ~2000 steps (observed on elements 11/13/16: val
+    # MRE jumped back to ~0.3 from an init that started near 0.004). So a
+    # finetune run skips warmup and decays continuously from step 1.
+    warmup = 1 if args.finetune else max(1, int(0.02 * args.steps))
+    decay_start = warmup if args.finetune else int(
+        (1.0 - args.wsd_decay_frac) * args.steps)
     decay_len = max(1, args.steps - decay_start)
     # early stopping may move the WSD decay earlier; `sched_state` lets the
     # LR schedule read a decay start chosen at run time
@@ -185,6 +193,22 @@ def train(args):
         aux_opt = torch.optim.AdamW(rest, lr=args.lr, weight_decay=1e-4)
     else:
         raise ValueError(args.optimizer)
+
+    if args.resume_optimizer:
+        if init_ck is None:
+            raise SystemExit("--resume_optimizer needs --init_from")
+        if args.optimizer != "adamw" or args.mup:
+            raise SystemExit("--resume_optimizer only supports plain adamw "
+                             "(mup=0); the checkpoint's optimizer state "
+                             "layout won't match muon/schedulefree/mup groups")
+        if "opt_state_dict" in init_ck:
+            opt.load_state_dict(init_ck["opt_state_dict"])
+            print(f"resumed AdamW optimizer state from {args.init_from}",
+                  flush=True)
+        else:
+            print(f"--resume_optimizer set but {args.init_from} has no "
+                  f"opt_state_dict (older checkpoint); starting fresh "
+                  f"moments", flush=True)
 
     def lr_at(step):
         if step < warmup:
@@ -320,37 +344,52 @@ def train(args):
             target = torch.cat([target, pool_flux[sidx].to(ddev)])
             temps = torch.cat([temps, pool_temps[sidx].to(ddev)])
 
+        # late-training ramps (Fix D): more energy points and less signal-bin
+        # over-weighting late in training reduce the per-step sampling noise
+        # that the final low-LR phase is trying to anneal away, so the
+        # optimized objective converges toward the uniform one the benchmark
+        # reports. No-ops (points_now=points, sfrac_now=signal_frac) unless
+        # --points_final / --signal_frac_final are set.
+        progress = step / args.steps
+        points_now = (args.points if args.points_final <= 0 else
+                      int(round(args.points
+                                + (args.points_final - args.points) * progress)))
+        sfrac_now = (args.signal_frac if args.signal_frac_final < 0 else
+                     args.signal_frac
+                     + (args.signal_frac_final - args.signal_frac) * progress)
+
         # draw a FIXED number of points with randint (on `ddev`) -- avoids a
         # per-step randperm(n_bins) on the CPU and keeps shapes static for
         # torch.compile -- guaranteeing the signal bins are represented. Rare
         # duplicate bins are harmless (the loss is a mean over points).
         if len(signal_pool):
-            n_sig = min(len(signal_pool), int(args.signal_frac * args.points))
+            n_sig = min(len(signal_pool), int(sfrac_now * points_now))
             sig_pts = signal_pool[torch.randint(len(signal_pool), (n_sig,),
                                                 device=ddev)]
-            rand_pts = torch.randint(data.n_bins, (args.points - n_sig,),
+            rand_pts = torch.randint(data.n_bins, (points_now - n_sig,),
                                      device=ddev)
             pts = torch.sort(torch.cat([rand_pts, sig_pts])).values
         else:
-            pts = torch.sort(torch.randint(data.n_bins, (args.points,),
+            pts = torch.sort(torch.randint(data.n_bins, (points_now,),
                                            device=ddev)).values
 
         # per-point loss weight: hold `signal_frac` of the loss on the signal
         # bins regardless of how few of them there are (decouples influence
         # from count, so it self-tunes across Be's ~6 and B's ~292 bins).
         point_weight = None
-        if len(signal_pool) and 0 < args.signal_frac < 1:
+        if len(signal_pool) and 0 < sfrac_now < 1:
             sig_mask = is_signal[pts]
             # keep the counts as on-device tensors (no int()/.item()) so this
             # doesn't force a per-step GPU->CPU sync; clamps guard the ratio.
             n_s = sig_mask.sum().clamp(min=1)
             n_r = (sig_mask.numel() - n_s).clamp(min=1)
-            w_sig = (args.signal_frac / (1 - args.signal_frac)) * (n_r / n_s)
+            w_sig = (sfrac_now / (1 - sfrac_now)) * (n_r / n_s)
             point_weight = torch.where(
                 sig_mask, w_sig, torch.ones((), device=ddev)).to(device)
         pts_d = pts.to(device)
         target = target[:, pts].to(device)
-        alpha = min(1.0, step / (args.curriculum_frac * args.steps))
+        alpha = 1.0 if args.finetune else min(
+            1.0, step / (args.curriculum_frac * args.steps))
         tnorm = model.norm_temp(temps.to(device)).view(-1, 1)
         with (torch.autocast("cuda", dtype=torch.bfloat16) if use_amp
               else contextlib.nullcontext()):
@@ -414,9 +453,11 @@ def train(args):
             if val["mre_mean"] <= best["val_mre_mean"]:
                 best = {"step": step,
                         **{f"val_{k}": v for k, v in val.items()}}
-                torch.save({"state_dict": model.state_dict(),
-                            "variant": "combo", "args": vars(args)},
-                           os.path.join(args.outdir, f"{tag}.pt"))
+                ckpt_out = {"state_dict": model.state_dict(),
+                           "variant": "combo", "args": vars(args)}
+                if args.optimizer == "adamw" and not args.mup:
+                    ckpt_out["opt_state_dict"] = opt.state_dict()
+                torch.save(ckpt_out, os.path.join(args.outdir, f"{tag}.pt"))
             # early stopping: trigger the WSD decay (or hard-stop) once the
             # smoothed val MRE has plateaued in the stable phase
             mre_hist.append(val["mre_mean"])
@@ -495,7 +536,23 @@ def build_parser():
                     help="warm start: load model weights from this checkpoint "
                          "(.pt) instead of random init, e.g. to continue a "
                          "prematurely-stopped run. Same architecture/cache "
-                         "required. Optimizer/schedule/step start fresh.")
+                         "required. Optimizer/schedule/step start fresh "
+                         "unless --finetune / --resume_optimizer are set.")
+    ap.add_argument("--finetune", type=int, default=0,
+                    help="continuation run (use with --init_from): skip the "
+                         "LR warmup and the flat WSD 'stable' phase (decay "
+                         "continuously from step 1) and freeze the Fourier "
+                         "curriculum at alpha=1 (all frequencies already "
+                         "active from the previous run). Without this, a "
+                         "warm start still re-ramps the LR to full and "
+                         "re-fades the curriculum from scratch, which wrecks "
+                         "the loaded weights in the first ~2000 steps. Pair "
+                         "with a low --lr (~1e-4).")
+    ap.add_argument("--resume_optimizer", type=int, default=0,
+                    help="also restore AdamW momentum/variance from "
+                         "--init_from (adamw only, --mup 0 on both runs) for "
+                         "true optimizer continuity rather than just a "
+                         "weight warm start")
     ap.add_argument("--mode", default="adaptive",
                     choices=["baseline", "reweight", "adaptive"])
     ap.add_argument("--n_train", type=int, default=300,
@@ -504,6 +561,11 @@ def build_parser():
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--points", type=int, default=2048)
+    ap.add_argument("--points_final", type=int, default=0,
+                    help="if > 0, linearly ramp the per-step energy-bin "
+                         "sample count from --points at step 0 to this value "
+                         "at the end of training, reducing late-training "
+                         "sampling noise; 0 (default) keeps --points fixed")
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--hidden", type=int, default=384)
     ap.add_argument("--layers", type=int, default=5)
@@ -571,6 +633,12 @@ def build_parser():
                          "elements (Li/Be/B).")
     ap.add_argument("--edge_radius", type=int, default=4,
                     help="bins each side of an edge to add to the signal pool")
+    ap.add_argument("--signal_frac_final", type=float, default=-1.0,
+                    help="if >= 0, linearly move --signal_frac toward this "
+                         "value over training, so the tail of training "
+                         "optimizes closer to the uniform objective the "
+                         "benchmark reports instead of staying signal-biased "
+                         "throughout; -1 (default) keeps --signal_frac fixed")
     ap.add_argument("--use_trend", type=int, default=1)
     ap.add_argument("--use_binnorm", type=int, default=1)
     ap.add_argument("--w_log", type=float, default=0.1)
