@@ -44,6 +44,14 @@ class OperatorConfig:
     line_hidden: int = 128
     line_t_freqs: int = 0   # Fourier embedding of theta in the line head
     line_t_fmax: float = 64.0
+    # optional Fourier embedding of theta (temperature) for the TRUNK
+    # conditioning nets (FiLM generator / trend / cond_embed), mirroring the
+    # line head's line_t_freqs. Per-element emissivity has sharp ionisation
+    # features in T that a plain MLP on raw tnorm underfits; this gives the
+    # conditioning capacity for sharp d(emissivity)/dT anywhere in the range.
+    # 0 = plain conditioning (default; identical to the pre-existing model).
+    film_t_freqs: int = 0
+    film_t_fmax: float = 64.0
     # trunk
     hidden_size: int = 256
     n_hidden: int = 6
@@ -329,15 +337,23 @@ class SpectralOperator(nn.Module):
         else:
             self.line_head = None
 
+        # optional Fourier embedding of theta for the trunk conditioning nets.
+        # cond_in is the effective conditioning input width; when off it is
+        # n_params, so the CondNet shapes are byte-identical to the old model.
+        self.film_t_embed = (FourierFeatures(c.film_t_freqs, 0.25, c.film_t_fmax)
+                             if c.film_t_freqs > 0 else None)
+        cond_in = (c.n_params * (1 + 2 * c.film_t_freqs)
+                   if c.film_t_freqs > 0 else c.n_params)
+
         cond_dim = c.cond_hidden
         if c.use_film:
             # FiLM generator: gamma and beta for every hidden layer
-            self.film = CondNet(c.n_params, c.cond_hidden, c.cond_layers,
+            self.film = CondNet(cond_in, c.cond_hidden, c.cond_layers,
                                 2 * c.hidden_size * c.n_hidden)
         else:
             # fall back to concatenating a theta embedding to the coordinate
             self.film = None
-            self.cond_embed = CondNet(c.n_params, c.cond_hidden, c.cond_layers, cond_dim)
+            self.cond_embed = CondNet(cond_in, c.cond_hidden, c.cond_layers, cond_dim)
             in_dim += cond_dim
 
         self.trunk = nn.ModuleList()
@@ -353,7 +369,7 @@ class SpectralOperator(nn.Module):
                 nn.init.uniform_(lin.bias, -c.finer_k, c.finer_k)
 
         if c.use_trend:
-            self.trend = CondNet(c.n_params, c.cond_hidden, c.cond_layers, 2)
+            self.trend = CondNet(cond_in, c.cond_hidden, c.cond_layers, 2)
         else:
             self.trend = None
 
@@ -379,6 +395,14 @@ class SpectralOperator(nn.Module):
         t = torch.log10(temp_kev)
         return 2.0 * (t - self.t_lo) / (self.t_hi - self.t_lo) - 1.0
 
+    def _cond_input(self, tnorm):
+        """Conditioning input for the trunk nets: raw tnorm, or its Fourier
+        embedding when film_t_freqs > 0. tnorm: (B, n_params) ->
+        (B, n_params) or (B, n_params * (1 + 2 * film_t_freqs))."""
+        if self.film_t_embed is None:
+            return tnorm
+        return self.film_t_embed(tnorm.unsqueeze(-1)).flatten(start_dim=1)
+
     # -- forward passes -------------------------------------------------------
     def forward_norm(self, tnorm, x, alpha=1.0, bins=None, add_lines=True):
         """tnorm: (B, n_params); x: (B, P, 1) normalised coordinates.
@@ -387,9 +411,10 @@ class SpectralOperator(nn.Module):
         (used by forward_on_grid, which deposits the lines itself)."""
         B, P, _ = x.shape
         h = self.embed(x, alpha) if self.embed is not None else x
+        tcond = self._cond_input(tnorm)  # (B, n_params) or Fourier-embedded
 
         if self.film is not None:
-            gb = self.film(tnorm)  # (B, 2*H*L)
+            gb = self.film(tcond)  # (B, 2*H*L)
             c = self.config
             gb = gb.view(B, c.n_hidden, 2, c.hidden_size)
             for i, layer in enumerate(self.trunk):
@@ -398,7 +423,7 @@ class SpectralOperator(nn.Module):
                 beta = gb[:, i, 1].unsqueeze(1)
                 h = self.act(gamma * h + beta)
         else:
-            ce = self.cond_embed(tnorm).unsqueeze(1).expand(B, P, -1)
+            ce = self.cond_embed(tcond).unsqueeze(1).expand(B, P, -1)
             h = torch.cat([h, ce], dim=-1)
             for layer in self.trunk:
                 h = self.act(layer(h))
@@ -406,7 +431,7 @@ class SpectralOperator(nn.Module):
         out = self.head(h).squeeze(-1)  # (B, P)
 
         if self.trend is not None:
-            ab = self.trend(tnorm)  # (B, 2)
+            ab = self.trend(tcond)  # (B, 2)
             out = out + ab[:, 0:1] * x.squeeze(-1) + ab[:, 1:2]
 
         if self.config.use_binnorm:

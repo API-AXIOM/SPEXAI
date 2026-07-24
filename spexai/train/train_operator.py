@@ -268,6 +268,8 @@ def make_variant(variant, data, args):
         line_hidden=getattr(args, "line_hidden", 128),
         line_t_freqs=getattr(args, "line_t_freqs", 0),
         line_t_fmax=getattr(args, "line_t_fmax", 64.0),
+        film_t_freqs=getattr(args, "film_t_freqs", 0),
+        film_t_fmax=getattr(args, "film_t_fmax", 64.0),
         x_lo=math.log10(data.energy[0].item()),
         x_hi=math.log10(data.energy[-1].item()),
         t_lo=math.log10(data.temps.min().item()),

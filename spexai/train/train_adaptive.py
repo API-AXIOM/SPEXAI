@@ -591,6 +591,12 @@ def build_parser():
                     help="Fourier embedding of T in the line head "
                          "(0 = plain MLP conditioning)")
     ap.add_argument("--line_t_fmax", type=float, default=64.0)
+    ap.add_argument("--film_t_freqs", type=int, default=0,
+                    help="Fourier embedding of T for the TRUNK conditioning "
+                         "(FiLM/trend); gives capacity for sharp "
+                         "d(emissivity)/dT. 0 = plain MLP conditioning "
+                         "(default, identical to the previous model)")
+    ap.add_argument("--film_t_fmax", type=float, default=64.0)
     ap.add_argument("--schedule", default="cosine", choices=["cosine", "wsd"],
                     help="wsd = warmup-stable-decay: flat LR, linear decay "
                          "over the last --wsd_decay_frac of the run")
