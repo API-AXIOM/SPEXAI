@@ -135,9 +135,12 @@ def run_arm(arm: Dict, args: argparse.Namespace) -> Dict:
     cachedir = os.path.join(args.dataroot, "processed", f"element{arm['z']}")
     ckpt = os.path.join(outdir, "sweep.pt")
     hist_path = os.path.join(outdir, "sweep_history.json")
+    # per-arm --steps override (arm["steps"]) falls back to the sweep default;
+    # lets a follow-on mix budgets (e.g. 200k arms) in one program.
     cmd = [sys.executable, "-m", "spexai.train.train_adaptive",
            "--cachedir", cachedir, "--outdir", outdir,
-           "--steps", str(args.steps), "--compile", str(args.compile),
+           "--steps", str(arm.get("steps", args.steps)),
+           "--compile", str(args.compile),
            "--diag_plots", str(args.diag_plots),
            *COMMON, *arm["flags"]]
     result = {"tag": arm["tag"], "z": arm["z"], "regime": REGIME.get(arm["z"], ""),
