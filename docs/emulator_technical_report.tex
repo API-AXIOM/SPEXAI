@@ -550,6 +550,87 @@ best seen within a run, so noise never degrades it below the trajectory
 -- but a premature stop still forfeits the accuracy the remaining budget
 would have bought, which is exactly what cost Na and Al.
 
+\subsection{The failing band is a temperature-conditioning limit, not an
+energy-axis one}
+\label{sec:tembed}
+Extending the sweep to $Z=2$--$26$ left a persistent band of elements
+(Na, Al, S, Ar, Ca, Cr) plateauing at $0.2$--$0.7\%$ MRE with $0\%$
+yield@0.1\%, resistant to further training. Fine-tuning these checkpoints
+(learning rates $10^{-4}$ down to $10^{-5}$, matched hyperparameters) only
+\emph{degraded} them, which -- together with $\mathrm{train\ MRE}\approx
+\mathrm{val\ MRE}$ throughout -- ruled out both overfitting and simple
+undertraining and pointed at a representational ceiling.
+
+\paragraph{Diagnosis by residual spectroscopy.} We localised the ceiling
+with two model-agnostic diagnostics on the held-out set
+(\code{scripts/residual\_fft.py}). First, the power spectrum of the
+log-flux residual, taken over the \emph{normalised} log-energy coordinate
+$x$ that the Fourier trunk sees, tests the standing hypothesis that the
+floor was high-frequency trunk ``jitter''. It is not: across all $23$
+elements the residual power is strongly \emph{low}-frequency (a red
+spectrum falling from $f\!\sim\!1$ toward $f_{\max}$), and the fraction of
+continuum-residual power above $f_{\max}/2$ is $\le0.6\%$ everywhere,
+\emph{including} the failing elements -- so the excess is a smooth,
+large-amplitude misfit, not ringing, and lowering $f_{\max}$ cannot help.
+Second, stratifying the residual by temperature shows the misfit is
+concentrated in the temperature band where each element's dominant line
+complex switches on -- i.e.\ where $\mathrm{d}(\text{emissivity})/
+\mathrm{d}T$ is sharpest -- and that this band \emph{marches upward with
+$Z$}: sodium is worst below $1$\,keV, calcium at $1$--$5$\,keV (Ca\,K
+$\sim3.9$\,keV), chromium above $5$\,keV (Cr\,K $\sim5.6$--$6.7$\,keV).
+Iron shows the same ordering, only milder. The common cause is thus not
+the energy axis at all but the trunk's \emph{temperature} conditioning: a
+plain MLP on the scalar $T$ underfits these sharp ionisation transitions,
+exactly the pathology the line head already mitigates with an optional
+Fourier embedding of $T$ (\code{line\_t\_freqs}) that the trunk lacked.
+
+\paragraph{Fix: a Fourier temperature embedding on the trunk.} We add the
+same device to the trunk conditioning networks (FiLM generator and trend
+head): the scalar $T$ is replaced by its Fourier features before the
+conditioning MLP (\code{--film\_t\_freqs}, off by default, $+8$k
+parameters at $16$ frequencies; identical to the previous model when
+off). A controlled weekend sweep
+(\code{scripts/run\_weekend\_sweep.py}) trained baseline versus
+$+$embedding from scratch at three points on the cold$\to$hot trend
+(Table~\ref{tab:tembed}), with a parallel set of learning-rate, sampling,
+curriculum, and anneal variations as a convergence control. The embedding
+is decisive and it generalises: it lifts each element's \emph{own} hard
+band -- sodium's sub-$1$\,keV yield@0.1\% $0\to24\%$ and calcium's
+$1$--$5$\,keV band $0\to43\%$ -- while every convergence knob (learning
+rates $3\times10^{-3}$/$5\times10^{-4}$, prioritised-mix $0.8$, short
+curriculum, long anneal) left sodium at $\le15\%$ overall, confirming the
+limit was conditioning \emph{capacity}, not optimisation. Sodium and
+calcium were still improving at the $100$k cap (yield@0.1\% crossed
+$50\%$ only at $68$k and $88$k respectively), so these are lower bounds; a
+$200$k confirmation and a higher-frequency variant for the still-sub-yield
+chromium ($\text{MRE}\ 0.65\%\to0.30\%$, no yield yet) run in
+\code{scripts/run\_followon\_sweep.py}.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{llcccc}
+\toprule
+element & hard band & \multicolumn{2}{c}{yield@0.1\%} &
+\multicolumn{2}{c}{overall MRE}\\
+ & & base & $+$embed & base & $+$embed\\
+\midrule
+Na ($Z=11$) & cold ($<1$\,keV)   & $8.8\%$ & $\mathbf{76.1\%}$ & $0.0020$ & $\mathbf{0.0009}$\\
+Ca ($Z=20$) & mid ($1$--$5$\,keV) & $0\%$   & $\mathbf{49.3\%}$ & $0.0039$ & $\mathbf{0.0012}$\\
+Cr ($Z=24$) & hot ($>5$\,keV)     & $0\%$   & $0\%$             & $0.0065$ & $\mathbf{0.0030}$\\
+\bottomrule
+\end{tabular}
+\caption{Trunk Fourier temperature embedding (\code{--film\_t\_freqs 16},
+from scratch, $100$k steps, learning rate $10^{-3}$) versus the identical
+baseline, on held-out test spectra. The embedding halves overall MRE on
+every element and lifts each element's own hard temperature band; Na/Ca
+were still converging at $100$k (see text). No learning-rate or sampling
+variant of the baseline exceeded $15\%$ yield on Na. Diagnostics and the
+per-temperature-band breakdown:
+\code{docs/development\_plots/residual\_fft/} and
+\code{runs\_sweep/sweep\_summary.md}.}
+\label{tab:tembed}
+\end{table}
+
 \section{Instrument-level validation}
 \label{sec:instruments}
 
