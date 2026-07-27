@@ -50,7 +50,8 @@ SYMBOLS = {1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N",
            15: "P", 16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca", 21: "Sc",
            22: "Ti", 23: "V", 24: "Cr", 25: "Mn", 26: "Fe"}
 
-# HIT / OFF grouping from docs/lowz_plateau_status.md, for colour coding only
+# HIT / OFF grouping from the failing-band survey (see the technical report,
+# docs/emulator_technical_report.tex), for colour coding only
 HIT = {2, 3, 4, 6, 7, 8, 9, 10, 15, 17}
 OFF = {11, 13, 18, 20, 24}
 

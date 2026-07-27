@@ -1,6 +1,6 @@
 """Unsupervised weekend sweep for the temperature-conditioning fix.
 
-Diagnosis (docs/lowz_plateau_status.md, residual_fft.py): the failing-band
+Diagnosis (docs/emulator_technical_report.tex, residual_fft.py): the failing-band
 elements are underfit in the T-range where their dominant line complex turns
 on (sharpest d(emissivity)/dT) -- cold for Na, mid for Ca, hot for Cr -- as a
 smooth low-frequency continuum misfit, NOT energy-axis jitter. This sweep

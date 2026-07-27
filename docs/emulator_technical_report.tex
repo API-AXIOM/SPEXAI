@@ -631,6 +631,28 @@ per-temperature-band breakdown:
 \label{tab:tembed}
 \end{table}
 
+\paragraph{Causal confirmation.} Re-running the §\ref{sec:tembed}
+residual diagnostic on the trained baseline versus $+$embedding
+checkpoints, restricted to each element's hard band
+(\code{scripts/compare\_fix.py}), shows the specific signature the
+diagnosis blamed is \emph{removed}, not merely masked: the low-frequency
+continuum-residual power collapses by $\sim10^{10}\times$ for sodium
+(cold), $46\times$ for calcium (mid) and $49\times$ for chromium (hot),
+with matching drops in the RMS residual. This closes the causal loop --
+the fix targets the diagnosed cause. Before/after figures:
+\code{docs/development\_plots/fix\_confirmation/}.
+
+\paragraph{Status and open items.} The $200$k confirmation and the
+higher-frequency chromium arm (\code{scripts/run\_followon\_sweep.py})
+were running at the time of writing; results land in
+\code{runs\_followon/sweep\_summary.md}. On confirmation the remaining
+next steps are a production re-run of the full failing band (Al, S, Ar,
+and re-doing Na/Ca/Cr) with \code{--film\_t\_freqs 16} as the default and
+early stopping re-enabled, followed by rebuilding the shipped model store
+(\code{spexai/models/}, via \code{scripts/collect\_models.py}) and
+re-validating the joint inference model, whose failing-band members
+predate the embedding.
+
 \section{Instrument-level validation}
 \label{sec:instruments}
 
@@ -794,6 +816,14 @@ Unweighted per-channel means & $30\times$ swings between models with
 equal medians & flux-weighted MRE (planned)\\
 $(T,v)$-emulator line-head removal & core errors $\pm$2--5\% at all
 $v$ & analytic Gaussian line head\\
+High-frequency ``trunk jitter'' as the failing-band cause &
+residual power is low-frequency; $\le0.6\%$ above $f_{\max}/2$ for all
+$23$ elements (Section~\ref{sec:tembed}) & temperature-conditioning
+diagnosis $\to$ trunk $T$-embedding\\
+Warm-start/fine-tune to fix the band & every attempt degraded the
+checkpoint ($0.34\%\to0.48$--$0.52\%$); a warm start resets
+LR/curriculum/optimizer/EMA & from-scratch runs (fine-tune only for true
+continuation)\\
 \bottomrule
 \end{tabular}
 \caption{Approaches tried and discarded, with the deciding evidence.}
@@ -824,6 +854,61 @@ frequencies ($f_{\max}=4000$), FiLM, trend head, per-bin normalisation,
 line head (dim 16, hidden 128), batch 128, 2048 points/spectrum, AdamW
 at $10^{-3}$ with WSD schedule, EMA decay 0.999, prioritized sampling
 with mix 0.4, 100k steps.
+
+Diagnostics for the failing-band campaign:
+\code{scripts/residual\_fft.py} (residual power spectrum, per-temperature
+stratification), \code{scripts/compare\_fix.py} (before/after
+confirmation), \code{scripts/diagnose\_element.py} (error vs
+temperature); controlled sweeps in \code{scripts/run\_weekend\_sweep.py}
+and \code{scripts/run\_followon\_sweep.py}; the trunk temperature
+embedding is \code{--film\_t\_freqs} in \code{spexai/train/operator.py},
+covered by \code{tests/test\_operator\_arch.py}.
+
+\paragraph{Where the outputs live.} Data and results are under
+\code{\textasciitilde/work/data/spexai/} (workstation) or
+\code{\textasciitilde/data/spexai\_data/} (cluster); figures and code
+under the repository root. Table~\ref{tab:outputs} is the index.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{p{5.4cm}p{8.4cm}}
+\toprule
+Output & Location\\
+\midrule
+Per-element base checkpoints & \code{runs/element<Z>/tier1/reweight\_full.pt};
+table \code{runs/elements\_summary.md}\\
+Weekend $T$-embedding sweep & \code{runs\_sweep/<arm>/} (\code{sweep.pt},
+\code{sweep\_history.json}, \code{result.json}, \code{figures/}); ranked
+\code{runs\_sweep/sweep\_summary.md}\\
+Follow-on sweep ($200$k) & \code{runs\_followon/<arm>/} $+$
+\code{sweep\_summary.md}\\
+Discarded warm-start attempts & \code{runs\_finetune/element11/}\\
+Residual-FFT diagnostics & \code{docs/development\_plots/residual\_fft/}
+(\code{Z<zz>\_residual\_fft.png}, \code{Z<zz>\_by\_temperature.png},
+\code{comparison.png})\\
+Fix confirmation (before/after) &
+\code{docs/development\_plots/fix\_confirmation/}\\
+Error-vs-temperature fingerprints &
+\code{docs/development\_plots/element\{11,26\}\_*\_error\_vs\_temperature.png}\\
+Inference / simulation demos &
+\code{docs/development\_plots/\{inference\_demo,simulated\_obs\}\_*.png}\\
+Shipped model store & \code{spexai/models/Z<zz>\_<sym>.pt} $+$
+\code{manifest.json}\\
+\bottomrule
+\end{tabular}
+\caption{Index of trained checkpoints, sweep results, and diagnostic
+figures.}
+\label{tab:outputs}
+\end{table}
+
+\paragraph{Environment.} \code{environment.yml} / \code{requirements.txt}
+build the conda env \code{spexai} (Python 3.12, torch $\ge2.13$). On the
+macOS workstation, export \code{KMP\_DUPLICATE\_LIB\_OK=TRUE} and
+\code{MKL\_THREADING\_LAYER=GNU} before running (duplicate-\code{libomp}
+and MKL-vs-\code{libgomp} guards; neither is needed on the Linux
+cluster). The diagnostics are CPU-safe and are run with \code{--device
+cpu}; training runs on the GPU.
 
 \begin{thebibliography}{99}
 
