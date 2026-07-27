@@ -50,10 +50,13 @@ def main():
                     help="default: drawn from the clock (fresh set each run)")
     ap.add_argument("--outdir", default=None,
                     help="default: directory of the first checkpoint")
+    ap.add_argument("--device", default=None,
+                    help="cpu | cuda | mps (default: auto; use cpu on the "
+                         "laptop -- full-grid MPS evals can freeze it)")
     args = ap.parse_args()
 
-    device = ("mps" if torch.backends.mps.is_available()
-              else "cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device or ("mps" if torch.backends.mps.is_available()
+                             else "cuda" if torch.cuda.is_available() else "cpu")
     seed = args.seed if args.seed is not None else int(time.time()) % 100000
     rng = np.random.default_rng(seed)
     data = SpectrumData(args.cachedir)

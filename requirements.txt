@@ -17,4 +17,6 @@ torchinterp1d
 
 # Dev / optional.
 pytest            # tests/
+black             # formatter (CLAUDE.md)
+flake8            # linter (CLAUDE.md)
 # schedulefree    # optional --optimizer schedulefree arm in train_adaptive

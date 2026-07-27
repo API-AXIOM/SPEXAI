@@ -214,7 +214,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataroot", default=os.path.expanduser("~/data/spexai_data"),
                     help="holds processed/element<Z>/ caches")
-    ap.add_argument("--runroot", default=os.path.expanduser("~/data/spexai_data/runs_sweep"),
+    ap.add_argument("--runroot",
+                    default=os.path.expanduser("~/data/spexai_data/runs_sweep"),
                     help="per-arm outputs + sweep_summary.{json,md}")
     ap.add_argument("--steps", type=int, default=100000)
     ap.add_argument("--compile", type=int, default=0,

@@ -33,7 +33,8 @@ from residual_fft import (aggregate, element_residual_spectrum,  # noqa: E402
                           _band_lines)
 
 # hard-T band -> (lo, hi) keV selection for the stratified overlay
-BANDS = {"cold": (0.0, 1.0), "mid": (1.0, 5.0), "hot": (5.0, np.inf), "all": (0.0, np.inf)}
+BANDS = {"cold": (0.0, 1.0), "mid": (1.0, 5.0), "hot": (5.0, np.inf),
+         "all": (0.0, np.inf)}
 
 
 def band_subset(temps: np.ndarray, band: str) -> np.ndarray:
