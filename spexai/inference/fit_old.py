@@ -1,3 +1,10 @@
+# DEPRECATED: superseded legacy CNN fit driver. Use spexai.inference.fitting.
+import warnings as _warnings
+_warnings.warn(
+    "spexai.inference.fit_old is deprecated (legacy CNN stack); use "
+    "spexai.inference.fitting instead.",
+    DeprecationWarning, stacklevel=2)
+
 import numpy as np
 import pandas as pd
 import torch

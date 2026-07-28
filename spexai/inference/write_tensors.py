@@ -1,3 +1,11 @@
+# DEPRECATED: legacy CNN-era I/O. The operator stack uses
+# spexai.inference.response (RMF/ARF) and self-contained operator checkpoints.
+import warnings as _warnings
+_warnings.warn(
+    "spexai.inference.write_tensors is deprecated (legacy CNN stack); use "
+    "spexai.inference.response instead.",
+    DeprecationWarning, stacklevel=2)
+
 from astropy.io import fits
 import numpy as np
 import pandas as pd

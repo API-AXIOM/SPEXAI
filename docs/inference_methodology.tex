@@ -1,0 +1,203 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newcommand{\nh}{N_{\mathrm{H}}}
+\newcommand{\kev}{\,\mathrm{keV}}
+\newcommand{\kms}{\,\mathrm{km\,s^{-1}}}
+\newcommand{\zsun}{Z_\odot}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Inference and evaluation with the SpexAI emulator:\\
+forward model, absorption, temperature distributions, and bias testing\\
+\large Methodology report (companion to the emulator technical report)}
+\author{D.~Huppenkothen \and Claude (Anthropic)}
+\date{2026 July}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report documents the inference side of \code{spexai}: how a full observed
+X-ray spectrum is assembled from the per-element neural operators, how Galactic
+absorption and velocity broadening are applied, how we fit single- and
+multi-temperature (differential emission measure, DEM) models with MCMC and
+nested sampling, and how we test the emulator for bias against an independent
+SPEX-derived ground truth. It is deliberately kept separate from the emulator
+\emph{development} report, which covers architecture and training. Design
+choices flagged here as approximations (PCHIP ground truth, native-resolution
+truth broadening, \code{wabs} vs.\ \code{tbabs} cross-sections) are called out
+explicitly so they can be revisited.
+\end{abstract}
+
+\section{Forward model}
+An observed spectrum is built as
+\begin{equation}
+C_c = t_{\rm exp}\,N \sum_e R_{ec}\, A_e
+      \left[\sum_Z a_Z\, f_{Z}\!\big((1{+}z)E_e; T, v\big)\right]
+      \, e^{-\nh\,\sigma(E_e)} ,
+\end{equation}
+where $f_Z$ is the emulated per-element flux, $a_Z$ the solar-relative
+abundance, $R$/$A$ the RMF/ARF, $z$ the source redshift, $v$ the velocity
+broadening, and $e^{-\nh\sigma}$ the Galactic absorption screen. The joint
+emitter is \code{JointOperatorModel}; folding is \code{Response.fold}. Because
+folding is linear, a temperature distribution is summed \emph{before} folding
+(Sec.~\ref{sec:dem}).
+
+\section{Velocity broadening}
+Broadening is a Doppler redistribution, a photon from $E_j$ landing at
+$E_j(1+v_{\rm los}/c)$ with $v_{\rm los}\sim\mathcal N(0,v^2)$. We use a
+\emph{hybrid} scheme: the smooth continuum is convolved by FFT in uniform
+log-energy (shift-invariant to first order in $v/c$, differentiable, batched
+over per-spectrum velocities), while line-head lines are deposited as exact
+bin-integrated Gaussians (\code{erf} differences) at their exact energies. The
+exact redistribution matrix \code{direct\_broadening\_matrix} is retained as the
+reference; the deployed FFT+analytic path agrees with it to well below the
+emulator's own error.
+
+\section{Why an operator, given that broadening needs a fine grid}
+It is reasonable to ask why we train a grid-portable operator if the broadened
+forward pass still routes the continuum through a fine log-uniform grid. The
+fine grid is a property of the \emph{FFT broadening method} (its resolution is
+set by the kernel width $\sigma/E=v/c$), not of the emulator: a fixed-grid model
+would need it too, and worse---upsampling already-binned fluxes smears lines.
+The operator's payoff in the broadened pipeline is therefore twofold: (i)
+\emph{analytic, grid-exact lines}, deposited directly onto the instrument grid
+and never passed through a lossy rebin, which is exactly the
+resolution-critical part; and (ii) \emph{smooth, batched temperature
+dependence}, which is what makes DEM integration over hundreds of temperatures
+cheap and differentiable---a per-SPEX-temperature table would require PCHIP
+interpolation at every likelihood call. Grid portability is fully realised for
+the line head and for the unbroadened path (\code{forward\_on\_grid}); the exact
+matrix route even broadens directly on the instrument grid with no fine grid,
+and is kept as the reference.
+
+\section{Galactic absorption}
+Photoelectric absorption multiplies the source flux by
+$T(E)=e^{-\nh\sigma(E)}$ in the \emph{observed} frame. The cross-section per
+hydrogen atom $\sigma(E)$ is taken from an established model, not invented:
+
+\begin{itemize}
+\item \textbf{\code{tbabs}} \citep*{wilms2000} is tabulated once from XSPEC
+(PyXspec, with \code{abund wilm}), inverted to $\sigma(E)$ and cached as a tensor
+(\code{scripts/build\_tbabs\_table.py}); runtime never calls XSPEC. conda-forge
+ships no XSPEC for macOS, but HEASoft is installable via the HEASARC conda
+channel, from which the table was generated
+($\sigma(1\kev)=1.74\times10^{-22}\,\mathrm{cm^2}$). \code{Absorption.default()}
+uses it when the cached table is present.
+\item \textbf{\code{wabs}} \citep*{morrison1983} is the dependency-free fallback,
+an analytic polynomial validated against its published coefficients
+($\sigma(1\kev)=2.422\times10^{-22}\,\mathrm{cm^2}$), used when the \code{tbabs}
+table is absent (e.g.\ a fresh checkout without HEASoft).
+\end{itemize}
+
+\paragraph{Insertion point (instrument-resolution independence).}
+Absorption acts on flux \emph{density}, so applying $T(E_{\rm centre})$ to an
+already-rebinned coarse spectrum would mis-integrate across a bin and smear the
+photoelectric edges, differently per instrument. Instead $T$ is applied on the
+native fine grid \emph{before} rebinning (continuum) and at the exact line
+energies (lines), evaluated at the observed energy $E_{\rm rest}/(1{+}z)$. The
+coarse RMF then only ever sees an already-absorbed, flux-conserved spectrum, so
+the result is instrument-resolution independent by construction and needs no
+operator retraining. The same screen multiplies the emulator and the SPEX
+truth, so the bias round-trip stays self-consistent regardless of the
+cross-section choice.
+
+\section{Absolute normalisation and distance}
+The ``norm'' fed to \code{predict\_counts} is the SPEX \code{cie} normalisation:
+the emission measure $Y \equiv n_H n_e V$ in units of $10^{64}\,\mathrm{m^{-3}}$.
+The per-element operators were trained on SPEX spectra at the SPEX reference
+$Y=1$ and reference luminosity distance $D_{\rm ref}=10^{22}\,\mathrm{m}$ (the
+SPEX default \code{distance} unit), so physical detector counts are
+\begin{equation}
+C_c = t_{\rm exp}\; Y \left(\frac{D_{\rm ref}}{D}\right)^{\!2}
+      \; u_{\rm A}\; \sum_e R_{ec} A_e\, f_e ,
+\end{equation}
+with $u_{\rm A}=10^{-4}$ converting SPEX's SI photon flux
+($\mathrm{ph\,s^{-1}\,m^{-2}\,bin^{-1}}$) to the per-$\mathrm{cm^2}$ convention of
+the OGIP ARF. These constants live in \code{spexai.inference.units}. $Y$ and $D$
+are perfectly degenerate in a single spectrum, so $D$ is supplied fixed (from the
+known redshift/distance) and $Y$ is fitted.
+
+\paragraph{Validation against SPEX.} We installed SPEX (SPEXACT 2.07, native
+Apple-Silicon conda build) and compared the emulator's \emph{absolute} flux to a
+SPEX \code{cie} spectrum at $T=4\kev$, $Y=1$, $D=D_{\rm ref}$
+(\code{scripts/validate\_spex\_norm.py}). The emulator reproduces SPEX to a
+median $\sim2.5\%$ across the $3$--$8\kev$ continuum (ratio $0.99$ at $2$--$5\kev$,
+falling to $0.95$ at $8\kev$). This confirms the flux units
+($\mathrm{ph\,s^{-1}\,m^{-2}\,bin^{-1}}$, hence $u_{\rm A}=10^{-4}$), $Y_{\rm
+ref}=1$ and $D_{\rm ref}=10^{22}\,\mathrm{m}$ -- there is no order-of-magnitude
+unit error. The mild high-energy deficit is the expected signature of the
+present model covering only 16 of 30 elements (SPEX's additional metals add
+continuum), and should shrink with the full 30-element model.
+
+\section{Independent SPEX ground truth}
+To test the emulator for bias we need spectra \emph{not} produced by it.
+\code{SpexTruthModel} interpolates the preprocessed per-element SPEX training
+spectra with per-bin monotone cubic (PCHIP) in $\log_{10}T$, sums elements
+linearly by abundance, broadens with the exact redistribution matrix on the
+native SPEX grid, and folds through the response. This is a documented
+approximation to a live SPEX call: the cache carries no abundance dimension
+(abundances enter only through the linear CIE sum, which is exact), broadening
+is at the native SPEX resolution, and off-grid temperatures come from PCHIP
+rather than SPEX. Against the emulator it agrees to $\sim0.1$--$0.7\%$ in flux
+for iron, i.e.\ both approximate SPEX at the sub-percent level; the residual is
+what the bias study probes.
+
+\section{Temperature distributions and abundances}\label{sec:dem}
+A DEM is a weighted sum $\sum_g w_g\, f(T_g)$ over a temperature grid, evaluated
+by \code{predict\_counts\_dem} (folding once, after the sum). Shapes are drawn
+from standard libraries: Gaussian in $\log_{10}T$ or in $T$, a two-component
+mixture, and a log-normal, all thin wrappers over \code{scipy.stats}; the
+non-parametric \code{BinnedDEM} carries one free, normalised weight per coarse
+bin with no smoothness prior. Abundances use \code{AbundanceModel}: a global
+metallicity scaling all metals, with individual elements freed or tied to a
+fraction of iron (an $[X/\mathrm{Fe}]$ ratio), reproducing the thesis scheme
+(global $Z$ with free N/Fe, O/Fe) in a reusable object.
+
+\section{Bias testing}
+We use simulation-based calibration (SBC) with pulls, staged. Observations are
+simulated from \code{SpexTruthModel}, fitted with the emulator
+(\code{run\_emcee}; \code{run\_ultranest} for evidence/spot checks), and scored
+by the median$-$truth pull, central-interval coverage, and---at scale---the SBC
+rank statistic (a uniform rank histogram indicates calibration). An
+emulator-self round-trip is the control that separates emulator bias from
+sampler and statistical scatter. Parameter ranges (Table~\ref{tab:ranges}) are
+literature-grounded; note that real clusters sit near $Z\sim0.3\,\zsun$, well
+below the thesis's fiducial $\sim1\,\zsun$, so the calibration must span that
+regime. A \emph{Perseus} showcase (single-temperature core and a Gaussian DEM)
+uses published values ($z=0.0179$, $\nh\sim1.4\times10^{21}\,\mathrm{cm^{-2}}$,
+$kT\sim3.9\kev$, $Z_{\rm Fe}\sim0.55\,\zsun$, $\sigma_v\sim180\kms$) folded
+through XRISM/Resolve, as a concrete recovery demonstration.
+
+\begin{table}[t]
+\centering
+\caption{Parameter ranges. ``Realistic'' is the primary SBC volume; ``Extreme''
+is the stress-test extension. $kT$ is capped at the $0.2$--$10\kev$ training
+band.}
+\label{tab:ranges}
+\begin{tabular}{lccc}
+\toprule
+Parameter & Realistic & Extreme & Perseus \\
+\midrule
+$kT$ (keV)        & 1--8       & 0.3--10   & $\sim$3.5--4 \\
+$Z$ ($\zsun$)     & 0.2--0.7   & 0.1--1.5  & $\sim$0.5--0.6 \\
+$[\alpha/\mathrm{Fe}]$ & 1.0--1.5 & 0.5--2 & $\sim$1 \\
+$v$ (km/s)        & 0--300     & 0--600    & $\sim$150--200 \\
+$\nh$ (cm$^{-2}$) & $5{\times}10^{19}$--$3{\times}10^{21}$ & $\to10^{22}$ & $\sim$1.4$\times10^{21}$ \\
+$z$               & 0.01--0.3  & $\to$1    & 0.0179 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{thebibliography}{9}
+\bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\
+1983, ApJ, 270, 119.
+\bibitem[Wilms et al.(2000)]{wilms2000} Wilms, J., Allen, A.\ \& McCray, R.\
+2000, ApJ, 542, 914.
+\end{thebibliography}
+
+\end{document}

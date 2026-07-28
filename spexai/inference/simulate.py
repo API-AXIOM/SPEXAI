@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from spexai.inference.units import D_REF_M
+
 
 @dataclass
 class Observation:
@@ -30,33 +32,41 @@ class Observation:
         return int(self.counts.sum())
 
 
-def expected_counts(model, response, params, exposure):
-    """Poisson-mean counts per channel for one parameter set (no draw)."""
+def expected_counts(model, response, params, exposure, absorption=None):
+    """Poisson-mean counts per channel for one parameter set (no draw).
+
+    Optional Galactic absorption: pass an ``absorption`` screen and carry the
+    column as ``params["n_h"]`` (cm^-2)."""
     mu = model.predict_counts(
         torch.tensor([float(params["temp"])]),
         params.get("abundances", {}),
         float(params.get("logz", -10.0)),
         float(params["norm"]),
         float(params.get("velocity", 0.0)),
-        response, exposure=exposure).squeeze(0).cpu().numpy()
+        response, exposure=exposure,
+        luminosity_distance=float(params.get("luminosity_distance", D_REF_M)),
+        absorption=absorption, n_h=float(params.get("n_h", 0.0))
+    ).squeeze(0).cpu().numpy()
     return np.clip(mu, 0.0, None)
 
 
 def simulate_observation(model, response, params, exposure,
-                         target_counts=None, instrument="", rng=None):
+                         target_counts=None, instrument="", rng=None,
+                         absorption=None):
     """Simulate one observation.
 
-    params: {temp, norm, [abundances], [logz], [velocity]}.
+    params: {temp, norm, [abundances], [logz], [velocity], [n_h]}.
     target_counts: if given, `norm` is rescaled so the *expected* total counts
         equal this (handy while absolute flux units are still placeholder);
         the rescaled norm is stored in the returned Observation's true_params.
     rng: int seed or numpy Generator for the Poisson draw.
+    absorption: optional Galactic absorption screen (with ``params["n_h"]``).
     """
     p = dict(params)
     p.setdefault("abundances", {})
     p.setdefault("logz", -10.0)
     p.setdefault("velocity", 0.0)
-    mu = expected_counts(model, response, p, exposure)
+    mu = expected_counts(model, response, p, exposure, absorption=absorption)
     if target_counts is not None:
         scale = float(target_counts) / max(float(mu.sum()), 1e-30)
         p["norm"] = float(p["norm"]) * scale

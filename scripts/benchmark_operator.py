@@ -29,9 +29,9 @@ import numpy as np
 import torch
 
 from spexai.train.operator import FixedGridMLP
-from spexai.train.train_operator import (FLOOR, LINE_THRESHOLD_DEX,
-                                         SpectrumData, continuum_estimate,
-                                         make_variant)
+from spexai.train.train_operator import SpectrumData, make_variant
+from spexai.train.metrics import (abs_rel_error, floor_violations,
+                                  line_continuum_masks, metrics_from_eps)
 
 
 def load_model(ckpt_path, data):
@@ -85,50 +85,6 @@ def predict_all(model, data, idx, device, fixed_grid, batch=64):
     return torch.cat(preds).numpy()
 
 
-def metrics_from_eps(eps, mask):
-    """Per-spectrum mean rel. error over `mask` bins -> summary dict.
-
-    Also reports the per-POINT statistic of Matthijsse's thesis (Eq. 6.4):
-    the percentage of masked points with relative error above 1e-3 / 1e-2.
-    """
-    cnt = mask.sum(axis=1)
-    ok = cnt > 0
-    mre = np.where(ok, (eps * mask).sum(axis=1) / np.maximum(cnt, 1), np.nan)
-    mre = mre[ok]
-    eps_pts = eps[mask]
-    return {
-        "n_spectra": int(ok.sum()),
-        "mre_mean": float(np.mean(mre)),
-        "mre_median": float(np.median(mre)),
-        "yield_01pct": float((mre <= 0.001).mean() * 100),
-        "yield_1pct": float((mre <= 0.01).mean() * 100),
-        "yield_10pct": float((mre <= 0.10).mean() * 100),
-        "points_above_01pct": float((eps_pts > 1e-3).mean() * 100),
-        "points_above_1pct": float((eps_pts > 1e-2).mean() * 100),
-    }
-
-
-def floor_violations(pred, target):
-    """Check the empty-bin contract on unseen data: wherever the true flux
-    is at/below FLOOR (invisible with a real telescope), the emulator must
-    also predict below FLOOR. These bins are excluded from the error
-    metrics, so violations would otherwise go unnoticed."""
-    floor_mask = target <= FLOOR
-    n = int(floor_mask.sum())
-    if n == 0:
-        return {"n_floor_bins": 0, "violation_pct": 0.0,
-                "violation_gt1dex_pct": 0.0, "max_excess_dex": 0.0,
-                "spectra_with_violation_pct": 0.0}
-    excess = np.where(floor_mask, pred - FLOOR, -np.inf)
-    return {
-        "n_floor_bins": n,
-        "violation_pct": float((excess > 0).sum() / n * 100),
-        "violation_gt1dex_pct": float((excess > 1).sum() / n * 100),
-        "max_excess_dex": float(excess.max()),
-        "spectra_with_violation_pct": float((excess > 0).any(axis=1).mean() * 100),
-    }
-
-
 def speed_benchmark(model, data, device, fixed_grid, nrep=50):
     energy = data.energy.to(device)
     temps = data.temps[:256].to(device)
@@ -165,10 +121,7 @@ def main():
     energy = data.energy.numpy()
 
     print("estimating continua for line/continuum split ...", flush=True)
-    cont = continuum_estimate(target)
-    valid = target > FLOOR
-    line_mask = valid & (np.clip(target, FLOOR, None) - cont > LINE_THRESHOLD_DEX)
-    cont_mask = valid & ~line_mask
+    valid, line_mask, cont_mask = line_continuum_masks(target)
     print(f"line bins: {line_mask.mean()*100:.1f}%  continuum bins: "
           f"{cont_mask.mean()*100:.1f}%  empty: {(~valid).mean()*100:.1f}%")
 
@@ -184,8 +137,7 @@ def main():
         fixed_grid = isinstance(model, FixedGridMLP)
         pred = predict_all(model, data, idx, device, fixed_grid)
 
-        d = np.clip(pred - np.clip(target, FLOOR, None), -4, 4)
-        eps = np.abs(10.0 ** d - 1.0)
+        eps = abs_rel_error(pred, target)
 
         res = {
             "overall": metrics_from_eps(eps, valid),

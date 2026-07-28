@@ -32,23 +32,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spexai.train.train_operator import (FLOOR, LINE_THRESHOLD_DEX,
                                          SpectrumData, continuum_estimate)
-
-
-def metrics_from_eps(eps, mask):
-    cnt = mask.sum(axis=1)
-    ok = cnt > 0
-    mre = ((eps * mask).sum(axis=1) / np.maximum(cnt, 1))[ok]
-    eps_pts = eps[mask]
-    return {
-        "n_spectra": int(ok.sum()),
-        "mre_mean": float(np.mean(mre)),
-        "mre_median": float(np.median(mre)),
-        "yield_01pct": float((mre <= 0.001).mean() * 100),
-        "yield_1pct": float((mre <= 0.01).mean() * 100),
-        "yield_10pct": float((mre <= 0.10).mean() * 100),
-        "points_above_01pct": float((eps_pts > 1e-3).mean() * 100),
-        "points_above_1pct": float((eps_pts > 1e-2).mean() * 100),
-    }
+# metrics_from_eps is re-exported here for scripts/benchmark_offgrid.py, which
+# imports it from this module; the single definition lives in spexai.train.metrics.
+from spexai.train.metrics import metrics_from_eps
 
 
 def predict_linear(lt_train, Y, lt_test):

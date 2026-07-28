@@ -1,3 +1,10 @@
+# DEPRECATED: superseded legacy CNN model. Use spexai.inference.operator_model.
+import warnings as _warnings
+_warnings.warn(
+    "spexai.inference.model_old is deprecated (legacy CNN stack); use "
+    "spexai.inference.operator_model instead.",
+    DeprecationWarning, stacklevel=2)
+
 import numpy as np
 import torch
 import torch.nn as nn

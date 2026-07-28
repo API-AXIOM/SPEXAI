@@ -1,3 +1,11 @@
+# DEPRECATED: legacy CNN inference stack. Use the operator stack instead
+# (spexai.inference.operator_model / fitting / simulate / response).
+import warnings as _warnings
+_warnings.warn(
+    "spexai.inference.model is deprecated (legacy CNN stack); use "
+    "spexai.inference.operator_model instead.",
+    DeprecationWarning, stacklevel=2)
+
 import pickle
 import numpy as np
 import torch

@@ -1,3 +1,11 @@
+# DEPRECATED: legacy CNN inference stack. Use the operator stack instead
+# (spexai.inference.fitting for emcee/ultranest fits over the operator model).
+import warnings as _warnings
+_warnings.warn(
+    "spexai.inference.fit is deprecated (legacy CNN stack); use "
+    "spexai.inference.fitting instead.",
+    DeprecationWarning, stacklevel=2)
+
 import numpy as np
 import pandas as pd
 import torch

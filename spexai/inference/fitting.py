@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from spexai.inference.units import D_REF_M
+
 
 @dataclass
 class Param:
@@ -24,21 +26,50 @@ class Param:
     truth: float = None
 
 
-def make_loglike(obs, model, param_names, fixed):
-    """Poisson log-likelihood (constant dropped) for one Observation."""
+def make_loglike(obs, model, param_names, fixed, abundance_model=None, dem=None,
+                 absorption=None):
+    """Poisson log-likelihood (constant dropped) for one Observation.
+
+    Single-temperature by default. Optional hooks:
+
+    * ``abundance_model``: an :class:`~spexai.inference.abundances.AbundanceModel`
+      whose ``to_abundances(p)`` maps the sampled parameters to ``{Z: value}``
+      (merged over any ``fixed["abundances"]``). Without it, abundances are
+      whatever ``fixed`` carries.
+    * ``dem``: a temperature-distribution model (see
+      :mod:`spexai.inference.tempdist`) exposing ``temp_grid`` and
+      ``weights(p)``; when given, the likelihood uses ``predict_counts_dem``
+      instead of a single ``temp``.
+
+    ``logz`` and ``velocity`` are read from the sampled parameters when present,
+    otherwise from ``fixed``.
+    """
     counts = np.asarray(obs.counts, dtype=np.float64)
     resp, expo = obs.response, obs.exposure
-    abund = fixed.get("abundances", {})
-    logz = float(fixed.get("logz", -10.0))
+    fixed_abund = fixed.get("abundances", {})
+    logz_fix = float(fixed.get("logz", -10.0))
     vfix = float(fixed.get("velocity", 0.0))
+    nh_fix = float(fixed.get("n_h", 0.0))
+    ld_fix = float(fixed.get("luminosity_distance", D_REF_M))   # metres; fixed
 
     def loglike(theta):
         p = dict(zip(param_names, theta))
-        vel = p.get("velocity", vfix)
-        mu = model.predict_counts(
-            torch.tensor([float(p["temp"])]), abund, logz,
-            10.0 ** float(p["log_norm"]), float(vel), resp, expo
-        ).squeeze(0).cpu().numpy().astype(np.float64)
+        vel = float(p.get("velocity", vfix))
+        logz = float(p.get("logz", logz_fix))
+        n_h = float(p.get("n_h", nh_fix))
+        ld = float(p.get("luminosity_distance", ld_fix))
+        norm = 10.0 ** float(p["log_norm"])   # Y = emission measure (1e64 m^-3)
+        abund = ({**fixed_abund, **abundance_model.to_abundances(p)}
+                 if abundance_model is not None else fixed_abund)
+        if dem is not None:
+            mu = model.predict_counts_dem(
+                dem.temp_grid, dem.weights(p), abund, logz, norm, vel, resp,
+                expo, luminosity_distance=ld, absorption=absorption, n_h=n_h)
+        else:
+            mu = model.predict_counts(
+                torch.tensor([float(p["temp"])]), abund, logz, norm, vel,
+                resp, expo, luminosity_distance=ld, absorption=absorption, n_h=n_h)
+        mu = mu.squeeze(0).cpu().numpy().astype(np.float64)
         mu = np.clip(mu, 1e-30, None)
         return float(np.sum(counts * np.log(mu) - mu))
     return loglike
@@ -65,7 +96,8 @@ class EmceeResult:
 
 
 def run_emcee(obs, model, params, fixed, nwalkers=16, nsteps=400,
-              discard_frac=0.4, seed=0, progress=False):
+              discard_frac=0.4, seed=0, progress=False,
+              abundance_model=None, dem=None, absorption=None):
     import emcee
     names = [p.name for p in params]
     labels = [p.label or p.name for p in params]
@@ -73,7 +105,8 @@ def run_emcee(obs, model, params, fixed, nwalkers=16, nsteps=400,
     lo = np.array([p.low for p in params])
     hi = np.array([p.high for p in params])
     truths = np.array([p.truth if p.truth is not None else np.nan for p in params])
-    loglike = make_loglike(obs, model, names, fixed)
+    loglike = make_loglike(obs, model, names, fixed, abundance_model, dem,
+                           absorption)
 
     def logprob(theta):
         if np.any(theta < lo) or np.any(theta > hi):
@@ -122,14 +155,16 @@ class UltranestResult:
 
 
 def run_ultranest(obs, model, params, fixed, min_num_live_points=200,
-                  frac_remain=0.01, seed=0, logdir=None):
+                  frac_remain=0.01, seed=0, logdir=None,
+                  abundance_model=None, dem=None, absorption=None):
     import ultranest
     names = [p.name for p in params]
     labels = [p.label or p.name for p in params]
     lo = np.array([p.low for p in params])
     span = np.array([p.high - p.low for p in params])
     truths = np.array([p.truth if p.truth is not None else np.nan for p in params])
-    loglike1 = make_loglike(obs, model, names, fixed)
+    loglike1 = make_loglike(obs, model, names, fixed, abundance_model, dem,
+                            absorption)
 
     def loglike(thetas):                          # vectorized wrapper (loops)
         thetas = np.atleast_2d(thetas)
@@ -141,7 +176,7 @@ def run_ultranest(obs, model, params, fixed, min_num_live_points=200,
     t0 = time.time()
     sampler = ultranest.ReactiveNestedSampler(
         names, loglike, ptform, vectorized=True,
-        log_dir=logdir, resume="overwrite" if logdir else None)
+        log_dir=logdir, resume="overwrite")   # valid even when log_dir is None
     res = sampler.run(min_num_live_points=min_num_live_points,
                       frac_remain=frac_remain, show_status=progress_flag())
     runtime = time.time() - t0
