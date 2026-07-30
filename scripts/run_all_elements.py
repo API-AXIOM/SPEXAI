@@ -41,8 +41,18 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 # Tier-1 recipe; --train_flags and the size preset append/override
+# Run-scope recipe (size preset appends architecture; --train_flags overrides
+# both). Week-long production schedule: --steps is a 300k CAP, not a target. A
+# yield-gated early stop (patience 10 evals = 20k steps, gate 65) starts the
+# WSD decay near convergence for elements already above 65% yield@0.1%, while
+# budget-limited / noisy elements (Ca, Fe, Cr) stay below the gate and run the
+# full cap. The
+# anneal is long and deep (wsd_decay_frac 0.35, lr_min_frac 0.005 -> 5e-6) to
+# polish the smooth low-frequency continuum misfit that limits the failing band.
 TRAIN_FLAGS = ["--mode", "reweight", "--n_train", "0", "--pr_mix", "0.4",
-               "--schedule", "wsd", "--steps", "100000",
+               "--schedule", "wsd", "--steps", "300000",
+               "--wsd_decay_frac", "0.35", "--lr_min_frac", "0.005",
+               "--early_stop_patience", "10", "--early_stop_min_yield", "65",
                "--eval_every", "2000", "--tag", "reweight_full"]
 
 # --size auto presets, keyed to spectral complexity. Elements with edges
@@ -54,8 +64,21 @@ TRAIN_FLAGS = ["--mode", "reweight", "--n_train", "0", "--pr_mix", "0.4",
 # its validation MRE plateaus -- so easy elements finish early on their
 # own without a hand-tuned budget.
 SIZE_PRESETS = {
+    # line-rich metals. Two validated fixes are baked in (previously passed
+    # via --train_flags, which silently reverted to the broken model if
+    # omitted): the Fourier T-embedding on the trunk conditioning
+    # (--film_t_freqs 16) is THE fix for the failing/mid/hot band -- Na
+    # 8->76%, Ca 0->49% yield@0.1% (see jitter-floor / weekend-sweep); and
+    # --lr 1e-3 is mandatory -- the inherited 3e-3 default gives Na 0% yield.
+    # film_t_freqs 32 (not 16): the frequencies are log-spaced over a FIXED
+    # band [0.25, film_t_fmax=64], so 32 only samples that band denser -- it
+    # adds no higher-frequency capacity (no T-axis ringing risk) at ~12k extra
+    # conditioning params and no step-time cost. 32 helped hot-hard Cr (0.0->
+    # 8.7 y@0.1%, follow-on, though confounded with a longer anneal) and is a
+    # superset of 16's function space, so it is the low-risk uniform choice.
     "standard":     ["--hidden", "384", "--layers", "5", "--n_freqs", "512",
-                     "--use_linehead", "auto"],
+                     "--use_linehead", "auto", "--film_t_freqs", "32",
+                     "--lr", "1e-3"],
     # floor-dominated spectra with a few sharp lines (Li/Be/B): the signal is
     # ENTIRELY in a handful of high-frequency line bins, so keep the line head
     # ON and place most of the point loss on the signal bins (see the

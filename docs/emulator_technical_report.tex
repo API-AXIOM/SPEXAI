@@ -642,16 +642,91 @@ with matching drops in the RMS residual. This closes the causal loop --
 the fix targets the diagnosed cause. Before/after figures:
 \code{docs/development\_plots/fix\_confirmation/}.
 
-\paragraph{Status and open items.} The $200$k confirmation and the
-higher-frequency chromium arm (\code{scripts/run\_followon\_sweep.py})
-were running at the time of writing; results land in
-\code{runs\_followon/sweep\_summary.md}. On confirmation the remaining
-next steps are a production re-run of the full failing band (Al, S, Ar,
-and re-doing Na/Ca/Cr) with \code{--film\_t\_freqs 16} as the default and
-early stopping re-enabled, followed by rebuilding the shipped model store
-(\code{spexai/models/}, via \code{scripts/collect\_models.py}) and
-re-validating the joint inference model, whose failing-band members
-predate the embedding.
+\paragraph{Status.} The $200$k confirmation and the higher-frequency
+chromium arm (\code{scripts/run\_followon\_sweep.py}) have since completed,
+together with a pre-Friday timing and probe queue
+(\code{scripts/run\_prefriday\_sweep.py}, \code{scripts/compile\_timing.py}).
+Their outcomes fixed the remaining production choices, frozen in
+§\ref{sec:production}. Results:
+\code{runs\_followon/sweep\_summary.md} and
+\code{runs\_prefriday/sweep\_summary.md}.
+
+\subsection{Production training configuration (the frozen recipe)}
+\label{sec:production}
+
+Four open decisions were resolved by the follow-on and pre-Friday sweeps
+before freezing the recipe in \code{scripts/run\_all\_elements.py}:
+\begin{itemize}
+\item \textbf{Budget.} Calcium (mid) was still climbing at $174$k steps and
+iron reached only $28.6\%$ yield@$0.1\%$ at $100$k, so the failing/mid band
+is budget-limited; the production step cap is raised to $300$k.
+\item \textbf{Trunk-embedding frequencies.} The higher-frequency chromium
+arm lifted the hot-band yield@$0.1\%$ from $0.0$ to $8.7\%$. Because the
+temperature Fourier features are log-spaced over a \emph{fixed} band
+$[0.25,64]$, raising \code{--film\_t\_freqs} from $16$ to $32$ only samples
+that band more densely -- no higher-frequency content and hence no ringing
+risk -- at $\sim$12k extra conditioning parameters and no measurable
+step-time cost. Thirty-two is therefore adopted uniformly for the
+\code{standard} preset (it is a superset of $16$).
+\item \textbf{Line-head temperature embedding.} Adding
+\code{--line\_t\_freqs 16} to iron \emph{degraded} it ($28.6\to18.5\%$
+yield@$0.1\%$), so it is not used.
+\item \textbf{\code{torch.compile}.} A $20$k-step A/B showed no throughput
+gain ($182.3$ vs $182.6$\,ms/step) and would add a per-element compilation
+stall, so compilation is disabled.
+\end{itemize}
+The embedding benefit was independently confirmed on silicon (mid), which
+reached $81.7\%$ yield@$0.1\%$ (MRE $8\times10^{-4}$).
+
+\begin{table}[t]
+\centering
+\caption{Frozen production recipe (\code{scripts/run\_all\_elements.py}).
+The \code{standard} preset carries the architecture fixes; the run-scope
+block sets the schedule. Elements route to \code{standard} automatically
+from spectral complexity (all metals in the set); hydrogen routes to the
+smooth-continuum preset and needs neither fix.}
+\label{tab:production}
+\begin{tabular}{ll}
+\hline
+Knob & Value \\
+\hline
+Trunk hidden / layers / \code{n\_freqs} & $384$ / $5$ / $512$ \\
+Line head & auto (on where $\ge32$ line bins) \\
+Trunk T-embedding \code{--film\_t\_freqs} & $32$ (band $[0.25,64]$) \\
+Learning rate & $10^{-3}$ \\
+Schedule & WSD, decay over last $35\%$ \\
+LR floor \code{--lr\_min\_frac} & $0.005$ ($5\times10^{-6}$) \\
+Step cap \code{--steps} & $300{,}000$ \\
+Early stop & yield-gated: patience $10$ evals, gate $65\%$ \\
+Sampling \code{--pr\_mix} & $0.4$ (error-prioritised) \\
+\code{torch.compile} & off \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Elements and ordering.} The run covers the $18$ elements that
+were failing, mid-band, never trained, or predate the embedding (iron
+re-do): hydrogen and the metals Na, Mg, Al, Si, S, Ar, K, Ca, Ti, V, Cr,
+Mn, Fe, Co, Ni, Cu, Zn, i.e.
+$Z\in\{1,11$--$14,16,18$--$20,22$--$30\}$ (excluding P, Cl and Sc). They are
+trained hardest / most-important first -- iron, calcium, chromium and sodium
+ahead of the easier mid and light elements, hydrogen last -- so that an
+overrun still delivers the scientifically critical failing-band emitters.
+Cobalt, nickel and copper ($Z=27$--$29$) were not cache-verified for their
+preset routing at freeze time and are expected to take \code{standard} like
+their neighbours.
+
+\paragraph{Budget and safety.} At the measured $\approx 183$\,ms/step the
+cap implies $\approx 10$\,h per element and $\approx 10$ days for the set on
+one GPU; elements that clear the $65\%$ gate early-stop and anneal sooner.
+Training longer than needed is safe here: only the lowest-validation-MRE
+checkpoint is shipped, and because the SPEX targets are effectively
+noise-free with train~$\approx$~validation error, the models are
+convergence- rather than overfitting-limited. Chromium (a suspected
+conditioning-capacity ceiling) and iron's cold band may not fully clear even
+at $300$k. After training, the shipped model store (\code{spexai/models/})
+is rebuilt via \code{scripts/collect\_models.py} and the joint inference
+model re-validated, its failing-band members having predated the embedding.
 
 \section{Instrument-level validation}
 \label{sec:instruments}
