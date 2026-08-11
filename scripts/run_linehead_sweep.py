@@ -35,6 +35,14 @@ Aggregate only (no training):     --report_only
 """
 import argparse
 import os
+
+# On Linux clusters mkl-service defaults MKL_THREADING_LAYER=INTEL, which
+# clashes with the GNU OpenMP (libgomp) that PyTorch loads ("MKL_THREADING_
+# LAYER=INTEL is incompatible with libgomp.so.1"). Force the GNU layer before
+# any numpy/torch import; setdefault so an explicit override still wins. This
+# env is inherited by the run_all_elements children we spawn.
+os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+
 import subprocess
 import sys
 from collections import OrderedDict
