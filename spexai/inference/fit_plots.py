@@ -10,11 +10,13 @@ from matplotlib.lines import Line2D
 C_MCMC, C_NS, INK = "#0072B2", "#D55E00", "#222222"   # blue / vermillion (CVD-safe)
 
 
-def _predict(model, obs, names, theta, fixed):
+def _predict(model, obs, names, theta, fixed, abundance_model=None):
     p = dict(zip(names, theta))
     vel = p.get("velocity", fixed.get("velocity", 0.0))
+    abund = ({**fixed.get("abundances", {}), **abundance_model.to_abundances(p)}
+             if abundance_model is not None else fixed.get("abundances", {}))
     return model.predict_counts(
-        torch.tensor([float(p["temp"])]), fixed.get("abundances", {}),
+        torch.tensor([float(p["temp"])]), abund,
         float(fixed.get("logz", -10.0)), 10.0 ** float(p["log_norm"]),
         float(vel), obs.response, obs.exposure).squeeze(0).cpu().numpy()
 
@@ -81,7 +83,7 @@ def plot_corner_overlay(er, ur, outpath):
 
 
 def plot_posterior_predictive(obs, model, er, ur, fixed, outpath,
-                              ndraw=20, seed=0):
+                              ndraw=20, seed=0, abundance_model=None):
     """Two panels (MCMC | UltraNest); each has a spectrum subplot (data,
     posterior median, `ndraw` posterior draws) over a residual subplot."""
     e = obs.response.chan_e_cent.numpy()
@@ -90,14 +92,17 @@ def plot_posterior_predictive(obs, model, er, ur, fixed, outpath,
             else obs.counts > 0)
     rng = np.random.default_rng(seed)
 
-    fig = plt.figure(figsize=(14, 6))
-    gs = GridSpec(2, 2, height_ratios=[3, 1], hspace=0.05, wspace=0.16)
-    for col, (res, label, color) in enumerate(
-            [(er, "emcee (MCMC)", C_MCMC), (ur, "UltraNest (NS)", C_NS)]):
-        med = _predict(model, obs, res.names, res.median, fixed)
+    panels = [(res, label, color) for res, label, color in
+              [(er, "emcee (MCMC)", C_MCMC), (ur, "UltraNest (NS)", C_NS)]
+              if res is not None]
+    fig = plt.figure(figsize=(7 * len(panels), 6))
+    gs = GridSpec(2, len(panels), height_ratios=[3, 1], hspace=0.05, wspace=0.16)
+    for col, (res, label, color) in enumerate(panels):
+        med = _predict(model, obs, res.names, res.median, fixed, abundance_model)
         idx = rng.choice(len(res.samples),
                          size=min(ndraw, len(res.samples)), replace=False)
-        draws = [_predict(model, obs, res.names, res.samples[k], fixed)
+        draws = [_predict(model, obs, res.names, res.samples[k], fixed,
+                          abundance_model)
                  for k in idx]
 
         ax0 = fig.add_subplot(gs[0, col])

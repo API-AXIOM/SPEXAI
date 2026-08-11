@@ -61,6 +61,10 @@ def load_operator(path, map_location="cpu"):
         line_hidden=int(a.get("line_hidden") or 128),
         line_t_freqs=int(a.get("line_t_freqs") or 0),
         line_t_fmax=float(a.get("line_t_fmax", 64.0)),
+        film_t_freqs=int(a.get("film_t_freqs")
+                         or sd.get("film_t_embed.freqs",
+                                   torch.zeros(0)).shape[0]),
+        film_t_fmax=float(a.get("film_t_fmax", 64.0)),
         hidden_size=int(a["hidden"]),
         n_hidden=int(a["layers"]),
         activation=a.get("activation", "gelu"),

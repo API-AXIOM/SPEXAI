@@ -67,7 +67,7 @@ def test_zero_abundance_returns_zeros(fe_model, edges):
 
 def test_missing_elements_reported(small_joint):
     assert set(small_joint.models) == {2, 26}
-    assert 16 in small_joint.manifest["missing_elements"]
+    assert 17 in small_joint.manifest["missing_elements"]  # Cl: never trained
 
 
 # --- counts / response folding via the model -------------------------------

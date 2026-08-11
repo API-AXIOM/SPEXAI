@@ -22,11 +22,9 @@ SYMBOLS = ["H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg",
 SYMBOL = {z: SYMBOLS[z - 1] for z in range(1, 31)}
 
 # elements known to need a re-run before they are science-grade (recorded
-# in the manifest so the joint model / users are not misled)
-KNOWN_ISSUES = {
-    11: "undertrained: early-stop false-triggered on eval noise; re-run pending",
-    13: "undertrained: early-stop false-triggered on eval noise; re-run pending",
-}
+# in the manifest so the joint model / users are not misled). Na(11)/Al(13)
+# were re-trained clean in the production run and are no longer flagged.
+KNOWN_ISSUES = {}
 
 
 def find_checkpoint(runroot, z):
@@ -71,8 +69,16 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
-    manifest = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "runroot": args.runroot, "elements": {}}
+    # Merge into any existing manifest so previously-shipped elements (e.g.
+    # trained from a different runroot) are preserved; only the elements
+    # collected in this invocation are refreshed.
+    manifest_path = os.path.join(args.outdir, "manifest.json")
+    if os.path.exists(manifest_path):
+        manifest = json.load(open(manifest_path))
+    else:
+        manifest = {"elements": {}}
+    manifest["generated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    manifest["runroot"] = args.runroot
     copied = []
     for z in args.elements:
         ckpt = find_checkpoint(args.runroot, z)
@@ -88,9 +94,11 @@ def main():
         manifest["elements"][str(z)] = entry
         copied.append((z, name, entry.get("test_mre")))
 
-    missing = sorted(set(args.elements) - {z for z, _, _ in copied})
+    # missing = anything in the full periodic range not present in the store
+    present = {int(z) for z in manifest["elements"]}
+    missing = sorted(set(range(1, 31)) - present)
     manifest["missing_elements"] = missing
-    with open(os.path.join(args.outdir, "manifest.json"), "w") as f:
+    with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
     print(f"collected {len(copied)} models into {args.outdir}")

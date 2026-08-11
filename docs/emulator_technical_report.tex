@@ -728,6 +728,60 @@ at $300$k. After training, the shipped model store (\code{spexai/models/})
 is rebuilt via \code{scripts/collect\_models.py} and the joint inference
 model re-validated, its failing-band members having predated the embedding.
 
+\subsection{Production run outcome and the residual line-head limit}
+\label{sec:production_outcome}
+
+The run completed (2026-08); $11$ of the $18$ elements reach usable
+test-set yield@$0.1\%$ (Table~\ref{tab:production_outcome}). The cold and
+mid band the campaign targeted is fully resolved ($78$--$89\%$); the
+residual failures are a coherent group -- the hot, \emph{line-rich}
+transition and post-transition metals (Ti, Mn, Co, Cu, Zn at $<1\%$; Cr,
+Ni marginal). All failing elements received the correct \code{standard}
+recipe and ran the full $300$k with early stopping (correctly) not
+triggered, and their LOO baselines ($\sim$$8\times10^{-7}$) confirm the
+targets are learnable; the shortfall is in the model, not the data or
+schedule.
+
+\begin{table}[t]
+\centering
+\caption{Production outcome by test-set yield@$0.1\%$. The failing group is
+the hot, line-rich heavy metals.}
+\label{tab:production_outcome}
+\begin{tabular}{ll}
+\hline
+Tier (yield@$0.1\%$) & Elements \\
+\hline
+Excellent ($78$--$89\%$) & Si, Mg, Al, Na, S, Ar \\
+Acceptable ($43$--$59\%$) & Ca, H, K, Fe, V \\
+Marginal ($10$--$21\%$) & Ni, Cr \\
+Failing ($<1\%$) & Mn, Cu, Ti, Co, Zn \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Diagnosis: line head, not continuum.} The stratified residual
+power spectrum (\code{scripts/residual\_fft.py}, plots in
+\code{docs/development\_plots/residual\_fft\_prod\_fail/}) reframes the
+failure. For the line-rich failures the \emph{continuum is fine} -- Ti's
+continuum RMS residual ($3.75\times10^{-4}$) is \emph{lower} than
+well-performing silicon's ($4.77\times10^{-4}$) -- yet its yield is zero.
+With line bins at $18$--$22\%$ of the grid and line MRE $0.35$--$0.52\%$
+(versus $0.12\%$ for silicon), the per-spectrum $0.1\%$ threshold is lost on
+the \emph{line head}, not the trunk continuum the temperature embedding
+fixed. Chromium is the one exception: a genuine gross low-frequency
+continuum blowup (RMS $1.4\times10^{-2}$) on top of the line error. The
+line-head limit is therefore a distinct axis from the \code{film\_t\_freqs}
+/ \code{film\_t\_fmax} trunk levers, and it is delicate: adding
+\code{--line\_t\_freqs 16} \emph{degraded} iron (\S\ref{sec:production}).
+
+\paragraph{Next steps.} Two independent tracks. (i) Ship the $11$
+good/acceptable elements now: rebuild \code{spexai/models/}
+(\code{scripts/collect\_models.py}) and re-validate the joint inference
+model, unblocking the multi-instrument science test. (ii) Scope a separate
+line-head investigation for the heavy metals (line-head capacity/width and
+the deposition accuracy at the $0.1\%$ level), with chromium's continuum
+blowup handled alongside via the trunk-capacity levers.
+
 \section{Instrument-level validation}
 \label{sec:instruments}
 
