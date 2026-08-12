@@ -1,0 +1,63 @@
+"""Precompute the noise-free Perseus truth spectrum LOCALLY (needs the 40 GB
+per-element caches) and save a tiny in-band vector, so the cluster MCMC never
+needs the caches or SpexTruthModel -- only the 388 MB store + the response.
+
+  KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python -u \
+      inference_demo/hot_floor/dump_truth.py --mode single
+
+Writes results/truth_<mode><tag>.npz with the in-band truth counts at norm_ref,
+the reference norm, and the total channel count (a guard against a mismatched
+response on the cluster). Transfer that npz with the store + response.
+"""
+import argparse
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from experiment import (                                    # noqa: E402
+    PERSEUS, STORE28, injected_abundances, find_xrism_response, band_mask,
+    TruthConfig, stream_truth_counts, gaussian_dem)
+from spexai.inference.response import Response               # noqa: E402
+from spexai.inference.absorption import Absorption           # noqa: E402
+from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["single", "dem"], default="single")
+    ap.add_argument("--sigma_v", type=float, default=None)
+    ap.add_argument("--kT", type=float, default=None)
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--out", default=os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "results"))
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+    for key, val in (("vel", args.sigma_v), ("kT", args.kT)):
+        if val is not None:
+            PERSEUS[key] = val
+
+    rmf, arf = find_xrism_response()
+    response = Response(rmf, arf)
+    absorption = Absorption.default()
+    keep = band_mask(response)
+    emu = JointOperatorModel(models_dir=STORE28, device="cpu")   # for element set
+    dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
+
+    ab = injected_abundances(emu.elements)
+    cfg = TruthConfig(elements=emu.elements, abundances=ab, exposure=1.0,
+                      dem=dem, dem_params=dem_p)
+    d_ref = stream_truth_counts(cfg, response, absorption, verbose=True)
+    d_inband = d_ref[keep]
+    suffix = f"_{args.tag}" if args.tag else ""
+    outp = os.path.join(args.out, f"truth_{args.mode}{suffix}.npz")
+    np.savez(outp, d_inband=d_inband, norm_ref=cfg.norm_ref,
+             n_channels=len(keep), n_keep=int(keep.sum()),
+             kT=PERSEUS["kT"], sigma_v=PERSEUS["vel"], mode=args.mode)
+    print(f"in-band counts at norm_ref={cfg.norm_ref:.1e}: {d_inband.sum():.3e} "
+          f"over {len(d_inband)} channels\nsaved {outp}")
+
+
+if __name__ == "__main__":
+    main()
