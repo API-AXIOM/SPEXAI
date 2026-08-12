@@ -84,7 +84,7 @@ def load_operator(path, map_location="cpu"):
 @torch.no_grad()
 def element_broadened_flux(model, temp_kev, velocity, bin_edges,
                            dlx=1e-5, echunk=8192, absorption=None, n_h=0.0,
-                           redshift=0.0):
+                           redshift=0.0, use_torch_absorption=False):
     """Integrated flux per target bin for one element operator.
 
     Continuum trunk is evaluated on the training grid, FFT-broadened and
@@ -103,7 +103,10 @@ def element_broadened_flux(model, temp_kev, velocity, bin_edges,
     device = model.train_energy.device
     tnorm = model.norm_temp(temp_kev.to(device)).view(-1, model.config.n_params)
     B = tnorm.shape[0]
-    absorb = absorption is not None and float(n_h) > 0.0
+    absorb = (absorption is not None
+              and float(torch.as_tensor(n_h, dtype=torch.float64).max()) > 0.0)
+    tfun = (absorption.transmission_torch if use_torch_absorption
+            else absorption.transmission) if absorb else None
 
     x = model.norm_energy(model.train_energy).view(1, -1, 1)
     dens = torch.cat(
@@ -121,15 +124,14 @@ def element_broadened_flux(model, temp_kev, velocity, bin_edges,
                         dlx, velocity)
     if absorb:  # apply on the fine grid, observed frame, before rebinning
         uni_cent = torch.sqrt(uni[:-1] * uni[1:])
-        f_uni = f_uni * absorption.transmission(
-            uni_cent / (1.0 + redshift), n_h, device=device)
+        f_uni = f_uni * tfun(uni_cent / (1.0 + redshift), n_h, device=device)
     out = rebin_flux(f_uni, uni, bin_edges.to(device))
 
     if model.line_head is not None:
         lh = model.line_head
         line_flux = torch.pow(10.0, lh.all_line_amplitudes(tnorm)) * lh.line_widths
         if absorb:  # each line multiplied by transmission at its exact energy
-            line_flux = line_flux * absorption.transmission(
+            line_flux = line_flux * tfun(
                 lh.line_energies / (1.0 + redshift), n_h, device=device)
         out = out + deposit_gaussian_lines(lh.line_energies, line_flux,
                                            bin_edges.to(device), velocity)

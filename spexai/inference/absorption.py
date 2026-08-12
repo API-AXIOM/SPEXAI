@@ -95,3 +95,23 @@ class Absorption:
         """``exp(-N_H * sigma(E))`` as a float32 tensor. ``n_h`` in cm^-2."""
         t = np.exp(-float(n_h) * self.sigma(energy_kev))
         return torch.as_tensor(t, dtype=torch.float32, device=device)
+
+    def transmission_torch(self, energy, n_h, device=None) -> torch.Tensor:
+        """GPU/torch-native ``exp(-N_H * sigma(E))`` for the batched forward.
+
+        Same physics as :meth:`transmission` (sigma linearly interpolated in
+        log-energy, held at ``sigma_ref[0]`` below the table and 0 above) but
+        stays on-device, and accepts ``n_h`` as a scalar (-> ``(K,)``) or a
+        ``(B,)`` tensor of per-walker columns (-> ``(B, K)``)."""
+        e = torch.as_tensor(energy, dtype=torch.float32, device=device)
+        dev = e.device
+        loge = torch.log(e.clamp(min=1e-6))
+        xp = torch.as_tensor(self.log_e_ref, dtype=torch.float32, device=dev)
+        fp = torch.as_tensor(self.sigma_ref, dtype=torch.float32, device=dev)
+        j = torch.searchsorted(xp, loge).clamp(1, xp.numel() - 1)
+        w = ((loge - xp[j - 1]) / (xp[j] - xp[j - 1])).clamp(0.0, 1.0)
+        sig = fp[j - 1] + w * (fp[j] - fp[j - 1])
+        sig = torch.where(loge <= xp[0], fp[0], sig)
+        sig = torch.where(loge >= xp[-1], torch.zeros_like(sig), sig)
+        n = torch.as_tensor(n_h, dtype=torch.float32, device=dev)
+        return torch.exp(-(n[:, None] if n.ndim else n) * sig)
