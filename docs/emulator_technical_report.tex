@@ -774,13 +774,91 @@ line-head limit is therefore a distinct axis from the \code{film\_t\_freqs}
 / \code{film\_t\_fmax} trunk levers, and it is delicate: adding
 \code{--line\_t\_freqs 16} \emph{degraded} iron (\S\ref{sec:production}).
 
-\paragraph{Next steps.} Two independent tracks. (i) Ship the $11$
-good/acceptable elements now: rebuild \code{spexai/models/}
-(\code{scripts/collect\_models.py}) and re-validate the joint inference
-model, unblocking the multi-instrument science test. (ii) Scope a separate
-line-head investigation for the heavy metals (line-head capacity/width and
-the deposition accuracy at the $0.1\%$ level), with chromium's continuum
-blowup handled alongside via the trunk-capacity levers.
+\paragraph{Next steps.} Two independent tracks, both since executed. (i) The
+$11$ good/acceptable elements were shipped: \code{scripts/collect\_models.py}
+merges them into \code{spexai/models/} alongside the earlier low-$Z$ models
+($21$ elements total), and the joint inference model was re-validated,
+unblocking the multi-instrument science test. (ii) The line-head investigation
+(\S\ref{sec:linehead_floor}) \emph{refuted} the capacity/deposition hypothesis;
+chromium's continuum blowup remains a separate trunk-capacity item.
+
+\subsection{The residual line-head limit is a temperature-conditioning floor,
+not capacity}
+\label{sec:linehead_floor}
+
+The diagnosis above (\S\ref{sec:production_outcome}) predicted that enlarging the
+line head, or conditioning it more richly on temperature, would recover the
+failing metals. A controlled sweep on titanium ($Z=22$, the cleanest line-only
+failure) refutes it. Holding the frozen production recipe fixed and varying
+\emph{only} the line head -- embedding width \code{line\_dim} $\in\{16,64\}$, MLP
+width \code{line\_hidden} $\in\{128,256\}$, and a Fourier temperature embedding
+\code{line\_t\_freqs} $\in\{0,8\}$ -- moves the line MRE by less than $4\%$ (it
+stays at $0.33$--$0.35\%$) and leaves yield@$0.1\%$ at $0.0\%$ for all five
+variants, including the largest ($1.96$M parameters, $+0.29$M over the base).
+Three controls rule out the obvious confounds:
+\begin{itemize}
+\item \emph{Not under-convergence.} The validation curves flatten by
+$\sim$$70$k steps and yield@$0.1\%$ is pinned at $0$ at every evaluation, and the
+$100$k line MRE ($0.0034$) already equals the production $300$k value
+($0.0035$).
+\item \emph{Not a data floor.} A plain linear/pchip interpolation of the SPEX
+grid reproduces the same held-out line bins to line MRE $\sim$$10^{-6}$ with
+$100\%$ of them inside $0.1\%$: the target is trivially fittable and the emulator
+is $\sim$$3000\times$ worse on lines it should nail.
+\item \emph{Not amplitude capacity.} The error is flat in line strength (below).
+\end{itemize}
+
+\paragraph{Where the error lives.} On the native grid a line bin's only degree of
+freedom is its amplitude -- Gaussian width and position are the downstream
+broadening step -- so the native-grid line residual isolates the amplitude head.
+Stratifying it (\code{scripts/diagnose\_line\_residual.py},
+Fig.~\ref{fig:linehead_residual}) reveals a coherent, three-part structure that
+generalises from titanium to zinc ($Z=30$):
+\begin{enumerate}
+\item a \emph{uniform} $\sim$$0.3$--$0.4\%$ fractional floor, flat in line
+strength (rank correlation $\approx0$, its sign flipping between elements:
+$-0.13$ for Ti, $+0.24$ for Zn) and flat in energy. Sitting $3$--$4\times$ above
+$0.1\%$ on essentially every line, this floor is what pins the yield at zero;
+\item a genuinely accurate continuum (mid-band per-bin error dips \emph{below}
+$0.1\%$), confirming the limit is line-specific and not the trunk;
+\item a strong cold-temperature excess (per-spectrum line MRE versus $T$ has rank
+correlation $-0.61$ for Ti, $-0.78$ for Zn; U-shaped, worst at the coldest $T$),
+plus a localised $\sim$$1\%$ hotspot at the K-shell complex that tracks the
+element's K-line energy ($5$--$7\kev$ for Ti, $9$--$12\kev$ for Zn). Local line
+density adds only a weak secondary penalty.
+\end{enumerate}
+The minimum-error temperature tracks each element's peak line-emissivity
+temperature (Ti $\sim$$5\kev$, Zn $\sim$$10\kev$), with error rising at both the
+cold extreme (sharp ionisation changes, weak lines) and the hot extreme. This is
+the signature of a \emph{temperature-conditioning} limit -- the head fits best
+where lines are most prominent in the training distribution and worst where the
+amplitude-versus-$T$ mapping is steepest -- not a per-line capacity or deposition
+limit.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/line_residual_Z22.png}
+\caption{Per-line amplitude residual for titanium ($Z=22$, production line head;
+zinc is qualitatively identical). Clockwise from top left: per-bin relative error
+versus energy (line bins red, continuum grey -- the continuum dips below the
+$0.1\%$ dotted line mid-band); per-line error versus line strength (flat -- the
+error is carried neither by the weak nor the strong lines); per-spectrum line MRE
+versus temperature (U-shaped, worst at the coldest $T$); and per-line error
+versus local line density (a weak secondary trend). The dominant feature is a
+uniform $\sim$$0.3\%$ floor immune to line strength, with a cold-temperature
+excess on top.}
+\label{fig:linehead_residual}
+\end{figure}
+
+\paragraph{Implication.} The capacity axes the sweep varied are the wrong ones.
+The two levers it did \emph{not} touch, and that the temperature signature now
+motivates, are the line head's shared \emph{conditioning} capacity
+(\code{cond\_hidden}/\code{cond\_layers}, which carries the temperature response
+every line consumes) and the line-bin loss weighting / cold-temperature
+oversampling. If neither lowers the uniform floor, the honest reading is that
+$0.1\%$ per-spectrum yield is not an achievable bar for the line-dense hot metals
+with a single shared-conditioning head, and a different line representation would
+be required.
 
 \section{Instrument-level validation}
 \label{sec:instruments}

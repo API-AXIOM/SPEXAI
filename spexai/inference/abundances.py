@@ -35,6 +35,7 @@ class AbundanceModel:
         self._global: Optional[str] = None
         self._free: Dict[int, str] = {}
         self._ties: List[tuple] = []          # (set[int], param_name, ref|None)
+        self._const: List[tuple] = []         # (set[int], ratio, ref) -- no param
 
     # --- builders (chainable) ------------------------------------------------
     def global_metallicity(self, name: str = "Z") -> "AbundanceModel":
@@ -60,6 +61,17 @@ class AbundanceModel:
                            None if ref is None else int(ref)))
         return self
 
+    def tie_const(self, zs: Iterable[int], ratio: float,
+                  ref: int) -> "AbundanceModel":
+        """Tie a group to ``ratio * abundance[ref]`` with **no free parameter**.
+
+        Use for elements the literature scales with (fitted) iron but does not
+        measure -- e.g. every metal not explicitly freed, tied to Fe at ratio
+        1.0. ``ref`` must itself be freed or globally scaled.
+        """
+        self._const.append((set(int(z) for z in zs), float(ratio), int(ref)))
+        return self
+
     # --- use -----------------------------------------------------------------
     @property
     def param_names(self) -> List[str]:
@@ -83,4 +95,8 @@ class AbundanceModel:
             for z in zs:
                 if z in ab:
                     ab[z] = val * scale
+        for zs, ratio, ref in self._const:            # constant (paramless) ties
+            for z in zs:
+                if z in ab:
+                    ab[z] = ratio * ab[ref]
         return ab

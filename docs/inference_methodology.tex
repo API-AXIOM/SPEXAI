@@ -26,8 +26,12 @@ X-ray spectrum is assembled from the per-element neural operators, how Galactic
 absorption and velocity broadening are applied, how we fit single- and
 multi-temperature (differential emission measure, DEM) models with MCMC and
 nested sampling, and how we test the emulator for bias against an independent
-SPEX-derived ground truth. It is deliberately kept separate from the emulator
-\emph{development} report, which covers architecture and training. Design
+SPEX-derived ground truth. It also reports a targeted study of whether the
+emulator's residual emissivity error on the hot iron-peak metals---which miss
+the $0.1\%$ training target---biases the quantities XRISM actually measures for a
+Perseus-like cluster (Sec.~\ref{sec:hotfloor}). It is deliberately kept separate
+from the emulator \emph{development} report, which covers architecture and
+training. Design
 choices flagged here as approximations (PCHIP ground truth, native-resolution
 truth broadening, \code{wabs} vs.\ \code{tbabs} cross-sections) are called out
 explicitly so they can be revisited.
@@ -193,11 +197,133 @@ $z$               & 0.01--0.3  & $\to$1    & 0.0179 \\
 \end{tabular}
 \end{table}
 
+\section{Practical impact of the hot-element emissivity floor}\label{sec:hotfloor}
+The per-element operators are trained toward a relative emissivity error of
+$0.1\%$, a threshold set for high signal-to-noise XRISM spectra rather than
+derived from a science requirement. Seven hot, line-rich iron-peak metals miss
+it (development report): Cr, Mn and Ni are marginal-to-failing and Ti, Co, Cu and
+Zn fail outright, on a line-head temperature-conditioning floor whose signature
+is a near-uniform $\sim0.3$--$0.4\%$ \emph{multiplicative} error on line-bin
+amplitudes. Because three of these (Cr, Mn, Ni) are freed in real XRISM cluster
+analyses while the other four are weak and tied to iron, we test directly whether
+the floor biases the published quantities, and above what exposure.
+
+\paragraph{Design.} We generate one realistic Perseus spectrum from the
+independent \code{SpexTruthModel} (all 28 currently available elements at a
+literature abundance pattern) and fit it back with the emulator under the
+\emph{literature modelling strategy} of the XRISM/Resolve Perseus-core enrichment
+analysis \citep{xrism_perseus}: free Si, S, Ar, Ca, Cr, Mn, Fe and Ni together
+with $kT$ (or a Gaussian DEM), $\sigma_v$, $\nh$ and the normalisation, with every
+other metal tied to the \emph{fitted} iron (a paramless
+\code{AbundanceModel.tie\_const}). Injected values follow that analysis
+($\mathrm{Fe}=0.71\,\zsun$, $[X/\mathrm{Fe}]$ near unity, $z=0.017284$,
+$\nh=1.36\times10^{21}\,\mathrm{cm^{-2}}$, $\sigma_v=180\kms$, $kT=3.9\kev$), over
+the $1.9$--$12\kev$ band with the Fe\,XXV complex ($6.567$--$6.620\kev$) masked and
+the XRISM/Resolve response ($\sim0.5\,\mathrm{eV}$ channels). Truth and emulator
+span the \emph{identical} element set, so their only difference is emulator error.
+Code: \code{inference\_demo/hot\_floor/} (\code{experiment.py} builds the store and
+a memory-frugal per-element streaming truth; \code{fisher\_bias.py} the estimator
+below; \code{plot\_bias.py}, \code{mcmc\_check.py} the figure and cross-check).
+
+\paragraph{Bias versus statistical error.} Since the emulator error is small, the
+maximum-likelihood offset in the infinite-count limit is one Newton step from the
+truth $\theta_0$,
+\begin{equation}
+b_{\rm sys}=F^{-1}s,\quad
+s_i=\sum_c\Big(\frac{d_c}{\mu_c}-1\Big)\frac{\partial\mu_c}{\partial\theta_i},\quad
+F_{ij}=\sum_c\frac{1}{\mu_c}
+       \frac{\partial\mu_c}{\partial\theta_i}\frac{\partial\mu_c}{\partial\theta_j},
+\end{equation}
+with $d$ the noise-free truth counts and $\mu=\mu(\theta_0)$ the emulator, both
+restricted to the fit band; $F$ is the Poisson Fisher matrix, so
+$\sigma_{\rm stat}=\mathrm{diag}(F^{-1})^{1/2}$ at the reference counts and
+$\propto N^{-1/2}$ thereafter. For shape parameters $b_{\rm sys}$ is independent
+of the overall count scale (the normalisation absorbs it), and the two quantities
+share a single finite-difference Jacobian ($2n{+}1$ forward evaluations). The
+crossover
+\begin{equation}
+N_\star = N_{\rm ref}\,\big(\sigma_{\rm stat}/|b_{\rm sys}|\big)^2
+\end{equation}
+is the in-band count level at which the emulator bias equals the Poisson error:
+below $N_\star$ the floor is invisible, above it it dominates.
+
+\paragraph{Residual character.} The unweighted in-band residual $d/\mu-1$ has
+RMS $\sim14\%$, but this lives entirely in the faint inter-line channels (tiny
+$\mu$); the \emph{counts-weighted} RMS, which drives the likelihood, is
+$0.077\%$---below the $0.1\%$ target---and the noise-free Poisson deviance per
+degree of freedom at $10^5$ in-band counts is $3\times10^{-6}$, i.e.\
+statistically invisible. This counts-weighted residual is nearly binning
+independent (it is the coherent amplitude floor, not a sub-resolution centroid
+artifact), confirming the small-residual premise of the linearisation.
+
+\paragraph{Results (single temperature).} Table~\ref{tab:hotfloor} lists the
+fractional systematic bias and $N_\star$ per parameter. A Perseus \emph{region}
+carries $\sim4\times10^4$ in-band counts and a deep stacked core $\sim10^6$;
+every $N_\star$ exceeds these by factors of $1.8\times10^1$ to $9\times10^4$.
+Equivalently, at a realistic region the largest emulator-induced bias (Fe and
+$\nh$) is $\sim4\%$ of the $1\sigma$ statistical error, and the hot science
+elements Cr, Mn and Ni are $0.4$--$1\%$ of it. The mechanism is exactly the
+multiplicative character of the floor: the abundance and normalisation parameters
+absorb it, and the worst-emulated metals (Ti, Co, Cu, Zn), being weak and tied to
+iron, leak essentially nothing into the free parameters. We therefore find that
+the $0.1\%$ floor miss does \emph{not} bias XRISM Perseus science at any realistic
+exposure.
+
+\begin{table}[t]
+\centering
+\caption{Single-temperature systematic bias and crossover counts for the
+literature-strategy Perseus fit. $|b_{\rm sys}|$ is quoted as a fraction of the
+injected value; $N_\star$ is the in-band count level at which the emulator bias
+equals the $1\sigma$ Poisson error. Realistic anchors: $\sim4\times10^4$ counts
+per XRISM region, $\sim10^6$ for a deep stacked core.}
+\label{tab:hotfloor}
+\begin{tabular}{llcc}
+\toprule
+Parameter & Group & $|b_{\rm sys}|/\mathrm{truth}$ & $N_\star$ (in-band counts) \\
+\midrule
+Cr & science-critical & $0.18\%$ & $3.6\times10^{9}$ \\
+Mn & science-critical & $0.92\%$ & $6.2\times10^{8}$ \\
+Ni & science-critical & $0.39\%$ & $1.5\times10^{8}$ \\
+Fe & iron            & $0.18\%$ & $2.6\times10^{7}$ \\
+Si, S, Ar, Ca & $\alpha$ & $\lesssim0.3\%$ & $1.2$--$6.3\times10^{8}$ \\
+$kT$      & nuisance & --- & $3.5\times10^{9}$ \\
+$\sigma_v$ & nuisance & --- & $4.5\times10^{7}$ \\
+$\nh$     & nuisance & --- & $1.8\times10^{7}$ \\
+$Y$ (norm) & nuisance & --- & $3.6\times10^{7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.72\textwidth]{../inference_demo/hot_floor/results/bias_vs_counts.png}
+\caption{Systematic emulator bias relative to the Poisson statistical error,
+$|b_{\rm sys}|/\sigma_{\rm stat}$, versus in-band counts for each fitted
+parameter (single-temperature). Each line has slope $1/2$ and crosses unity
+(``bias $=$ noise'', dotted) at $N_\star$; vertical guides mark a realistic XRISM
+region and a deep stacked core. All parameters sit far below unity at realistic
+exposures.}
+\label{fig:hotfloor}
+\end{figure}
+
+\paragraph{Caveats and status.} The result is broadening dependent: the
+counts-weighted residual rises from $0.077\%$ at $\sigma_v=180\kms$ to $5.4\%$ at
+$\sigma_v=0$, so cold, quiet sources are the harder case and are being mapped with
+a dedicated low-broadening stress run. The biases above are the linearised
+(infinite-count) limit; a direct \code{emcee} counts scan near $N_\star$---where
+the systematic offset reaches $\sim1\sigma$ and becomes directly detectable---is
+staged for the cluster (\code{mcmc\_check.py}; the Poisson likelihood cost is
+independent of the simulated counts) as a cross-check. The Gaussian-DEM flavour is
+in progress; the numbers reported here are single-temperature.
+
 \begin{thebibliography}{9}
 \bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\
 1983, ApJ, 270, 119.
 \bibitem[Wilms et al.(2000)]{wilms2000} Wilms, J., Allen, A.\ \& McCray, R.\
 2000, ApJ, 542, 914.
+\bibitem[XRISM Collaboration(2026)]{xrism_perseus} XRISM Collaboration 2026,
+Chemical enrichment of the Perseus cluster core seen by XRISM/Resolve,
+arXiv:2606.17141.
 \end{thebibliography}
 
 \end{document}
