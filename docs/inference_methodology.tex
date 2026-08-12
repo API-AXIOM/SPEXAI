@@ -256,40 +256,46 @@ statistically invisible. This counts-weighted residual is nearly binning
 independent (it is the coherent amplitude floor, not a sub-resolution centroid
 artifact), confirming the small-residual premise of the linearisation.
 
-\paragraph{Results (single temperature).} Table~\ref{tab:hotfloor} lists the
-fractional systematic bias and $N_\star$ per parameter. A Perseus \emph{region}
-carries $\sim4\times10^4$ in-band counts and a deep stacked core $\sim10^6$;
-every $N_\star$ exceeds these by factors of $1.8\times10^1$ to $9\times10^4$.
-Equivalently, at a realistic region the largest emulator-induced bias (Fe and
-$\nh$) is $\sim4\%$ of the $1\sigma$ statistical error, and the hot science
-elements Cr, Mn and Ni are $0.4$--$1\%$ of it. The mechanism is exactly the
-multiplicative character of the floor: the abundance and normalisation parameters
-absorb it, and the worst-emulated metals (Ti, Co, Cu, Zn), being weak and tied to
-iron, leak essentially nothing into the free parameters. We therefore find that
-the $0.1\%$ floor miss does \emph{not} bias XRISM Perseus science at any realistic
-exposure.
+\paragraph{Results.} Table~\ref{tab:hotfloor} lists $N_\star$ per parameter for
+both temperature models; the fractional systematic biases are $\lesssim0.5\%$
+throughout (single-$T$: Fe and the science elements Cr/Mn/Ni at
+$0.18$--$0.92\%$). A Perseus \emph{region} carries $\sim4\times10^4$ in-band
+counts and a deep stacked core $\sim10^6$; every $N_\star$ exceeds these by
+factors of $\sim2\times10^1$ to $\sim10^5$. Equivalently, at a realistic region
+the largest emulator-induced bias (Fe and $\nh$) is $\sim4$--$5\%$ of the
+$1\sigma$ statistical error, and the hot science elements Cr, Mn and Ni are
+$0.1$--$1\%$ of it. The mechanism is exactly the multiplicative character of the
+floor: the abundance and normalisation parameters absorb it, and the
+worst-emulated metals (Ti, Co, Cu, Zn), being weak and tied to iron, leak
+essentially nothing into the free parameters. The Gaussian-DEM fit gives the same
+picture (smallest $N_\star=$ Fe at $1.9\times10^7$), so multi-temperature mixing
+does not expose the floor. We therefore find that the $0.1\%$ floor miss does
+\emph{not} bias XRISM Perseus science at any realistic exposure.
 
 \begin{table}[t]
 \centering
-\caption{Single-temperature systematic bias and crossover counts for the
-literature-strategy Perseus fit. $|b_{\rm sys}|$ is quoted as a fraction of the
-injected value; $N_\star$ is the in-band count level at which the emulator bias
-equals the $1\sigma$ Poisson error. Realistic anchors: $\sim4\times10^4$ counts
-per XRISM region, $\sim10^6$ for a deep stacked core.}
+\caption{Crossover counts $N_\star$ for the literature-strategy Perseus fit, for
+both a single-temperature and a Gaussian-DEM model. $N_\star$ is the in-band
+count level at which the emulator systematic bias equals the $1\sigma$ Poisson
+error; fractional biases $|b_{\rm sys}|/\mathrm{truth}$ are $\lesssim0.5\%$ for
+every parameter in both cases. Realistic anchors: $\sim4\times10^4$ counts per
+XRISM region, $\sim10^6$ for a deep stacked core -- every $N_\star$ is orders of
+magnitude larger.}
 \label{tab:hotfloor}
 \begin{tabular}{llcc}
 \toprule
-Parameter & Group & $|b_{\rm sys}|/\mathrm{truth}$ & $N_\star$ (in-band counts) \\
+Parameter & Group & $N_\star$ single-$T$ & $N_\star$ DEM \\
 \midrule
-Cr & science-critical & $0.18\%$ & $3.6\times10^{9}$ \\
-Mn & science-critical & $0.92\%$ & $6.2\times10^{8}$ \\
-Ni & science-critical & $0.39\%$ & $1.5\times10^{8}$ \\
-Fe & iron            & $0.18\%$ & $2.6\times10^{7}$ \\
-Si, S, Ar, Ca & $\alpha$ & $\lesssim0.3\%$ & $1.2$--$6.3\times10^{8}$ \\
-$kT$      & nuisance & --- & $3.5\times10^{9}$ \\
-$\sigma_v$ & nuisance & --- & $4.5\times10^{7}$ \\
-$\nh$     & nuisance & --- & $1.8\times10^{7}$ \\
-$Y$ (norm) & nuisance & --- & $3.6\times10^{7}$ \\
+Cr & science-critical & $3.6\times10^{9}$ & $8.6\times10^{9}$ \\
+Mn & science-critical & $6.2\times10^{8}$ & $2.6\times10^{9}$ \\
+Ni & science-critical & $1.5\times10^{8}$ & $1.1\times10^{8}$ \\
+Fe & iron            & $2.6\times10^{7}$ & $1.9\times10^{7}$ \\
+Si, S, Ar, Ca & $\alpha$ & $1.2$--$6.3\times10^{8}$ & $0.6$--$17\times10^{8}$ \\
+$kT$ / $T_{\rm mean}$ & thermal & $3.5\times10^{9}$ & $2.4\times10^{8}$ \\
+$T_\sigma$ (DEM) & thermal & --- & $3.4\times10^{7}$ \\
+$\sigma_v$ & nuisance & $4.5\times10^{7}$ & $3.0\times10^{7}$ \\
+$\nh$     & nuisance & $1.8\times10^{7}$ & $1.1\times10^{8}$ \\
+$Y$ (norm) & nuisance & $3.6\times10^{7}$ & $4.3\times10^{7}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -299,7 +305,7 @@ $Y$ (norm) & nuisance & --- & $3.6\times10^{7}$ \\
 \includegraphics[width=0.72\textwidth]{../inference_demo/hot_floor/results/bias_vs_counts.png}
 \caption{Systematic emulator bias relative to the Poisson statistical error,
 $|b_{\rm sys}|/\sigma_{\rm stat}$, versus in-band counts for each fitted
-parameter (single-temperature). Each line has slope $1/2$ and crosses unity
+parameter (left: single-$T$; right: Gaussian DEM). Each line has slope $1/2$ and crosses unity
 (``bias $=$ noise'', dotted) at $N_\star$; vertical guides mark a realistic XRISM
 region and a deep stacked core. All parameters sit far below unity at realistic
 exposures.}
@@ -313,8 +319,10 @@ a dedicated low-broadening stress run. The biases above are the linearised
 (infinite-count) limit; a direct \code{emcee} counts scan near $N_\star$---where
 the systematic offset reaches $\sim1\sigma$ and becomes directly detectable---is
 staged for the cluster (\code{mcmc\_check.py}; the Poisson likelihood cost is
-independent of the simulated counts) as a cross-check. The Gaussian-DEM flavour is
-in progress; the numbers reported here are single-temperature.
+independent of the simulated counts) as a cross-check. Both single-$T$ and
+Gaussian-DEM Fisher results are reported above and agree; the DEM emulator
+temperature grid is held within the training range ($\geq0.7\kev$) to avoid
+PCHIP extrapolation of the SPEX truth.
 
 \begin{thebibliography}{9}
 \bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\

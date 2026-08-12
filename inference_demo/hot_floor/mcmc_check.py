@@ -75,7 +75,7 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
     import emcee
     from gpu_forward import EnsembleForward
     ens = EnsembleForward(emu, response, absorption, keep, args.mode,
-                          PERSEUS["vel"], args.device)
+                          PERSEUS["vel"], args.device, chunk=args.chunk)
     pars = ens.params(log_norm_truth)
     names = [p.name for p in pars]
     lo = np.array([p.low for p in pars])
@@ -144,6 +144,9 @@ def main():
     ap.add_argument("--vectorized", action="store_true",
                     help="walker-batched all-GPU forward + emcee vectorized "
                          "(single process, sigma_v fixed); use with --device cuda")
+    ap.add_argument("--chunk", type=int, default=32,
+                    help="walker sub-batch size for the GPU forward (bounds "
+                         "memory); lower if you hit CUDA OOM")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run (overrides nwalkers/nsteps/counts)")
     ap.add_argument("--out", default=os.path.join(

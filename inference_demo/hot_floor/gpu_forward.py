@@ -39,12 +39,17 @@ class EnsembleForward:
     ``log_norm``.
     """
 
-    def __init__(self, emu, response, absorption, keep, mode, velocity, device):
+    def __init__(self, emu, response, absorption, keep, mode, velocity, device,
+                 chunk=32):
         if mode != "single":
             raise NotImplementedError("EnsembleForward: single-T only for now")
         self.emu, self.absn, self.device = emu, absorption, device
         self.mode = mode
         self.velocity = float(velocity)
+        # walkers are processed in sub-batches of `chunk` so peak GPU memory is
+        # bounded (the forward's embedding/FFT grids scale with the batch); the
+        # emcee ensemble size is then independent of GPU memory.
+        self.chunk = int(chunk)
         self.z = 10.0 ** float(np.log10(PERSEUS["z"]))
         self.abnames = [SYMBOL[z] for z in FREE_Z]
         self.names = self.abnames + ["kT", "n_h", "log_norm"]
@@ -107,7 +112,13 @@ class EnsembleForward:
         return counts[:, self.keep_idx] * norm[:, None] * self.scale_const
 
     def __call__(self, theta):
-        return self._fold(self._flux(theta), theta).detach().cpu().numpy()
+        th = np.atleast_2d(np.asarray(theta, dtype=np.float64))
+        if th.shape[0] <= self.chunk:
+            return self._fold(self._flux(th), th).detach().cpu().numpy()
+        parts = [self._fold(self._flux(th[i:i + self.chunk]),
+                            th[i:i + self.chunk]).detach().cpu().numpy()
+                 for i in range(0, th.shape[0], self.chunk)]
+        return np.concatenate(parts, axis=0)
 
 
 def _validate():
