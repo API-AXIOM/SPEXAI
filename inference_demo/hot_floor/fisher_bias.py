@@ -237,6 +237,9 @@ def main():
                       dem=dem, dem_params=dem_p)
     t0 = time.time()
     d_ref = stream_truth_counts(cfg, response, absorption)
+    assert np.isfinite(d_ref[keep]).all(), (
+        "non-finite truth counts -- a DEM grid point is outside the per-element "
+        "training temperature range (PCHIP extrapolation blow-up)")
     s = N_REF / d_ref[keep].sum()
     d = d_ref[keep] * s
     log_norm_truth = float(np.log10(cfg.norm_ref * s))

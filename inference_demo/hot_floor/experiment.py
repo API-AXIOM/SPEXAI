@@ -115,8 +115,12 @@ class TruthConfig:
     dem_params: dict = field(default_factory=dict)
 
 
-def gaussian_dem(mean=None, sigma=None, lo=0.5, hi=10.0, n=48):
-    """Gaussian-in-T DEM model + its (mean,sigma) params, on a fixed grid."""
+def gaussian_dem(mean=None, sigma=None, lo=0.7, hi=10.0, n=48):
+    """Gaussian-in-T DEM model + its (mean,sigma) params, on a fixed grid.
+
+    ``lo`` stays safely above the per-element training minimum (~0.501 keV): a
+    grid point below it makes the PCHIP SPEX truth extrapolate and blow up
+    (Ar -> inf at 0.5 keV), and the Gaussian carries negligible weight there."""
     grid = td.TempGrid(lo, hi, n=n)
     model = td.gaussian_T(grid)
     p = {"T_mean": PERSEUS["dem_mean"] if mean is None else mean,

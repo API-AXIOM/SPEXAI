@@ -68,15 +68,18 @@ class EnsembleForward:
         return [p for p in build_params(self, log_norm_truth)
                 if p.name != "sigma_v"]
 
-    def __call__(self, theta):
+    def _flux(self, theta):
+        """Abundance-weighted, broadened flux on the response grid -> (B, M).
+
+        The emissivity/broadening stage (per-element operator nets, FFT
+        continuum broadening, on-device absorption, rebin, analytic lines) --
+        i.e. everything except the fold. Split out so it can be timed alone."""
         th = np.atleast_2d(np.asarray(theta, dtype=np.float64))   # (B, ndim)
         B, dev = th.shape[0], self.device
         temps = torch.as_tensor(th[:, self.col["kT"]], dtype=torch.float32,
                                 device=dev)                        # (B,)
         n_h = torch.as_tensor(th[:, self.col["n_h"]] * 1e21, dtype=torch.float32,
                               device=dev)                          # (B,)
-        norm = torch.as_tensor(10.0 ** th[:, self.col["log_norm"]],
-                               dtype=torch.float32, device=dev)    # (B,)
         fe = torch.as_tensor(th[:, self.fe_idx], dtype=torch.float32, device=dev)
         total = None
         for z, model in self.emu.models.items():
@@ -92,10 +95,19 @@ class EnsembleForward:
                 absorption=self.absn, n_h=n_h, redshift=self.z,
                 use_torch_absorption=True)
             total = a[:, None] * ef if total is None else total + a[:, None] * ef
+        return total
+
+    def _fold(self, total, theta):
+        """Fold flux (B, M) through ARF+RMF on the GPU, scale by norm."""
+        th = np.atleast_2d(np.asarray(theta, dtype=np.float64))
+        norm = torch.as_tensor(10.0 ** th[:, self.col["log_norm"]],
+                               dtype=torch.float32, device=self.device)
         eff = (total * self.arf).transpose(0, 1).contiguous()      # (N, B)
         counts = torch.sparse.mm(self.Rt, eff).transpose(0, 1)     # (B, C)
-        counts = counts[:, self.keep_idx] * norm[:, None] * self.scale_const
-        return counts.detach().cpu().numpy()
+        return counts[:, self.keep_idx] * norm[:, None] * self.scale_const
+
+    def __call__(self, theta):
+        return self._fold(self._flux(theta), theta).detach().cpu().numpy()
 
 
 def _validate():
