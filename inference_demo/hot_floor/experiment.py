@@ -35,9 +35,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 STORE28 = os.environ.get(
     "SPEXAI_STORE", os.path.join(REPO, "inference_demo", "hot_floor", "store28"))
 DATADIR = os.environ.get(
-    "SPEXAI_PROCESSED", os.path.expanduser("~/work/data/spexai/processed"))
+    "SPEXAI_PROCESSED", os.path.expanduser("~/data/spexai_data/processed"))
 RESP_DIR = os.environ.get(
-    "SPEXAI_RESPONSES", os.path.expanduser("~/work/data/spexai/responses"))
+    "SPEXAI_RESPONSES", os.path.expanduser("~/data/spexai_data/responses"))
 MPC_M = 3.0857e22
 
 # --- Perseus fiducials (arXiv:2606.17141) ----------------------------------
