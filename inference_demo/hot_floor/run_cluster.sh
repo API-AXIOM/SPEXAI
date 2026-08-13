@@ -18,16 +18,16 @@
 #   * store28 + response rsl_Hp_L_2025.rmf + results/truth_single.npz;
 #   * conda env with torch(+CUDA), emcee, numpy, scipy.
 #
-# Usage (acceleration on by default; ~2-4 h per count level on an A10):
-#   DEVICE=cuda NWALKERS=128 NSTEPS=1500 COUNTS="4e4 1e6 1e8" \
-#       ./inference_demo/hot_floor/run_cluster.sh single
+# Usage (acceleration on by default; ~1-1.5 h per count level on an A10 at the
+# defaults below; progress prints ~20 lines/level with a projected total time):
+#   DEVICE=cuda COUNTS="4e4 1e6 1e8" ./inference_demo/hot_floor/run_cluster.sh single
 set -euo pipefail
 
 ENV=${SPEXAI_ENV:-spexai}
 MODE=${1:-single}
 DEVICE=${DEVICE:-cuda}
-NWALKERS=${NWALKERS:-128}          # ensemble size (emcee vectorised)
-NSTEPS=${NSTEPS:-1500}
+NWALKERS=${NWALKERS:-64}           # ensemble (>=2x ndim=11; 64 = one chunk/half)
+NSTEPS=${NSTEPS:-800}              # ample for the ~11-D near-Gaussian posterior
 CHUNK=${CHUNK:-32}                 # walker sub-batch (bounds GPU memory)
 TRUTH=${SPEXAI_TRUTH:-inference_demo/hot_floor/results/truth_${MODE}.npz}
 COUNTS=${COUNTS:-"4e4 1e6 1e8"}    # realistic / deep / near-N* (bias ~ 1 sigma)
@@ -44,7 +44,9 @@ echo "store=$SPEXAI_STORE responses=$SPEXAI_RESPONSES"
 echo "accel: ${ACCEL:-<none: float64 reference>}  chunk=$CHUNK"
 for c in $COUNTS; do
   echo "=== counts=$c ==="
-  conda run -n "$ENV" python -u inference_demo/hot_floor/mcmc_check.py \
+  # --no-capture-output: stream stdout live (conda run buffers it otherwise,
+  # which would leave the log empty until the buffer flushes)
+  conda run --no-capture-output -n "$ENV" python -u inference_demo/hot_floor/mcmc_check.py \
     --vectorized --device "$DEVICE" --mode "$MODE" --counts "$c" \
     --truth_npz "$TRUTH" --nwalkers "$NWALKERS" --nsteps "$NSTEPS" \
     --chunk "$CHUNK" $ACCEL --tag "c${c}"
