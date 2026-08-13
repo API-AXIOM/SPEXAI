@@ -5,24 +5,35 @@
 # Tier 1: sigma_v is fixed at truth (freeing it needs the per-walker line-
 # broadening vectorisation -- the required next step).
 #
+# GPU ACCELERATION (--tf32 --compile --fft32) IS ON BY DEFAULT AND SHOULD BE
+# STANDARD FOR ALL PRODUCTION / REAL-SCIENCE INFERENCE RUNS: it is ~3x faster on
+# the operator forward (A10) at an accuracy cost far below the emulator's own
+# error -- TF32 tensor-core matmul ~1e-3, float32 continuum FFT ~1e-6, vs the
+# emulator's ~3e-3 MRE (and the hot-floor study shows even 3e-3 does not bias
+# science below ~1e7 counts). Set ACCEL="" only for a float64 reference run.
+#
 # Prerequisites on the cluster (NO 40 GB caches needed -- truth is precomputed):
 #   * repo importable as `spexai` (incl. the modified abundances.py /
 #     operator_model.py and spexai/inference/data/tbabs_sigma.npz);
 #   * store28 + response rsl_Hp_L_2025.rmf + results/truth_single.npz;
 #   * conda env with torch(+CUDA), emcee, numpy, scipy.
 #
-# Usage:
-#   DEVICE=cuda NWALKERS=200 NSTEPS=3000 COUNTS="4e4 1e6 1e8" \
+# Usage (acceleration on by default; ~2-4 h per count level on an A10):
+#   DEVICE=cuda NWALKERS=128 NSTEPS=1500 COUNTS="4e4 1e6 1e8" \
 #       ./inference_demo/hot_floor/run_cluster.sh single
 set -euo pipefail
 
 ENV=${SPEXAI_ENV:-spexai}
 MODE=${1:-single}
 DEVICE=${DEVICE:-cuda}
-NWALKERS=${NWALKERS:-200}          # big batch -> saturates the GPU
-NSTEPS=${NSTEPS:-3000}
+NWALKERS=${NWALKERS:-128}          # ensemble size (emcee vectorised)
+NSTEPS=${NSTEPS:-1500}
+CHUNK=${CHUNK:-32}                 # walker sub-batch (bounds GPU memory)
 TRUTH=${SPEXAI_TRUTH:-inference_demo/hot_floor/results/truth_${MODE}.npz}
 COUNTS=${COUNTS:-"4e4 1e6 1e8"}    # realistic / deep / near-N* (bias ~ 1 sigma)
+# GPU acceleration -- STANDARD for production inference (see header); ACCEL=""
+# disables it for a float64 reference run.
+ACCEL=${ACCEL:-"--tf32 --compile --fft32"}
 
 export MKL_THREADING_LAYER=GNU     # or torch import dies on the conda MKL stack
 export SPEXAI_STORE=${SPEXAI_STORE:-$PWD/inference_demo/hot_floor/store28}
@@ -30,10 +41,12 @@ export SPEXAI_RESPONSES=${SPEXAI_RESPONSES:-$HOME/work/data/spexai/responses}
 
 echo "device=$DEVICE mode=$MODE walkers=$NWALKERS steps=$NSTEPS truth=$TRUTH"
 echo "store=$SPEXAI_STORE responses=$SPEXAI_RESPONSES"
+echo "accel: ${ACCEL:-<none: float64 reference>}  chunk=$CHUNK"
 for c in $COUNTS; do
   echo "=== counts=$c ==="
   conda run -n "$ENV" python -u inference_demo/hot_floor/mcmc_check.py \
     --vectorized --device "$DEVICE" --mode "$MODE" --counts "$c" \
-    --truth_npz "$TRUTH" --nwalkers "$NWALKERS" --nsteps "$NSTEPS" --tag "c${c}"
+    --truth_npz "$TRUTH" --nwalkers "$NWALKERS" --nsteps "$NSTEPS" \
+    --chunk "$CHUNK" $ACCEL --tag "c${c}"
 done
 echo "done; results in inference_demo/hot_floor/results/mcmc_${MODE}_vec_c*.npz"
