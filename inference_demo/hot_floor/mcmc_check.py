@@ -99,7 +99,12 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
     p0 = np.clip(p0, lo + 1e-9, hi - 1e-9)
     t0 = time.time()
     sampler = emcee.EnsembleSampler(args.nwalkers, ndim, logprob, vectorize=True)
-    sampler.run_mcmc(p0, args.nsteps, progress=False)
+    every = max(1, args.nsteps // 20)                    # ~20 progress lines
+    for i, _ in enumerate(sampler.sample(p0, iterations=args.nsteps)):
+        if i == 0 or (i + 1) % every == 0:               # first step -> early ETA
+            el = time.time() - t0
+            print(f"  step {i+1}/{args.nsteps}  {el:.0f}s elapsed  "
+                  f"(~{el/(i+1)*args.nsteps:.0f}s projected)", flush=True)
     print(f"emcee(vectorized,{args.device}): {args.nwalkers}x{args.nsteps} in "
           f"{time.time()-t0:.0f}s", flush=True)
 
