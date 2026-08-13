@@ -51,11 +51,19 @@ def main():
     ap.add_argument("--chunk", type=int, default=32,
                     help="walker sub-batch size (bounds GPU memory)")
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--tf32", action="store_true",
+                    help="enable TF32 tensor-core matmul (Ampere+)")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the per-element coordinate-MLP")
     ap.add_argument("--detailed", action="store_true",
                     help="torch.profiler op-level table")
     args = ap.parse_args()
     dev = args.device
     sync = make_sync(dev)
+    if args.tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    print(f"tf32={args.tf32}  compile={args.compile}")
 
     if dev == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}  torch {torch.__version__}")
@@ -65,7 +73,7 @@ def main():
     keep = band_mask(response)
     emu = JointOperatorModel(models_dir=STORE28, device=dev)
     ens = EnsembleForward(emu, response, absn, keep, "single", PERSEUS["vel"],
-                          dev, chunk=args.chunk)
+                          dev, chunk=args.chunk, compile_nets=args.compile)
     pars = ens.params(15.685)
     theta = np.tile([p.truth for p in pars], (args.nwalkers, 1))
     B = args.nwalkers

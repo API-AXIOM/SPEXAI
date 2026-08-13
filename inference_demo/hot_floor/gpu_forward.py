@@ -40,7 +40,7 @@ class EnsembleForward:
     """
 
     def __init__(self, emu, response, absorption, keep, mode, velocity, device,
-                 chunk=32):
+                 chunk=32, compile_nets=False):
         if mode != "single":
             raise NotImplementedError("EnsembleForward: single-T only for now")
         self.emu, self.absn, self.device = emu, absorption, device
@@ -50,6 +50,13 @@ class EnsembleForward:
         # bounded (the forward's embedding/FFT grids scale with the batch); the
         # emcee ensemble size is then independent of GPU memory.
         self.chunk = int(chunk)
+        # torch.compile the per-element coordinate-MLP (the ~75% bottleneck: the
+        # Fourier embedding + FiLM + linear/gelu stack); the FFT and analytic line
+        # deposition stay eager (data-dependent shapes would only graph-break).
+        # First call pays a one-off compile cost for all elements.
+        if compile_nets:
+            for m in emu.models.values():
+                m.forward_norm = torch.compile(m.forward_norm, dynamic=True)
         self.z = 10.0 ** float(np.log10(PERSEUS["z"]))
         self.abnames = [SYMBOL[z] for z in FREE_Z]
         self.names = self.abnames + ["kT", "n_h", "log_norm"]

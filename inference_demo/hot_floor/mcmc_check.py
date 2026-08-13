@@ -75,7 +75,8 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
     import emcee
     from gpu_forward import EnsembleForward
     ens = EnsembleForward(emu, response, absorption, keep, args.mode,
-                          PERSEUS["vel"], args.device, chunk=args.chunk)
+                          PERSEUS["vel"], args.device, chunk=args.chunk,
+                          compile_nets=args.compile)
     pars = ens.params(log_norm_truth)
     names = [p.name for p in pars]
     lo = np.array([p.low for p in pars])
@@ -147,12 +148,19 @@ def main():
     ap.add_argument("--chunk", type=int, default=32,
                     help="walker sub-batch size for the GPU forward (bounds "
                          "memory); lower if you hit CUDA OOM")
+    ap.add_argument("--tf32", action="store_true",
+                    help="enable TF32 tensor-core matmul (Ampere+)")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the per-element coordinate-MLP")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run (overrides nwalkers/nsteps/counts)")
     ap.add_argument("--out", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "results"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    if args.tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     if args.smoke:
         args.nwalkers, args.nsteps, args.counts = 16, 40, 1e6
     for key, val in (("vel", args.sigma_v), ("kT", args.kT)):
