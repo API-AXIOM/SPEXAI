@@ -152,6 +152,8 @@ def main():
                     help="enable TF32 tensor-core matmul (Ampere+)")
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile the per-element coordinate-MLP")
+    ap.add_argument("--fft32", action="store_true",
+                    help="float32 FFT continuum broadening on CUDA (~4x)")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run (overrides nwalkers/nsteps/counts)")
     ap.add_argument("--out", default=os.path.join(
@@ -161,6 +163,9 @@ def main():
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+    if args.fft32:
+        import spexai.train.broadening as _br
+        _br.USE_FLOAT32_FFT = True
     if args.smoke:
         args.nwalkers, args.nsteps, args.counts = 16, 40, 1e6
     for key, val in (("vel", args.sigma_v), ("kT", args.kT)):

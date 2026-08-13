@@ -55,6 +55,8 @@ def main():
                     help="enable TF32 tensor-core matmul (Ampere+)")
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile the per-element coordinate-MLP")
+    ap.add_argument("--fft32", action="store_true",
+                    help="float32 FFT continuum broadening on CUDA (~4x)")
     ap.add_argument("--detailed", action="store_true",
                     help="torch.profiler op-level table")
     args = ap.parse_args()
@@ -63,7 +65,10 @@ def main():
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-    print(f"tf32={args.tf32}  compile={args.compile}")
+    if args.fft32:
+        import spexai.train.broadening as _br
+        _br.USE_FLOAT32_FFT = True
+    print(f"tf32={args.tf32}  compile={args.compile}  fft32={args.fft32}")
 
     if dev == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}  torch {torch.__version__}")

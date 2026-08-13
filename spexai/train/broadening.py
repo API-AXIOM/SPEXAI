@@ -101,6 +101,14 @@ def uniform_log_edges(emin, emax, dlx):
                      + dlx * torch.arange(n + 1, dtype=torch.float64)).float()
 
 
+# Opt-in: use float32 for the FFT continuum broadening on CUDA as well as MPS.
+# ~4x faster on most GPUs, and safe in the inference forward because only the
+# SMOOTH continuum is FFT-broadened (lines are deposited analytically), so
+# float32 spectral leakage is negligible. Off by default -> training/eval path
+# unchanged.
+USE_FLOAT32_FFT = False
+
+
 def fft_broaden(flux_uni, dlx, velocity):
     """Broaden integrated fluxes on a uniform log10-E grid by FFT.
 
@@ -110,8 +118,9 @@ def fft_broaden(flux_uni, dlx, velocity):
     with f in cycles per unit u. Zero-padded to avoid wraparound.
     """
     B, K = flux_uni.shape
-    # float64 unless on MPS, which has no float64 support
-    dtype = (torch.float32 if flux_uni.device.type == "mps"
+    # float64 unless on MPS (no float64 support) or the float32-FFT opt-in is set
+    dtype = (torch.float32
+             if (flux_uni.device.type == "mps" or USE_FLOAT32_FFT)
              else torch.float64)
     v = torch.as_tensor(velocity, dtype=dtype,
                         device=flux_uni.device).reshape(-1)
