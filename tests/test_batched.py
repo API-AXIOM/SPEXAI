@@ -78,6 +78,19 @@ def test_batched_echunk_invariant(joint, edges):
     assert _max_rel(chunked, full) < 1e-5
 
 
+def test_batched_stage_split_matches_flux(joint, edges):
+    # the staged path (_density -> _continuum -> _combine) must equal flux()
+    b = joint.batched
+    T = torch.tensor([1.5, 4.0])
+    ab = {8: 0.9, 26: 1.1}
+    ref = b.flux(T, ab, 150.0, edges)
+    e = torch.as_tensor(edges, dtype=torch.float32)
+    dens, zs = b._density(T.float(), b._echunk(T.numel(), 2.0), False)
+    cont = b._continuum(dens, e, 150.0, False, None, 0.0, 0.0, 2.0)
+    staged = b._combine(cont, zs, ab, T.float(), e, 150.0, False, None, 0.0, 0.0)
+    assert _max_rel(staged, ref) < 1e-6
+
+
 def test_batched_tiny_mem_budget_invariant(joint, edges):
     # a tiny mem_gb forces minimal trunk/broadening chunks (the OOM-mitigation
     # path); result must be unchanged vs the serial reference
