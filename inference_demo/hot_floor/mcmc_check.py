@@ -189,7 +189,11 @@ def main():
     response = Response(rmf, arf)
     absorption = Absorption.default()
     keep = band_mask(response)
-    emu = JointOperatorModel(models_dir=STORE28, device=args.device)
+    # accelerate=False: this cross-check drives the accel knobs itself
+    # (--tf32/--compile/--fft32, and the vectorized EnsembleForward compile) so
+    # ACCEL="" gives a genuine float64 reference; the model must not auto-enable.
+    emu = JointOperatorModel(models_dir=STORE28, device=args.device,
+                             accelerate=False)
     dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
 
     if args.profile:                                     # measure per-eval cost

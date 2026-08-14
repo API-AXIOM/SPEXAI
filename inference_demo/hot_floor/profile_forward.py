@@ -76,7 +76,9 @@ def main():
     response = Response(rmf, arf)
     absn = Absorption.default()
     keep = band_mask(response)
-    emu = JointOperatorModel(models_dir=STORE28, device=dev)
+    # accelerate=False: this script drives the accel knobs itself (--tf32/
+    # --compile/--fft32) for a clean A/B, so the model must not auto-enable them.
+    emu = JointOperatorModel(models_dir=STORE28, device=dev, accelerate=False)
     ens = EnsembleForward(emu, response, absn, keep, "single", PERSEUS["vel"],
                           dev, chunk=args.chunk, compile_nets=args.compile)
     pars = ens.params(15.685)

@@ -5,7 +5,9 @@ import numpy as np
 import pytest
 import torch
 
+import spexai.train.broadening as _broadening
 from spexai.inference.operator_model import (MODELS_DIR, element_broadened_flux,
+                                             enable_inference_acceleration,
                                              load_operator)
 
 pytestmark = pytest.mark.skipif(
@@ -67,7 +69,26 @@ def test_zero_abundance_returns_zeros(fe_model, edges):
 
 def test_missing_elements_reported(small_joint):
     assert set(small_joint.models) == {2, 26}
-    assert 17 in small_joint.manifest["missing_elements"]  # Cl: never trained
+    # manifest tracks the full periodic range; the store is now complete (Z1-30)
+    assert isinstance(small_joint.manifest["missing_elements"], list)
+    assert set(map(int, small_joint.manifest["elements"])) >= {2, 26}
+
+
+# --- inference acceleration (CUDA-only; must be a no-op off CUDA) -----------
+
+@pytest.mark.parametrize("device", ["cpu", torch.device("cpu")])
+def test_acceleration_is_noop_off_cuda(device):
+    fe = load_operator(os.path.join(MODELS_DIR, "Z26_Fe.pt"))
+    before = _broadening.USE_FLOAT32_FFT
+    enabled = enable_inference_acceleration([fe], device)
+    assert enabled == []                               # nothing turned on
+    assert _broadening.USE_FLOAT32_FFT == before       # fft32 flag untouched
+
+
+def test_joint_accel_default_noop_on_cpu(small_joint):
+    # default accelerate=True on a CPU model must leave numerics byte-identical
+    assert small_joint.accel == []
+    assert _broadening.USE_FLOAT32_FFT is False
 
 
 # --- counts / response folding via the model -------------------------------

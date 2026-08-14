@@ -32,6 +32,35 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "models")
 
 
+def enable_inference_acceleration(models, device):
+    """Turn on the validated production inference accelerations, in place.
+
+    Three knobs, all measured on an A10 (``docs/inference_methodology.tex``,
+    the hot-floor MCMC cross-check): TF32 tensor-core matmul (~1.4x), then
+    ``torch.compile`` of each element's coordinate MLP (the ~75% bottleneck;
+    ~2.6x cumulative), then a float32 continuum-FFT broadening (~3.0x). The
+    accuracy cost (~1e-3, only the *smooth* continuum is float32-FFT'd) is far
+    below the emulator's own error and validated science-safe (<=0.3 sigma at
+    1e8 counts).
+
+    CUDA-only by design: on CPU/MPS TF32 does not exist and ``torch.compile``
+    only adds a stall, so this is a **no-op** off CUDA and the numerics stay
+    byte-identical to the reference (float64) path. ``models`` is an iterable of
+    ``SpectralOperator``; each has its ``forward_norm`` wrapped in place. Returns
+    the list of knobs actually enabled."""
+    dev = device.type if isinstance(device, torch.device) else \
+        torch.device(device).type
+    if dev != "cuda":
+        return []
+    import spexai.train.broadening as _broadening
+    torch.backends.cuda.matmul.allow_tf32 = True       # TF32 tensor cores (Ampere+)
+    torch.backends.cudnn.allow_tf32 = True
+    _broadening.USE_FLOAT32_FFT = True                  # float32 continuum FFT
+    for m in models:                                   # compile the net hot path
+        m.forward_norm = torch.compile(m.forward_norm, dynamic=True)
+    return ["tf32", "compile", "fft32"]
+
+
 def load_operator(path, map_location="cpu"):
     """Rebuild a trained SpectralOperator from a checkpoint alone (no cache).
 
@@ -146,7 +175,8 @@ class JointOperatorModel:
     incident-energy grid of whatever instrument you fold through next).
     """
 
-    def __init__(self, models_dir=MODELS_DIR, device="cpu", elements=None):
+    def __init__(self, models_dir=MODELS_DIR, device="cpu", elements=None,
+                 accelerate=True):
         self.device = device
         self.models_dir = models_dir
         with open(os.path.join(models_dir, "manifest.json")) as f:
@@ -161,6 +191,21 @@ class JointOperatorModel:
         self.elements = sorted(self.models)
         # low-Z primordial elements held at solar (H, He) unless overridden
         self.fixed_solar = {1, 2}
+        # production inference accelerations (TF32 + compile + float32 FFT); a
+        # CUDA-only no-op, so CPU/MPS numerics are unchanged. accelerate=False
+        # gives the float64 reference path (e.g. for accuracy cross-checks).
+        self.accel = (enable_inference_acceleration(self.models.values(), device)
+                      if accelerate else [])
+        self._batched = None
+
+    @property
+    def batched(self):
+        """Element-batched forward (same numerics, trunk nets vmapped over
+        elements); built lazily and cached. See spexai.inference.batched."""
+        if self._batched is None:
+            from spexai.inference.batched import BatchedJointForward
+            self._batched = BatchedJointForward(self)
+        return self._batched
 
     def __repr__(self):
         miss = self.manifest.get("missing_elements", [])
