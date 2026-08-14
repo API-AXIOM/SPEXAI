@@ -89,6 +89,11 @@ def test_batched_stage_split_matches_flux(joint, edges):
     cont = b._continuum(dens, e, 150.0, False, None, 0.0, 0.0, 2.0)
     staged = b._combine(cont, zs, ab, T.float(), e, 150.0, False, None, 0.0, 0.0)
     assert _max_rel(staged, ref) < 1e-6
+    # each stage must be no_grad on its own: called directly (as the --stages
+    # benchmark does) an autograd graph would pin every trunk activation and
+    # OOM the GPU -- flux()'s own no_grad does not cover direct stage calls.
+    assert not dens.requires_grad and not cont.requires_grad
+    assert not staged.requires_grad
 
 
 def test_batched_tiny_mem_budget_invariant(joint, edges):

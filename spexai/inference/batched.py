@@ -163,6 +163,7 @@ class BatchedJointForward:
         e = int(0.5 * float(mem_gb) * 1e9 / max(1, self._max_ef * B * 4))
         return max(256, min(self._P, e))
 
+    @torch.no_grad()
     def _density(self, temp_kev, echunk, compile_trunk):
         """Batched trunk: log10 continuum density for every element, stacked as
         (N, B, P). Returns (dens, zs) with zs the element order of the N axis."""
@@ -179,6 +180,7 @@ class BatchedJointForward:
             zs += g.zs
         return torch.cat(dens, dim=0), zs                        # (N, B, P)
 
+    @torch.no_grad()
     def _continuum(self, dens, bin_edges, velocity, absorb, tfun, n_h,
                    redshift, mem_gb):
         """Broaden + absorb + rebin the stacked densities to (N, B, M). The fine
@@ -202,6 +204,7 @@ class BatchedJointForward:
             cont.append(rebin_flux(fu, uni, bin_edges))          # (rc, M)
         return torch.cat(cont, dim=0).reshape(N, B, -1)          # (N, B, M)
 
+    @torch.no_grad()
     def _combine(self, cont, zs, abundances, temp_kev, bin_edges, velocity,
                  absorb, tfun, n_h, redshift):
         """Abundance-weight the continua and add the ragged per-element line
