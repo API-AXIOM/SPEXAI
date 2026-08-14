@@ -134,10 +134,16 @@ class BatchedJointForward:
 
     @torch.no_grad()
     def flux(self, temp_kev, abundances, velocity, bin_edges,
-             absorption=None, n_h=0.0, redshift=0.0, echunk=8192):
+             absorption=None, n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0):
         """Abundance-weighted summed flux on ``bin_edges`` — see
-        ``JointOperatorModel.flux`` for the parameter semantics. ``echunk``
-        bounds peak memory by chunking the P (energy) axis of the vmapped trunk."""
+        ``JointOperatorModel.flux`` for the parameter semantics.
+
+        Two memory knobs (both numerically transparent, energy-/row-independent):
+        the P (energy) axis of the vmapped trunk is processed in ``echunk`` bins
+        and the fine-grid broadening in row-chunks. With ``echunk=None`` both are
+        sized from ``mem_gb`` (a soft per-intermediate GPU budget) using the
+        largest element group and the walker batch, so peak memory does not blow
+        up with the group size the way a fixed chunk would."""
         device = self.device
         temp_kev = torch.as_tensor(temp_kev, dtype=torch.float32,
                                    device=device).view(-1)
@@ -151,10 +157,20 @@ class BatchedJointForward:
         widths = train_edges[1:] - train_edges[:-1]             # (P,) shared
         uni = uniform_log_edges(float(train_edges[0]),
                                 float(train_edges[-1]), _DLX).to(device)
+        K = uni.numel() - 1
 
         absorb = (absorption is not None
                   and float(torch.as_tensor(n_h, dtype=torch.float64).max()) > 0.0)
         tfun = absorption.transmission_torch if absorb else None
+
+        budget = float(mem_gb) * 1e9
+        # trunk embedding peak ~ E * B * echunk * (1 + 2*n_freqs) floats; size
+        # echunk from the largest group so the E-fold stack stays bounded.
+        if echunk is None:
+            max_ef = max(len(g.zs) * (1 + 2 * g.models[0].config.n_freqs)
+                         for g in self.groups)
+            echunk = int(0.5 * budget / max(1, max_ef * B * 4))
+            echunk = max(256, min(P, echunk))
 
         # --- batched trunk: continuum density for every element -------------
         dens, zs_all = [], []
@@ -170,14 +186,23 @@ class BatchedJointForward:
         dens = torch.cat(dens, dim=0)                            # (N, B, P)
         N = dens.shape[0]
 
-        # --- broaden all elements together (velocity + N_H shared) ----------
+        # --- broaden all elements together (velocity + N_H shared), but in
+        #     row-chunks: scatter/FFT/rebin are per-row, and the fine grid K is
+        #     large, so the full (N*B, K) stack is the second memory hotspot ----
         f_train = (dens * widths).reshape(N * B, P)              # (N*B, P)
-        f_uni = fft_broaden(scatter_to_grid(f_train, train_edges, uni),
-                            _DLX, velocity)
+        trans = None
         if absorb:                                               # observed frame
             uni_cent = torch.sqrt(uni[:-1] * uni[1:])
-            f_uni = f_uni * tfun(uni_cent / (1.0 + redshift), n_h, device=device)
-        cont = rebin_flux(f_uni, uni, bin_edges).reshape(N, B, -1)  # (N, B, M)
+            trans = tfun(uni_cent / (1.0 + redshift), n_h, device=device)
+        rchunk = max(1, min(N * B, int(0.25 * budget / max(1, K * 8 * 4))))
+        cont = []
+        for lo in range(0, N * B, rchunk):
+            fr = f_train[lo:lo + rchunk]                         # (rc, P)
+            fu = fft_broaden(scatter_to_grid(fr, train_edges, uni), _DLX, velocity)
+            if absorb:
+                fu = fu * trans
+            cont.append(rebin_flux(fu, uni, bin_edges))          # (rc, M)
+        cont = torch.cat(cont, dim=0).reshape(N, B, -1)          # (N, B, M)
 
         # --- abundance weight + ragged per-element line heads ---------------
         total = torch.zeros((B, bin_edges.numel() - 1), device=device)

@@ -76,3 +76,13 @@ def test_batched_echunk_invariant(joint, edges):
     full = joint.batched.flux(T, {}, 150.0, edges)
     chunked = joint.batched.flux(T, {}, 150.0, edges, echunk=4096)
     assert _max_rel(chunked, full) < 1e-5
+
+
+def test_batched_tiny_mem_budget_invariant(joint, edges):
+    # a tiny mem_gb forces minimal trunk/broadening chunks (the OOM-mitigation
+    # path); result must be unchanged vs the serial reference
+    T = torch.tensor([1.0, 3.0, 7.0])
+    ab = {8: 0.8, 26: 1.2}
+    ref = joint.flux(T, ab, 150.0, edges)
+    bat = joint.batched.flux(T, ab, 150.0, edges, mem_gb=1e-4)
+    assert _max_rel(bat, ref) < 1e-4

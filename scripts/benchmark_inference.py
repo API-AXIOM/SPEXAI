@@ -30,6 +30,9 @@ import os
 import sys
 import time
 
+# reduce CUDA fragmentation before torch initialises its allocator
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 
@@ -82,7 +85,8 @@ def run_config(name, joint, batched, edges, fold, temps, ab, vel, absn, n_h,
     flux_fn = (joint.batched.flux if batched else joint.flux)
     kw = dict(absorption=absn, n_h=n_h, redshift=args.redshift)
     if batched:
-        kw["echunk"] = args.echunk
+        kw["echunk"] = args.echunk       # None -> auto-sized from mem_gb
+        kw["mem_gb"] = args.mem_gb
 
     def step():
         for lo in range(0, args.nwalkers, args.wchunk):    # bound GPU memory
@@ -102,8 +106,11 @@ def main():
                     help="ensemble size (one vectorised MCMC step = one forward)")
     ap.add_argument("--wchunk", type=int, default=16,
                     help="walker sub-batch (bounds GPU memory)")
-    ap.add_argument("--echunk", type=int, default=8192,
-                    help="energy-axis chunk for the batched trunk")
+    ap.add_argument("--echunk", type=int, default=None,
+                    help="energy-axis chunk for the batched trunk (default: "
+                         "auto-sized from --mem_gb and the largest element group)")
+    ap.add_argument("--mem_gb", type=float, default=2.0,
+                    help="soft per-intermediate GPU budget for the batched path")
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--response", default=None, help="RMF path (GPU fold to counts)")
     ap.add_argument("--arf", default=None)
