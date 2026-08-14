@@ -118,10 +118,18 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
         print(f"{p.name:>9} {p.truth:>10.4g} {med[i]:>10.4g} "
               f"{med[i]-p.truth:>+11.3e} {sig[i]:>10.3e}  "
               f"{(med[i]-p.truth)/sig[i]:>+.2f}")
+    # posterior-predictive band: fold a random subset of posterior draws
+    rng2 = np.random.default_rng(1)
+    idx = rng2.choice(chain.shape[0], size=min(64, chain.shape[0]), replace=False)
+    ppc = ens(chain[idx])                                # (Nppc, n_keep)
+    chan_e = response.chan_e_cent.cpu().numpy()[keep]
     suffix = f"_{args.tag}" if args.tag else ""
     outp = os.path.join(args.out, f"mcmc_{args.mode}_vec{suffix}.npz")
-    np.savez(outp, names=names, truth=x0, chain=chain, counts=args.counts,
-             n_ref=N_REF)
+    np.savez(outp, names=names, truth=x0, chain=chain,
+             full_chain=sampler.get_chain(), log_prob=sampler.get_log_prob(),
+             nwalkers=args.nwalkers, discard=int(0.4 * args.nsteps),
+             obs_data=d, chan_e=chan_e, ppc=ppc,
+             counts=args.counts, n_ref=N_REF)
     print(f"saved {outp}", flush=True)
 
 

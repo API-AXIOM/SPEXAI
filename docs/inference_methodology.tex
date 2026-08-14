@@ -318,11 +318,75 @@ $\sigma_v=0$, so cold, quiet sources are the harder case and are being mapped wi
 a dedicated low-broadening stress run. The biases above are the linearised
 (infinite-count) limit; a direct \code{emcee} counts scan near $N_\star$---where
 the systematic offset reaches $\sim1\sigma$ and becomes directly detectable---is
-staged for the cluster (\code{mcmc\_check.py}; the Poisson likelihood cost is
-independent of the simulated counts) as a cross-check. Both single-$T$ and
+carried out on the cluster (\code{mcmc\_check.py}; the Poisson likelihood cost is
+independent of the simulated counts) and is reported next. Both single-$T$ and
 Gaussian-DEM Fisher results are reported above and agree; the DEM emulator
 temperature grid is held within the training range ($\geq0.7\kev$) to avoid
 PCHIP extrapolation of the SPEX truth.
+
+\paragraph{MCMC cross-check.} The linearised bias was validated against a direct
+\code{emcee} fit at three in-band count levels ($4\times10^4$, $10^6$, $10^8$),
+with a walker-batched GPU forward (\code{gpu\_forward.py}, \code{emcee}
+\code{vectorized}). The run uses the production acceleration (TF32 tensor-core
+matmul $+$ float32 continuum FFT, ${\sim}3\times$ faster with a ${\sim}10^{-3}$
+accuracy cost, below the emulator's own error). All chains are stationary and
+unimodal ($\tau\!\approx\!35$--$44$, ESS ${\sim}800$), and the
+posterior-predictive residuals are consistent with $\mathcal N(0,1)$ with no
+structure at the line complexes. Fig.~\ref{fig:crosscheck} overlays the recovered
+offsets $(\mathrm{median}-\mathrm{truth})/\sigma$ on the analytic prediction
+$|b_{\rm sys}|/\sigma_{\rm stat}(N)$. At the realistic count levels the predicted
+bias is $0.01$--$0.25\sigma$ while the observed offsets are pure statistical
+scatter (${\sim}1\sigma$, coverage-consistent): the emulator floor is invisible,
+exactly as $N_\star$ predicts. At $10^8$ counts---orders of magnitude beyond any
+real observation---the bias emerges, in the \emph{predicted direction}: the sign
+of the recovered offset matches $b_{\rm sys}$ for $10$ of the $11$ parameters. Its
+\emph{magnitude} runs a factor ${\sim}1.5$--$3$ above the first-order
+$b_{\rm sys}$. A dedicated float64 run (TF32/FFT acceleration off) reproduces the
+accelerated offsets to ${\lesssim}0.3\sigma$ (Fig.~\ref{fig:crosscheck}, open
+squares), so the excess is \emph{not} an acceleration artefact---it is the
+first-order linearisation underestimating the true maximum-likelihood bias
+(compounded by single-realisation scatter). The implied true $N_\star$ are then a
+factor of a few below Table~\ref{tab:hotfloor}, but still ${\gtrsim}10^7$ in-band
+counts, and the science-critical Cr/Mn/Ni retain small offsets even at $10^8$
+(Cr $-0.2\sigma$, Mn/Ni ${\sim}-1.5\sigma$): the conclusion is unchanged, and the
+production acceleration is confirmed science-safe (${\lesssim}0.3\sigma$ at
+$10^8$). A multi-seed scan would pin the linearisation factor precisely.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.68\textwidth]{../inference_demo/hot_floor/results/crosscheck_overlay.png}
+\caption{MCMC cross-check: recovered posterior offsets
+$|\mathrm{median}-\mathrm{truth}|/\sigma$ (points) at three in-band count levels,
+overlaid on the analytic linearised-bias prediction (lines) from
+Table~\ref{tab:hotfloor}. At realistic counts (vertical guides) the offsets are
+statistical scatter far above the negligible predicted bias; at $10^8$ counts the
+bias emerges in the predicted direction (with magnitude a factor of a few above
+the first-order lines). Open squares are the float64 reference run at $10^8$; they
+coincide with the accelerated points, confirming the acceleration is negligible.
+The science-critical Cr/Mn/Ni and Fe are emphasised.}
+\label{fig:crosscheck}
+\end{figure}
+
+\paragraph{Outlook: NewAthena.} The $0.1\%$ floor is comfortably safe for XRISM,
+whose bright-cluster spectra ($\sim4\times10^4$ counts per region, $\sim10^6$ in a
+deep stack) lie one to two orders of magnitude below every $N_\star$. NewAthena's
+X-IFU, however, collects ${\sim}6\times$ (at $7\kev$) to ${\sim}45\times$ (at
+$1\kev$) the XRISM/Resolve effective area \citep{barret2025}, i.e.\ ${\sim}10\times$
+the in-band counts for the same source and exposure, so a deep observation of a
+bright cluster core reaches ${\sim}10^6$--$10^7$ in-band counts
+\citep{cucchetti2018}. That is precisely the regime where the floor first bites:
+at ${\sim}10^7$ counts the continuum- and normalisation-sensitive parameters (Fe,
+$\nh$, $kT$, $Y$) would carry a ${\sim}0.5$--$1\sigma$ emulator bias, while the
+hot-element abundances themselves (Cr/Mn/Ni) require ${\sim}10^8$ and are affected
+only in the most extreme stacked spectra. X-IFU's sharper resolution
+(${\sim}3$--$4\,\mathrm{eV}$ vs.\ XRISM's ${\sim}4.5\,\mathrm{eV}$) marginally
+increases line-head exposure, though the dominant broadening is the cluster's own
+${\sim}180\kms$ turbulence, common to both instruments. The floor is therefore a
+\emph{trackable systematic} for NewAthena's flagship high-count cluster science---
+motivating a line-head retraining of the hot Fe-peak elements before flight---even
+though it is negligible for XRISM. These are order-of-magnitude scalings from the
+effective-area ratio; a dedicated X-IFU/\code{SIXTE} simulation would pin $N_\star$
+in X-IFU counts.
 
 \begin{thebibliography}{9}
 \bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\
@@ -332,6 +396,11 @@ PCHIP extrapolation of the SPEX truth.
 \bibitem[XRISM Collaboration(2026)]{xrism_perseus} XRISM Collaboration 2026,
 Chemical enrichment of the Perseus cluster core seen by XRISM/Resolve,
 arXiv:2606.17141.
+\bibitem[Cucchetti et al.(2018)]{cucchetti2018} Cucchetti, E., Pointecouteau, E.,
+Peille, P., et al.\ 2018, A\&A, 620, A173 (Athena X-IFU synthetic observations of
+galaxy clusters to probe the chemical enrichment of the Universe).
+\bibitem[Barret et al.(2025)]{barret2025} Barret, D., et al.\ 2025, The X-ray
+Integral Field Unit at the end of the Athena reformulation phase, arXiv:2502.10866.
 \end{thebibliography}
 
 \end{document}
