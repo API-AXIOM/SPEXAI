@@ -83,12 +83,20 @@ class _TrunkGroup:
 
     def _fwd(self, compile_trunk):
         """The vmapped trunk, optionally torch.compiled (compile ∘ vmap, so the
-        grouped GEMMs *also* get kernel fusion). dynamic=True avoids a recompile
-        on the smaller last energy chunk."""
+        grouped GEMMs *also* get kernel fusion).
+
+        ``dynamic=False`` is required, not a tuning choice: under dynamic shapes
+        the energy-chunk dimension becomes symbolic, and functorch's
+        ``BatchedTensor`` cannot answer ``sizes()`` on a symbolic shape ("Cannot
+        call sizes() on tensor with symbolic sizes/strides" inside ``linear``).
+        It must also be explicit — the default ``dynamic=None`` would silently
+        promote to symbolic shapes on the second distinct chunk size and hit the
+        same failure. Static shapes mean one compiled graph per (B, chunk) shape;
+        ``_echunk`` balances the chunks so that is at most two per group."""
         if not compile_trunk:
             return self._vfwd
         if self._vfwd_compiled is None:
-            self._vfwd_compiled = torch.compile(self._vfwd, dynamic=True)
+            self._vfwd_compiled = torch.compile(self._vfwd, dynamic=False)
         return self._vfwd_compiled
 
     def log_density(self, temp_kev, x, bins, compile_trunk=False):
@@ -159,9 +167,17 @@ class BatchedJointForward:
 
     def _echunk(self, B, mem_gb):
         """Energy-axis chunk sized so the E-fold trunk embedding stays under the
-        budget (peak ~ max_E * B * echunk * feats * 4 bytes)."""
-        e = int(0.5 * float(mem_gb) * 1e9 / max(1, self._max_ef * B * 4))
-        return max(256, min(self._P, e))
+        budget (peak ~ max_E * B * echunk * feats * 4 bytes).
+
+        The budget gives an upper bound; we then spread the P bins evenly over
+        the resulting number of chunks. That only ever shrinks the chunk (so the
+        memory bound still holds) and makes every chunk the same size bar a
+        remainder, which keeps the static-shape ``torch.compile`` path down to
+        one or two compiled graphs instead of one per ragged tail."""
+        cap = int(0.5 * float(mem_gb) * 1e9 / max(1, self._max_ef * B * 4))
+        cap = max(256, min(self._P, cap))
+        n = -(-self._P // cap)                  # ceil: number of chunks needed
+        return -(-self._P // n)                 # spread evenly over those n
 
     @torch.no_grad()
     def _density(self, temp_kev, echunk, compile_trunk):
