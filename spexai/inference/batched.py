@@ -63,6 +63,22 @@ class _TrunkWrap(torch.nn.Module):
                                              add_lines=False)
 
 
+def _ensure_recompile_limit(n_needed):
+    """Raise dynamo's per-frame recompile limit to fit every trunk variant.
+
+    Every ``_TrunkGroup`` compiles the *same* functorch ``wrapped`` code object,
+    so all of them share one dynamo cache bucket: n_groups x energy-chunk shapes
+    x (bf16 or not). The default limit is 8, which a 30-element store (4 groups)
+    reaches immediately -- and past the limit dynamo silently falls back to
+    eager, so the compile speedup disappears with nothing but a log warning to
+    show for it. Only ever raises, never lowers a user's setting."""
+    import torch._dynamo as dynamo
+    for attr in ("recompile_limit", "cache_size_limit"):   # name varies by ver.
+        cur = getattr(dynamo.config, attr, None)
+        if isinstance(cur, int) and cur < n_needed:
+            setattr(dynamo.config, attr, n_needed)
+
+
 class _TrunkGroup:
     """A set of same-shape element operators, trunk-evaluated together via vmap."""
 
@@ -99,15 +115,27 @@ class _TrunkGroup:
             self._vfwd_compiled = torch.compile(self._vfwd, dynamic=False)
         return self._vfwd_compiled
 
-    def log_density(self, temp_kev, x, bins, compile_trunk=False):
+    def log_density(self, temp_kev, x, bins, compile_trunk=False, bf16=False):
         """log10 continuum density for every element in the group.
 
         temp_kev: (B,) physical keV; x: (B, P, 1) shared normalised coords;
-        bins: (P,) long grid indices. Returns (E, B, P)."""
+        bins: (P,) long grid indices. Returns (E, B, P), always float32.
+
+        ``bf16`` runs the trunk under bfloat16 autocast: the profiler shows the
+        trunk is ~64% tensor-core GEMM (TF32 ``s1688gemm``) plus ~18% bandwidth-
+        bound activations, both of which bf16 targets. The result is cast back to
+        float32 before returning because the caller exponentiates it (10**x) --
+        doing that in bf16 (8 mantissa bits) would throw away far more precision
+        than the GEMMs do."""
         # per-element temperature normalisation (t_lo/t_hi may differ)
         tnorm = torch.stack([m.norm_temp(temp_kev).view(-1, self.n_params)
                              for m in self.models], dim=0)      # (E, B, n_params)
-        return self._fwd(compile_trunk)(self.params, self.buffers, tnorm, x, bins)
+        fwd = self._fwd(compile_trunk)
+        if not bf16:
+            return fwd(self.params, self.buffers, tnorm, x, bins)
+        with torch.autocast(device_type=x.device.type, dtype=torch.bfloat16):
+            out = fwd(self.params, self.buffers, tnorm, x, bins)
+        return out.float()
 
 
 class BatchedJointForward:
@@ -180,7 +208,7 @@ class BatchedJointForward:
         return -(-self._P // n)                 # spread evenly over those n
 
     @torch.no_grad()
-    def _density(self, temp_kev, echunk, compile_trunk):
+    def _density(self, temp_kev, echunk, compile_trunk, bf16=False):
         """Batched trunk: log10 continuum density for every element, stacked as
         (N, B, P). Returns (dens, zs) with zs the element order of the N axis."""
         B, P, x = temp_kev.numel(), self._P, self._x
@@ -191,7 +219,7 @@ class BatchedJointForward:
                 hi = min(lo + echunk, P)
                 xb = x[:, lo:hi].expand(B, -1, -1)              # (B, chunk, 1)
                 bins = torch.arange(lo, hi, device=self.device)
-                gd.append(g.log_density(temp_kev, xb, bins, compile_trunk))
+                gd.append(g.log_density(temp_kev, xb, bins, compile_trunk, bf16))
             dens.append(torch.pow(10.0, torch.cat(gd, dim=2)))  # (E, B, P)
             zs += g.zs
         return torch.cat(dens, dim=0), zs                        # (N, B, P)
@@ -201,10 +229,17 @@ class BatchedJointForward:
                    redshift, mem_gb):
         """Broaden + absorb + rebin the stacked densities to (N, B, M). The fine
         grid K is large, so the (N*B, K) work is done in row-chunks (per-row
-        independent, so numerically identical)."""
+        independent, so numerically identical).
+
+        ``velocity`` may be a (B,) per-walker tensor. Rows here are element-major
+        (row = n*B + b), so it is tiled N times to line up with the flattened
+        stack, then sliced per row-chunk."""
         N, B, P = dens.shape
         uni, te, K = self._uni, self._train_edges, self._K
         f_train = (dens * self._widths).reshape(N * B, P)        # (N*B, P)
+        vel = velocity
+        if torch.is_tensor(vel) and vel.numel() > 1:
+            vel = vel.reshape(-1).repeat(N)                      # (N*B,) row-aligned
         trans = None
         if absorb:                                               # observed frame
             uni_cent = torch.sqrt(uni[:-1] * uni[1:])
@@ -213,8 +248,10 @@ class BatchedJointForward:
                                        / max(1, K * 8 * 4))))
         cont = []
         for lo in range(0, N * B, rchunk):
+            v = (vel[lo:lo + rchunk] if torch.is_tensor(vel) and vel.numel() > 1
+                 else vel)
             fu = fft_broaden(scatter_to_grid(f_train[lo:lo + rchunk], te, uni),
-                             _DLX, velocity)
+                             _DLX, v)
             if absorb:
                 fu = fu * trans
             cont.append(rebin_flux(fu, uni, bin_edges))          # (rc, M)
@@ -241,15 +278,20 @@ class BatchedJointForward:
 
     @torch.no_grad()
     def flux(self, temp_kev, abundances, velocity, bin_edges, absorption=None,
-             n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0, compile_trunk=False):
+             n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0, compile_trunk=False,
+             bf16=False):
         """Abundance-weighted summed flux on ``bin_edges`` — see
         ``JointOperatorModel.flux`` for the parameter semantics.
+
+        ``velocity`` is km/s, scalar or a (B,) tensor for a per-walker sigma_v.
 
         Memory: the vmapped trunk is chunked over energy (``echunk``, auto-sized
         from ``mem_gb`` when None) and the broadening over rows; both are
         numerically transparent. ``compile_trunk`` additionally torch.compiles
         the vmapped group forward (compile ∘ vmap), stacking kernel fusion on top
-        of the batching (one-off compile stall on the first call)."""
+        of the batching (one-off compile stall on the first call). ``bf16`` runs
+        the trunk under bfloat16 autocast (see ``_TrunkGroup.log_density``); only
+        the trunk is affected -- broadening, lines and the rebin are untouched."""
         device = self.device
         temp_kev = torch.as_tensor(temp_kev, dtype=torch.float32,
                                    device=device).view(-1)
@@ -259,8 +301,10 @@ class BatchedJointForward:
         tfun = absorption.transmission_torch if absorb else None
         if echunk is None:
             echunk = self._echunk(temp_kev.numel(), mem_gb)
+        if compile_trunk:                    # 2 chunk shapes x bf16/not, +margin
+            _ensure_recompile_limit(8 * len(self.groups))
 
-        dens, zs = self._density(temp_kev, echunk, compile_trunk)
+        dens, zs = self._density(temp_kev, echunk, compile_trunk, bf16)
         cont = self._continuum(dens, bin_edges, velocity, absorb, tfun, n_h,
                                redshift, mem_gb)
         return self._combine(cont, zs, abundances, temp_kev, bin_edges,

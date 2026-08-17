@@ -96,6 +96,65 @@ def test_batched_stage_split_matches_flux(joint, edges):
     assert not staged.requires_grad
 
 
+def test_recompile_limit_raised_not_lowered(joint):
+    # all trunk groups share one dynamo cache bucket; past the default 8 dynamo
+    # silently falls back to eager and the compile speedup vanishes
+    import torch._dynamo as dynamo
+    from spexai.inference.batched import _ensure_recompile_limit
+    _ensure_recompile_limit(64)
+    assert dynamo.config.recompile_limit >= 64
+    _ensure_recompile_limit(4)                 # must not lower an existing value
+    assert dynamo.config.recompile_limit >= 64
+
+
+def test_bf16_trunk_runs_and_stays_float32(joint, edges):
+    # bf16 autocast must not leak its dtype out of the trunk: the caller does
+    # 10**x on the result, which in 8 mantissa bits would be far lossier than
+    # the GEMMs themselves. Accuracy is a benchmark question (--accuracy), not
+    # a unit-test one; here we only pin dtype and sanity-bound the deviation.
+    b = joint.batched
+    T = torch.tensor([1.5, 4.0])
+    ab = {8: 0.9, 26: 1.1}
+    ref = b.flux(T, ab, 150.0, edges)
+    got = b.flux(T, ab, 150.0, edges, bf16=True)
+    assert got.dtype == torch.float32 and got.shape == ref.shape
+    assert torch.isfinite(got).all()
+    dens, _ = b._density(T, b._echunk(T.numel(), 2.0), False, True)
+    assert dens.dtype == torch.float32
+    assert _max_rel(got, ref) < 0.1        # loose: bf16 is a precision tradeoff
+
+
+def test_per_walker_velocity_matches_walker_loop(joint, edges):
+    # THE test for per-walker sigma_v: a (B,) velocity must reproduce, walker by
+    # walker, what a scalar velocity gives for that walker alone. Distinct
+    # velocities per walker, so a silently-shared sigma_v cannot pass.
+    vels = torch.tensor([80.0, 400.0, 1200.0])
+    T = torch.tensor([1.2, 3.0, 6.0])
+    ab = {8: 0.7, 14: 1.3, 26: 1.1}
+    for name, fn in (("serial", joint.flux), ("batched", joint.batched.flux)):
+        got = fn(T, ab, vels, edges)                       # (3, M), one v each
+        for i, v in enumerate(vels):
+            ref = fn(T[i:i + 1], ab, float(v), edges)      # scalar, that walker
+            assert _max_rel(got[i:i + 1], ref) < 1e-5, f"{name} walker {i}"
+
+
+def test_per_walker_velocity_constant_equals_scalar(joint, edges):
+    # a constant (B,) vector must take the per-walker branch yet land on the
+    # scalar answer -- guards the flat-buffer scatter's index arithmetic
+    T = torch.tensor([1.5, 4.0])
+    ab = {26: 1.0}
+    ref = joint.batched.flux(T, ab, 300.0, edges)
+    vec = joint.batched.flux(T, ab, torch.full((2,), 300.0), edges)
+    assert _max_rel(vec, ref) < 1e-5
+
+
+def test_per_walker_velocity_rejects_wrong_length(joint, edges):
+    from spexai.train.broadening import deposit_gaussian_lines
+    with pytest.raises(ValueError, match="velocity must be scalar"):
+        deposit_gaussian_lines(torch.tensor([1.0, 2.0]), torch.ones(3, 2),
+                               torch.as_tensor(edges), torch.tensor([1.0, 2.0]))
+
+
 def test_batched_tiny_mem_budget_invariant(joint, edges):
     # a tiny mem_gb forces minimal trunk/broadening chunks (the OOM-mitigation
     # path); result must be unchanged vs the serial reference

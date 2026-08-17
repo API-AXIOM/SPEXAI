@@ -126,7 +126,8 @@ def element_broadened_flux(model, temp_kev, velocity, bin_edges,
     their exact energies, in the observed frame (energies ``E_rest/(1+redshift)``).
     This keeps absorption instrument-resolution independent. ``n_h`` in cm^-2.
 
-    temp_kev: (B,) tensor; velocity: scalar km/s; bin_edges: (M+1,) tensor.
+    temp_kev: (B,) tensor; velocity: scalar km/s or a (B,) tensor (per-walker
+    sigma_v, so it can be sampled); bin_edges: (M+1,) tensor.
     Returns (B, M) integrated flux.
     """
     device = model.train_energy.device
@@ -219,7 +220,8 @@ class JointOperatorModel:
 
         temp_kev: (B,) tensor. abundances: {Z: solar-relative value}; any
         loaded element not in the dict defaults to 1.0 for the primordial
-        set and to 1.0 (solar) otherwise. velocity: km/s. bin_edges: (M+1,).
+        set and to 1.0 (solar) otherwise. velocity: km/s, scalar or (B,) for a
+        per-walker sigma_v. bin_edges: (M+1,).
         Optional Galactic absorption (``absorption``, ``n_h`` cm^-2) is applied
         as a foreground screen in the observed frame (``redshift`` = source z).
         """

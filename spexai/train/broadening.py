@@ -184,34 +184,71 @@ def deposit_gaussian_lines(line_energies, line_flux, bin_edges, velocity,
     """Deposit lines as exact bin-integrated Gaussians onto any grid.
 
     line_energies: (N,) keV; line_flux: (B, N) integrated fluxes;
-    bin_edges: (M+1,); velocity: scalar km/s. Returns (B, M) integrated
+    bin_edges: (M+1,); velocity: scalar km/s **or a (B,) tensor** (one
+    sigma_v per walker, so the MCMC can sample it). Returns (B, M) integrated
     flux. Each line spreads over the target bins within +-nsigma of its
     Gaussian of width sigma_j = E_j v/c; erf differences make each line's
     total flux exact regardless of the target binning.
+
+    The scalar and per-walker branches differ only in bookkeeping: with one
+    sigma_v the +-nsigma window of a line is the same for every walker, so the
+    scatter indices are shared across the batch and ``index_add_`` runs on the
+    energy axis. Per-walker widths make those windows ragged across the batch,
+    so the deposit is done into a flattened (B*M,) buffer with walker-offset
+    indices instead. Same erf weights, same exactness.
     """
     if line_flux.device.type == "mps":  # no float64 on MPS: hop through CPU
+        v_cpu = (velocity.cpu() if torch.is_tensor(velocity) else velocity)
         return deposit_gaussian_lines(
-            line_energies.cpu(), line_flux.cpu(), bin_edges.cpu(), velocity,
+            line_energies.cpu(), line_flux.cpu(), bin_edges.cpu(), v_cpu,
             nsigma=nsigma, chunk=chunk).to(line_flux.device)
     B, N = line_flux.shape
     M = bin_edges.shape[0] - 1
     e = bin_edges.double()
-    out = torch.zeros(B, M, dtype=torch.float64, device=line_flux.device)
-    sigma = line_energies.double() * (velocity / C_KMS)
+    dev = line_flux.device
+    v = torch.as_tensor(velocity, dtype=torch.float64, device=dev).reshape(-1)
+    if v.numel() not in (1, B):
+        raise ValueError(f"velocity must be scalar or ({B},), got {tuple(v.shape)}")
+
+    if v.numel() == 1:                       # ---- shared window (scalar) ----
+        out = torch.zeros(B, M, dtype=torch.float64, device=dev)
+        sigma = line_energies.double() * (v.item() / C_KMS)          # (N,)
+        for s in range(0, N, chunk):
+            en = line_energies[s:s + chunk].double()
+            sg = sigma[s:s + chunk].clamp(min=1e-12)
+            lo = torch.searchsorted(e, en - nsigma * sg).clamp(min=1) - 1
+            hi = torch.searchsorted(e, en + nsigma * sg).clamp(max=M)
+            width = int((hi - lo).max().clamp(min=1))
+            idx = (lo.unsqueeze(1) + torch.arange(width + 1,
+                                                  device=e.device)).clamp(max=M)
+            z = (e[idx] - en.unsqueeze(1)) / (math.sqrt(2.0) * sg.unsqueeze(1))
+            w = 0.5 * (torch.erf(z[:, 1:]) - torch.erf(z[:, :-1]))  # (n, width)
+            tgt = idx[:, :-1].clamp(max=M - 1)                       # (n, width)
+            contrib = line_flux[:, s:s + chunk].double().unsqueeze(-1) * w
+            out.index_add_(1, tgt.reshape(-1), contrib.reshape(B, -1))
+        return out.float()
+
+    # ---- per-walker windows: scatter into a flat (B*M,) buffer ----
+    flat = torch.zeros(B * M, dtype=torch.float64, device=dev)
+    offs = (torch.arange(B, device=dev) * M).view(-1, 1, 1)          # (B,1,1)
+    sigma = line_energies.double().unsqueeze(0) * (v.view(-1, 1) / C_KMS)  # (B,N)
     for s in range(0, N, chunk):
-        en = line_energies[s:s + chunk].double()
-        sg = sigma[s:s + chunk].clamp(min=1e-12)
-        lo = torch.searchsorted(e, en - nsigma * sg).clamp(min=1) - 1
-        hi = torch.searchsorted(e, en + nsigma * sg).clamp(max=M)
+        en = line_energies[s:s + chunk].double()                      # (n,)
+        sg = sigma[:, s:s + chunk].clamp(min=1e-12)                   # (B, n)
+        lo = torch.searchsorted(e, en.unsqueeze(0) - nsigma * sg).clamp(min=1) - 1
+        hi = torch.searchsorted(e, en.unsqueeze(0) + nsigma * sg).clamp(max=M)
+        # one width for the chunk, set by the widest (walker, line) pair; each
+        # line's own erf weights still cut off at its own sigma, so the extra
+        # columns a narrow walker picks up contribute ~0, not spurious flux.
         width = int((hi - lo).max().clamp(min=1))
-        idx = (lo.unsqueeze(1) + torch.arange(width + 1,
-                                              device=e.device)).clamp(max=M)
-        z = (e[idx] - en.unsqueeze(1)) / (math.sqrt(2.0) * sg.unsqueeze(1))
-        w = 0.5 * (torch.erf(z[:, 1:]) - torch.erf(z[:, :-1]))  # (n, width)
-        tgt = idx[:, :-1].clamp(max=M - 1)                       # (n, width)
+        idx = (lo.unsqueeze(-1) + torch.arange(width + 1,
+                                               device=e.device)).clamp(max=M)
+        z = (e[idx] - en.view(1, -1, 1)) / (math.sqrt(2.0) * sg.unsqueeze(-1))
+        w = 0.5 * (torch.erf(z[..., 1:]) - torch.erf(z[..., :-1]))   # (B,n,width)
+        tgt = idx[..., :-1].clamp(max=M - 1)                          # (B,n,width)
         contrib = line_flux[:, s:s + chunk].double().unsqueeze(-1) * w
-        out.index_add_(1, tgt.reshape(-1), contrib.reshape(B, -1))
-    return out.float()
+        flat.index_add_(0, (tgt + offs).reshape(-1), contrib.reshape(-1))
+    return flat.view(B, M).float()
 
 
 # ---------------------------------------------------------------------------

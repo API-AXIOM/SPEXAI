@@ -10,9 +10,12 @@ inference path (``JointOperatorModel`` serial loop + ``.batched`` vmap groups):
   serial-accel    : + TF32 + torch.compile + float32 FFT
   batched-accel   : element nets vmapped over shape-groups + TF32 + float32 FFT
   batched-compile : batched-accel + torch.compile(vmap)  (compile ∘ vmap)
+  batched-bf16    : batched-compile + bfloat16 autocast on the trunk
 
 Options:
   --configs      which of the above to run (default: all)
+  --accuracy     relative error of every config vs the float64 reference, so a
+                 speedup is never read without its precision cost
   --stages       per-stage breakdown (trunk / broaden+rebin / lines / fold)
   --detailed     torch.profiler op-level CUDA table on the fastest config
   --fft-bench    float32-vs-float64 rfft micro-benchmark on the fine grid
@@ -42,12 +45,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spexai.inference.operator_model import (JointOperatorModel,
                                              enable_inference_acceleration)
 
-# name -> (batched?, compile_trunk?); serial-fp64 additionally means "accel off"
+# name -> (batched?, compile_trunk?, bf16?); serial-fp64 also means "accel off".
+# Cumulative ladder: each rung adds one thing to the rung above it.
 CONFIGS = {
-    "serial-fp64": (False, False),
-    "serial-accel": (False, False),
-    "batched-accel": (True, False),
-    "batched-compile": (True, True),
+    "serial-fp64": (False, False, False),
+    "serial-accel": (False, False, False),
+    "batched-accel": (True, False, False),
+    "batched-compile": (True, True, False),
+    "batched-bf16": (True, True, True),
 }
 
 
@@ -88,11 +93,11 @@ def build_grid(args, device):
 
 
 def forward_kwargs(cfg, args, absn, n_h):
-    batched, compile_trunk = CONFIGS[cfg]
+    batched, compile_trunk, bf16 = CONFIGS[cfg]
     kw = dict(absorption=absn, n_h=n_h, redshift=args.redshift)
     if batched:
         kw.update(echunk=args.echunk, mem_gb=args.mem_gb,
-                  compile_trunk=compile_trunk)
+                  compile_trunk=compile_trunk, bf16=bf16)
     return batched, kw
 
 
@@ -113,7 +118,7 @@ def run_config(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
 def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
     """Per-stage per-walker timing for a batched config (one wchunk sub-batch,
     like profile_forward): trunk vmap / broaden+rebin / lines+combine / fold."""
-    _, compile_trunk = CONFIGS[cfg]
+    _, compile_trunk, bf16 = CONFIGS[cfg]
     b = joint.batched
     t = temps[:args.wchunk]
     B = t.numel()
@@ -121,10 +126,11 @@ def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
     tfun = absn.transmission_torch if absorb else None
     ech = args.echunk or b._echunk(B, args.mem_gb)
 
-    dens, zs = b._density(t, ech, compile_trunk)          # materialise once
+    dens, zs = b._density(t, ech, compile_trunk, bf16)     # materialise once
     cont = b._continuum(dens, edges, args.velocity, absorb, tfun, n_h,
                         args.redshift, args.mem_gb)
-    t_den = timeit(lambda: b._density(t, ech, compile_trunk), args.iters, sync)
+    t_den = timeit(lambda: b._density(t, ech, compile_trunk, bf16),
+                   args.iters, sync)
     t_con = timeit(lambda: b._continuum(dens, edges, args.velocity, absorb,
                                         tfun, n_h, args.redshift, args.mem_gb),
                    args.iters, sync)
@@ -137,12 +143,31 @@ def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
     if fold is not None:
         full = b.flux(t, ab, args.velocity, edges, absorption=absn, n_h=n_h,
                       redshift=args.redshift, echunk=args.echunk,
-                      mem_gb=args.mem_gb, compile_trunk=compile_trunk)
+                      mem_gb=args.mem_gb, compile_trunk=compile_trunk, bf16=bf16)
         t_fold = timeit(lambda: fold(full), args.iters, sync)
         rows.append(("fold (sparse mm)", t_fold))
     tot = sum(t for _, t in rows)
     for name, t in rows:
         print(f"  {name:<20} {t/B*1e3:8.3f}   {100*t/tot:4.0f}%")
+
+
+def config_flux(cfg, joint, edges, temps, ab, args, absn, n_h):
+    """One flux() call under a config's settings -- the accuracy probe."""
+    batched, kw = forward_kwargs(cfg, args, absn, n_h)
+    flux_fn = joint.batched.flux if batched else joint.flux
+    return flux_fn(temps, ab, args.velocity, edges, **kw)
+
+
+def rel_errors(got, ref):
+    """Relative error of ``got`` vs the float64 reference, per bin.
+
+    Bins are normalised by the reference's own peak rather than their own value,
+    so the far continuum wings (where the flux is ~0 and any absolute difference
+    looks enormous in relative terms) cannot dominate the statistic."""
+    ref = ref.double()
+    denom = ref.abs().clamp(min=ref.abs().max() * 1e-6)
+    e = (got.double() - ref).abs() / denom
+    return e.max().item(), e.median().item()
 
 
 def detailed_profile(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
@@ -203,6 +228,10 @@ def main():
     ap.add_argument("--n_h", type=float, default=1e21)
     ap.add_argument("--redshift", type=float, default=0.0)
     ap.add_argument("--velocity", type=float, default=180.0)
+    ap.add_argument("--accuracy", action="store_true",
+                    help="relative error of each config vs the float64 reference")
+    ap.add_argument("--acc_walkers", type=int, default=8,
+                    help="walkers used for the --accuracy comparison")
     ap.add_argument("--stages", action="store_true")
     ap.add_argument("--detailed", action="store_true")
     ap.add_argument("--fft-bench", dest="fft_bench", action="store_true")
@@ -238,7 +267,16 @@ def main():
     print(f"ndim (projection): {ndim} (all {nel} abundances + kT + n_h + "
           f"log_norm; sigma_v fixed)\n")
 
-    results, accel_on = [], False
+    # accuracy reference: captured BEFORE any acceleration is enabled in place,
+    # so it is the genuine float64 / no-TF32 path. Flux only (pre-fold), so the
+    # numbers are instrument-independent.
+    acc_ref, t_acc = None, None
+    if args.accuracy:
+        t_acc = temps[:args.acc_walkers]
+        acc_ref = joint.flux(t_acc, ab, args.velocity, edges, absorption=absn,
+                             n_h=n_h, redshift=args.redshift).double()
+
+    results, errs, accel_on = [], {}, False
     for cfg in order:
         if cfg != "serial-fp64" and not accel_on:
             knobs = enable_inference_acceleration(joint.models.values(), dev)
@@ -246,6 +284,10 @@ def main():
             accel_on = True
         t = run_config(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync)
         results.append((cfg, t))
+        if acc_ref is not None:
+            errs[cfg] = rel_errors(
+                config_flux(cfg, joint, edges, t_acc, ab, args, absn, n_h),
+                acc_ref)
         if args.stages and CONFIGS[cfg][0]:               # batched configs only
             stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn,
                             n_h, sync)
@@ -258,6 +300,16 @@ def main():
     for name, t in results:
         print(f"{name:<17}{t*1e3:>10.1f}{t/B*1e3:>12.3f}"
               f"{base/t:>9.2f}x{sacc/t:>10.2f}x")
+
+    if acc_ref is not None:
+        print(f"\n=== accuracy vs float64 reference ({args.acc_walkers} walkers, "
+              f"flux only) ===")
+        print(f"{'config':<17}{'max rel':>12}{'median rel':>13}")
+        for name, _ in results:
+            mx, md = errs[name]
+            print(f"{name:<17}{mx:>12.2e}{md:>13.2e}")
+        print("  context: the emulator's own test MRE is ~3e-3, so a config "
+              "well below that adds no meaningful error.")
 
     best = min(results, key=lambda r: r[1])
     chain = best[1] * args.nsteps
