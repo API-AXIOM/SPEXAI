@@ -29,12 +29,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spexai.inference.operator_model import JointOperatorModel
 from spexai.inference.spex_truth import SpexTruthModel
 from spexai.inference.simulate import simulate_observation
-from spexai.inference.fitting import Param, run_emcee
+from spexai.inference.fitting import Param, run_emcee, SIGMA_V_PRIOR
 
 # realistic cluster ranges (temp keV, velocity km/s, log10 norm); abundances
 # fixed solar and logz fixed here to keep the smoke small -- extend as needed.
-REALISTIC = {"temp": (1.0, 8.0), "velocity": (0.0, 300.0), "log_norm": (9.0, 12.0)}
-EXTREME = {"temp": (0.3, 10.0), "velocity": (0.0, 600.0), "log_norm": (8.0, 13.0)}
+# "realistic" velocity is the literature-grounded Perseus prior (see
+# spexai.inference.fitting.SIGMA_V_PRIOR); "extreme" stays deliberately wider so
+# SBC also probes dispersions no cluster in the sample actually shows.
+REALISTIC = {"temp": (1.0, 8.0), "velocity": SIGMA_V_PRIOR, "log_norm": (9.0, 12.0)}
+EXTREME = {"temp": (0.3, 10.0), "velocity": (10.0, 1000.0), "log_norm": (8.0, 13.0)}
 
 
 def sample_truth(rng, ranges):

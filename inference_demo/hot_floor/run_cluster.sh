@@ -2,8 +2,8 @@
 # GPU walker-batched MCMC counts-scan for the hot-element floor cross-check.
 # One GPU process; walkers are batched into a single forward per emcee sub-step
 # (emcee vectorized=True). Experiments (count levels) run SERIALLY. No CPU pool.
-# Tier 1: sigma_v is fixed at truth (freeing it needs the per-walker line-
-# broadening vectorisation -- the required next step).
+# sigma_v is now a free, per-walker parameter (the line deposition was
+# vectorised); set SIGMA_V=<km/s> to pin it at that value for a reference run.
 #
 # GPU ACCELERATION (--tf32 --compile --fft32) IS ON BY DEFAULT AND SHOULD BE
 # STANDARD FOR ALL PRODUCTION / REAL-SCIENCE INFERENCE RUNS: it is ~3x faster on

@@ -115,3 +115,146 @@ not executed with saved outputs.
 `spexai/inference/{fitting,simulate,operator_model}.py`,
 `spexai/inference/{fit,fit_old,model,model_old,write_tensors}.py` (deprecation),
 `scripts/{benchmark_operator,baseline_interpolation}.py`.
+
+---
+
+# Forward-step optimisation campaign (2026-08-14 → 08-17)
+
+Goal: make one vectorised MCMC forward step cheap enough for a 30-element SBC
+campaign. Measured on the cluster GPU (22 GiB), full 30-element store,
+`nwalkers=96`, via `scripts/benchmark_inference.py`.
+
+## Result: 1.88x, and the ladder is now closed
+
+| config | ms/walker | vs previous rung |
+|---|---|---|
+| batched-accel (TF32 + float32 FFT) | 209.1 | — |
+| batched-compile (`compile ∘ vmap`) | 111.3 | **1.88x** |
+
+Stage split at B=16: **trunk 95%**, broaden+rebin 2%, lines+combine 2%. Every
+remaining option is therefore Amdahl-bound by the trunk.
+
+`torch.compile` of the batched trunk is a genuine win because
+`_TrunkWrap.forward` deliberately calls `SpectralOperator.forward_norm` as an
+unbound class method to bypass the compiled instance attribute — so
+`enable_inference_acceleration`'s per-element compile never reached the batched
+path. `batched-accel` had only TF32 + float32 FFT.
+
+`--wchunk` 16 → 48 changed nothing (111.3 → 109.7): the GPU is already
+saturated at 16.
+
+## Four optimisations tried and rejected
+
+**bf16 autocast on the trunk — rejected on accuracy.** 1.69x (113.2 → 66.9
+ms/walker), but max relative error 2.4% on a bin at 97.5% of peak, and
+p99 = 8.7e-3 ≈ 3x the emulator's own ~3e-3 MRE. Not acceptable for SBC, where a
+forward-model systematic invalidates the calibration it is meant to establish.
+
+**Trunk energy-grid coarsening — rejected; the premise is false.** The trunk is
+**not** a smooth continuum. One-bin curvature |d² log10 density| on the native
+P=24212 grid (T=2 keV):
+
+| Z | max | 99.9 pct |
+|---|---|---|
+| 2 (He) | 0.0016 | 0.0010 |
+| 8 (O) | 1.75 | 0.78 |
+| 14 (Si) | 2.45 | 1.21 |
+| 26 (Fe) | 4.91 | 1.76 |
+
+Only H/He are smooth; every metal carries line structure in the *trunk* — and
+Si/Fe have line heads and still show it. Stride-2 subsampling costs Fe ~10x
+relative error in density and **43.5%** in broadened flux, worst bin at 70% of
+peak. Broadening does not wash it out: real narrow lines are lost, not noise.
+This also rules out the "precompute a dense T-grid and interpolate" idea, which
+rests on the same false premise. Coarsening only H/He is ~2/30 of the trunk.
+
+**CUDA graphs — rejected on evidence.** The `--detailed` profile shows
+`Command Buffer Full` at 76% of self-CPU across 11,966 calls, i.e. the CPU is
+blocked because it has run ahead and filled the GPU queue. Self CPU (25.905s) ≈
+self CUDA (25.934s). Launch overhead is not the constraint.
+
+**Larger walker batch — no effect** (see `--wchunk` above).
+
+## Where the time actually goes (`batched-compile`, self CUDA 25.93s)
+
+| work | self CUDA | share |
+|---|---|---|
+| `aten::bmm` (incl. `cutlass_80_tensorop_s1688gemm` 15.73s) | 16.49s | 63.6% |
+| `triton_poi_fused_add_gelu_mul_*` (activations) | ~4.6s | ~17.8% |
+| `triton_poi_fused_bmm_0/1` | ~2.7s | ~10.4% |
+
+`s1688gemm` is the **TF32** tensor-core kernel, so the GEMMs already use tensor
+cores. The trunk is GEMM-bound at TF32, and anything further must preserve
+per-bin structure exactly.
+
+## Bugs found and fixed along the way
+
+1. **CUDA OOM in `--stages`** (21.34 GiB genuinely allocated). The staged
+   refactor moved trunk code out of `flux()`, whose `@torch.no_grad()` was the
+   only one — `stack_module_state` preserves `requires_grad`, so calling
+   `_density`/`_continuum`/`_combine` directly built and pinned a full autograd
+   graph. Fixed: `@torch.no_grad()` on each stage, plus a `requires_grad` guard
+   in the tests.
+2. **`torch.compile(vmap, dynamic=True)` crashes**: symbolic shapes make
+   functorch's `BatchedTensor` fail `sizes()` inside `linear`. Fixed with an
+   explicit `dynamic=False` (the default `dynamic=None` auto-promotes to
+   symbolic on the second shape and hits the same crash), and `_echunk` now
+   spreads bins evenly so static shapes stay down to one or two graphs.
+3. **Silent compile fallback**: all `_TrunkGroup`s compile the *same* functorch
+   `wrapped` code object and so share one dynamo cache bucket; 4 groups × chunk
+   shapes hits the default `recompile_limit` of 8, past which dynamo falls back
+   to eager and the 1.88x silently disappears. Fixed by
+   `_ensure_recompile_limit`.
+4. **The recompile-limit trap also hit the serial production path.** Dynamo
+   caches per *code object*, so `enable_inference_acceleration`'s loop —
+   `torch.compile(m.forward_norm)` once per element, all 30 sharing
+   `SpectralOperator.forward_norm` — exhausted the default budget of 8 and
+   dynamo then suppressed compilation for the whole code object, leaving ~22 of
+   30 elements running eager. This is the documented factory-pattern trap
+   ("if you dynamically create multiple copies of a function, they will all
+   share the same code cache"). Fixed by calling
+   `operator_model.ensure_recompile_limit(8 * n_models)` before either compile
+   loop (batched groups and per-element), and the same guard was added to
+   `gpu_forward.py`'s own loop.
+
+   **Consequence for earlier numbers:** every serial-path timing taken before
+   this fix — including the `serial-accel` rung and the "~2.6x from
+   torch.compile" figure quoted in the methodology report — was measured with
+   most elements uncompiled. Both should be re-measured; the serial baseline may
+   improve, narrowing the batched path's margin.
+
+5. **Broken accuracy metric** (mine): a median over all bins reads 0.0 on any
+   RMF grid because most bins are exactly zero in both arrays, and a
+   peak-clamped max cannot distinguish a bright bin from an empty one.
+   `rel_errors` now masks to bins ≥ `--acc_sig_frac` of peak and reports max,
+   p99, median, the worst bin's energy, and its brightness relative to peak.
+
+## Capability added: per-walker sigma_v
+
+`deposit_gaussian_lines` accepted only a scalar velocity, which is what pinned
+`sigma_v` in the Tier-1 MCMC runs. (`fft_broaden` already supported `(B,)`.)
+It now takes scalar *or* `(B,)`: per-walker widths make each line's ±nsigma
+window ragged across the batch, which `index_add_(1, …)` cannot express, so that
+branch scatters into a flat `(B*M,)` buffer with walker-offset indices. The
+scalar branch is unchanged and still bit-identical.
+
+`BatchedJointForward._continuum` tiles the velocity to match its element-major
+`(N*B, K)` row order — without that a `(B,)` velocity would silently broadcast
+against the element axis.
+
+**Still open:** no sampler exposes `sigma_v` yet. `run_cluster.sh` /
+`mcmc_check.py` remain Tier-1 (velocity fixed at truth); freeing it needs the
+parameter and a prior added to the fitting glue.
+
+## Recommendation
+
+The forward is done for now: 1.88x banked, every other kernel-level lever closed
+on measurement. At **5.9 h/chain** and **~1170 GPU-h for 200 SBC sims**, the
+productive direction is fewer forwards — fewer sims, shorter chains, or better
+sampler efficiency — not a faster one.
+
+**Not yet measured:** `batched-compile` vs `serial-accel` (the current
+production path in `run_cluster.sh`, where the per-element compile *does*
+apply). That is the comparison that decides whether the batched path should
+replace the serial production forward. Also unmeasured: the one-off compile
+stall (`timeit` warms up before timing).

@@ -10,7 +10,6 @@ inference path (``JointOperatorModel`` serial loop + ``.batched`` vmap groups):
   serial-accel    : + TF32 + torch.compile + float32 FFT
   batched-accel   : element nets vmapped over shape-groups + TF32 + float32 FFT
   batched-compile : batched-accel + torch.compile(vmap)  (compile ∘ vmap)
-  batched-bf16    : batched-compile + bfloat16 autocast on the trunk
 
 Options:
   --configs      which of the above to run (default: all)
@@ -25,9 +24,10 @@ Options:
   python scripts/benchmark_inference.py --device cuda --nwalkers 96 --wchunk 16
   python scripts/benchmark_inference.py --device cuda --stages --detailed --fft-bench
 
-Current limits (documented, not bugs): velocity is scalar (per-walker sigma_v
-needs the Tier-2 line-deposition vectorisation); abundances are a post-net
-multiply, so scalar-vs-per-walker abundances do not change the forward cost.
+Note: ``--velocity`` is a scalar here purely to keep the benchmark's inputs
+simple -- the forward accepts a per-walker ``(B,)`` sigma_v, and the timing is
+unaffected either way. Likewise abundances are a post-net multiply, so
+scalar-vs-per-walker abundances do not change the forward cost.
 """
 import argparse
 import os
@@ -45,14 +45,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spexai.inference.operator_model import (JointOperatorModel,
                                              enable_inference_acceleration)
 
-# name -> (batched?, compile_trunk?, bf16?); serial-fp64 also means "accel off".
-# Cumulative ladder: each rung adds one thing to the rung above it.
+# name -> (batched?, compile_trunk?); serial-fp64 additionally means "accel off"
 CONFIGS = {
-    "serial-fp64": (False, False, False),
-    "serial-accel": (False, False, False),
-    "batched-accel": (True, False, False),
-    "batched-compile": (True, True, False),
-    "batched-bf16": (True, True, True),
+    "serial-fp64": (False, False),
+    "serial-accel": (False, False),
+    "batched-accel": (True, False),
+    "batched-compile": (True, True),
 }
 
 
@@ -93,11 +91,11 @@ def build_grid(args, device):
 
 
 def forward_kwargs(cfg, args, absn, n_h):
-    batched, compile_trunk, bf16 = CONFIGS[cfg]
+    batched, compile_trunk = CONFIGS[cfg]
     kw = dict(absorption=absn, n_h=n_h, redshift=args.redshift)
     if batched:
         kw.update(echunk=args.echunk, mem_gb=args.mem_gb,
-                  compile_trunk=compile_trunk, bf16=bf16)
+                  compile_trunk=compile_trunk)
     return batched, kw
 
 
@@ -118,7 +116,7 @@ def run_config(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
 def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
     """Per-stage per-walker timing for a batched config (one wchunk sub-batch,
     like profile_forward): trunk vmap / broaden+rebin / lines+combine / fold."""
-    _, compile_trunk, bf16 = CONFIGS[cfg]
+    _, compile_trunk = CONFIGS[cfg]
     b = joint.batched
     t = temps[:args.wchunk]
     B = t.numel()
@@ -126,11 +124,10 @@ def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
     tfun = absn.transmission_torch if absorb else None
     ech = args.echunk or b._echunk(B, args.mem_gb)
 
-    dens, zs = b._density(t, ech, compile_trunk, bf16)     # materialise once
+    dens, zs = b._density(t, ech, compile_trunk)           # materialise once
     cont = b._continuum(dens, edges, args.velocity, absorb, tfun, n_h,
                         args.redshift, args.mem_gb)
-    t_den = timeit(lambda: b._density(t, ech, compile_trunk, bf16),
-                   args.iters, sync)
+    t_den = timeit(lambda: b._density(t, ech, compile_trunk), args.iters, sync)
     t_con = timeit(lambda: b._continuum(dens, edges, args.velocity, absorb,
                                         tfun, n_h, args.redshift, args.mem_gb),
                    args.iters, sync)
@@ -143,7 +140,7 @@ def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
     if fold is not None:
         full = b.flux(t, ab, args.velocity, edges, absorption=absn, n_h=n_h,
                       redshift=args.redshift, echunk=args.echunk,
-                      mem_gb=args.mem_gb, compile_trunk=compile_trunk, bf16=bf16)
+                      mem_gb=args.mem_gb, compile_trunk=compile_trunk)
         t_fold = timeit(lambda: fold(full), args.iters, sync)
         rows.append(("fold (sparse mm)", t_fold))
     tot = sum(t for _, t in rows)

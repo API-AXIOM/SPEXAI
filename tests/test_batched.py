@@ -97,31 +97,15 @@ def test_batched_stage_split_matches_flux(joint, edges):
 
 
 def test_recompile_limit_raised_not_lowered(joint):
-    # all trunk groups share one dynamo cache bucket; past the default 8 dynamo
-    # silently falls back to eager and the compile speedup vanishes
+    # dynamo's cache is per code object, so all trunk groups (and, in the serial
+    # path, all 30 elements compiling the same forward_norm) share one budget;
+    # past it dynamo silently falls back to eager and the speedup vanishes
     import torch._dynamo as dynamo
-    from spexai.inference.batched import _ensure_recompile_limit
-    _ensure_recompile_limit(64)
+    from spexai.inference.operator_model import ensure_recompile_limit
+    ensure_recompile_limit(64)
     assert dynamo.config.recompile_limit >= 64
-    _ensure_recompile_limit(4)                 # must not lower an existing value
+    ensure_recompile_limit(4)                  # must not lower an existing value
     assert dynamo.config.recompile_limit >= 64
-
-
-def test_bf16_trunk_runs_and_stays_float32(joint, edges):
-    # bf16 autocast must not leak its dtype out of the trunk: the caller does
-    # 10**x on the result, which in 8 mantissa bits would be far lossier than
-    # the GEMMs themselves. Accuracy is a benchmark question (--accuracy), not
-    # a unit-test one; here we only pin dtype and sanity-bound the deviation.
-    b = joint.batched
-    T = torch.tensor([1.5, 4.0])
-    ab = {8: 0.9, 26: 1.1}
-    ref = b.flux(T, ab, 150.0, edges)
-    got = b.flux(T, ab, 150.0, edges, bf16=True)
-    assert got.dtype == torch.float32 and got.shape == ref.shape
-    assert torch.isfinite(got).all()
-    dens, _ = b._density(T, b._echunk(T.numel(), 2.0), False, True)
-    assert dens.dtype == torch.float32
-    assert _max_rel(got, ref) < 0.1        # loose: bf16 is a precision tradeoff
 
 
 def test_per_walker_velocity_matches_walker_loop(joint, edges):

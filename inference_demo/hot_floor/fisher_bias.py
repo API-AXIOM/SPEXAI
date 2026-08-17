@@ -36,6 +36,7 @@ from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
 from spexai.inference.abundances import AbundanceModel       # noqa: E402
+from spexai.inference.fitting import SIGMA_V_PRIOR           # noqa: E402
 
 SYMBOL = {14: "Si", 16: "S", 18: "Ar", 20: "Ca", 24: "Cr", 25: "Mn",
           26: "Fe", 28: "Ni", 22: "Ti", 27: "Co", 29: "Cu", 30: "Zn"}
@@ -100,7 +101,7 @@ def build_params(fwd: Forward, log_norm_truth: float) -> List[Par]:
     else:
         out.append(Par("T_mean", PERSEUS["dem_mean"], 5e-3, 1.5, 7.5))
         out.append(Par("T_sigma", PERSEUS["dem_sigma"], 5e-3, 0.15, 3.0))
-    out.append(Par("sigma_v", PERSEUS["vel"], 1.0, 0.0, 400.0))
+    out.append(Par("sigma_v", PERSEUS["vel"], 1.0, *SIGMA_V_PRIOR))
     out.append(Par("n_h", PERSEUS["n_h"] / 1e21, 1e-2, 0.0, 5.0))  # 1e21 cm^-2
     out.append(Par("log_norm", log_norm_truth, 2e-3,
                    log_norm_truth - 1.0, log_norm_truth + 1.0))

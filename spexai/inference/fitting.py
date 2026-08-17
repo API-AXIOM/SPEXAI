@@ -17,6 +17,24 @@ import torch
 from spexai.inference.units import D_REF_M
 
 
+# Line-of-sight velocity dispersion prior (km/s), literature-grounded on Perseus
+# and then widened for robustness. Measured values:
+#   * Hitomi 2016 (Nature 535, 117): sigma_v = 164 +/- 10 km/s, 30-60 kpc from
+#     the nucleus -- the canonical "quiescent core" number.
+#   * Hitomi 2018 (PASJ 70, 9): ~100 km/s over most of the mapped region, rising
+#     to ~200 km/s toward the central AGN and the NW ghost bubble; a ~100 km/s
+#     line-of-sight velocity gradient across the core from sloshing.
+#   * XRISM 2025 (arXiv:2510.12782): ~300 km/s in the eastern region and a
+#     dipole of +/-200-300 km/s from a recent merger, out to ~500 kpc.
+# So Perseus itself spans ~100-300 km/s. The prior is widened either side: the
+# floor sits well below the quiescent value (and below XRISM Resolve's own
+# resolution, ~100 km/s equivalent at Fe-K, where the likelihood goes flat), and
+# the ceiling covers merger-driven dispersions above anything measured here.
+# Kept strictly positive: at sigma_v -> 0 the line profile collapses below the
+# response width and the parameter stops being identifiable.
+SIGMA_V_PRIOR = (30.0, 600.0)
+
+
 @dataclass
 class Param:
     name: str

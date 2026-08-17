@@ -74,8 +74,11 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
     """Walker-batched all-GPU forward + emcee vectorized=True (single process)."""
     import emcee
     from gpu_forward import EnsembleForward
+    # --fix_sigma_v pins sigma_v (the old Tier-1 behaviour); otherwise it is a
+    # free per-walker parameter like the rest.
     ens = EnsembleForward(emu, response, absorption, keep, args.mode,
-                          PERSEUS["vel"], args.device, chunk=args.chunk,
+                          PERSEUS["vel"] if args.fix_sigma_v else None,
+                          args.device, chunk=args.chunk,
                           compile_nets=args.compile)
     pars = ens.params(log_norm_truth)
     names = [p.name for p in pars]
@@ -157,7 +160,10 @@ def main():
                          "--device, then exit; no truth/sampling needed")
     ap.add_argument("--vectorized", action="store_true",
                     help="walker-batched all-GPU forward + emcee vectorized "
-                         "(single process, sigma_v fixed); use with --device cuda")
+                         "(single process); use with --device cuda")
+    ap.add_argument("--fix_sigma_v", action="store_true",
+                    help="pin sigma_v at the truth instead of sampling it "
+                         "(the original Tier-1 behaviour; --vectorized only)")
     ap.add_argument("--chunk", type=int, default=32,
                     help="walker sub-batch size for the GPU forward (bounds "
                          "memory); lower if you hit CUDA OOM")

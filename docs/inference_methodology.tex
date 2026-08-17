@@ -2,6 +2,7 @@
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
+\usepackage{natbib}
 \usepackage{graphicx}
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 
@@ -388,6 +389,97 @@ though it is negligible for XRISM. These are order-of-magnitude scalings from th
 effective-area ratio; a dedicated X-IFU/\code{SIXTE} simulation would pin $N_\star$
 in X-IFU counts.
 
+\section{Sampling the velocity dispersion}\label{sec:sigmav}
+The line-of-sight velocity dispersion $\sigma_v$ is a free, sampled parameter.
+It was previously pinned in the walker-batched runs for an implementation
+reason rather than a physical one: the analytic line deposit
+(\code{deposit\_gaussian\_lines}) accepted only a scalar velocity, while the
+continuum FFT already broadened per spectrum. The two branches differ in
+bookkeeping, not in physics. With one $\sigma_v$ every walker shares a line's
+$\pm n\sigma$ window, so the scatter indices are common to the batch; with a
+per-walker $\sigma_v$ those windows become ragged across the batch, and the
+deposit is instead accumulated into a flattened buffer with walker-offset
+indices. The \code{erf}-difference weights, and hence each line's exactness on
+any target binning, are unchanged.
+
+The prior is uniform on
+\begin{equation}
+\sigma_v \in [30,\,600]\kms ,
+\end{equation}
+grounded in the measured Perseus values and then widened. \emph{Hitomi} found
+$\sigma_v = 164\pm10\kms$ at $30$--$60\,$kpc from the nucleus
+\citep{hitomi2016}, and mapping the core gave ${\sim}100\kms$ over most of the
+field, rising to ${\sim}200\kms$ toward the central AGN and the north-western
+ghost bubble, with a ${\sim}100\kms$ line-of-sight gradient from sloshing
+\citep{hitomi2018}. \emph{XRISM}/Resolve subsequently measured ${\sim}300\kms$
+in the eastern region and a $\pm200$--$300\kms$ dipole attributed to a recent
+merger, out to ${\sim}500\,$kpc \citep{xrism_perseus_kinematics}. Perseus itself
+therefore spans ${\sim}100$--$300\kms$; the prior is widened on both sides so
+the boundary is never informative. The floor is kept strictly positive because
+as $\sigma_v\to0$ the line profile collapses below the instrumental response
+width and the parameter ceases to be identifiable --- $30\kms$ is already well
+below Resolve's own resolution, which corresponds to ${\sim}100\kms$ at Fe-K.
+The bias study deliberately retains a wider $[10,1000]\kms$ ``extreme'' range so
+that calibration is also probed outside anything the sample actually shows.
+
+\section{Cost of the forward step}\label{sec:forwardcost}
+One vectorised MCMC step is one batched forward over the walker ensemble, so its
+cost sets the feasibility of any large sampling or simulation-based-calibration
+campaign. Measured on an A10-class GPU with the full 30-element store at 96
+walkers, evaluating the per-element trunks together (grouped \code{vmap} over
+same-shape elements) and then compiling that batched call gives
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+configuration & ms/walker & speedup \\
+\midrule
+batched, TF32 + float32 FFT      & 209.1 & --- \\
+\quad + \code{torch.compile} of the batched trunk & 111.3 & $1.88\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The compile step is a genuine gain rather than a duplicate of the per-element
+compilation applied elsewhere: the batched wrapper deliberately calls the
+unbound \code{forward\_norm} so as to bypass any compiled instance attribute,
+so before this the batched trunk was never compiled at all.
+
+The forward is strongly dominated by the trunk. A stage breakdown at batch $16$
+gives trunk $95\%$, continuum broadening and rebinning $2\%$, and line
+deposition plus abundance weighting $2\%$; an operator-level profile attributes
+$63.6\%$ of GPU time to \code{bmm} (executing as the TF32 tensor-core
+\code{cutlass\_80\_tensorop\_s1688gemm} kernel) and ${\sim}18\%$ to the
+bandwidth-bound activation kernels. The trunk is therefore GEMM-bound and
+already on tensor cores.
+
+That leaves little room, and we record two optimisations that were implemented,
+measured and \emph{rejected}, because both failures are informative.
+\begin{itemize}
+\item \textbf{bfloat16 autocast on the trunk} is fast --- $1.69\times$, to
+$66.9\,$ms/walker --- but costs a maximum relative error of $2.4\%$ on a bin at
+$97.5\%$ of the spectral peak, with a $99$th percentile of $8.7\times10^{-3}$,
+roughly three times the emulator's own ${\sim}3\times10^{-3}$ test error. A
+systematic of that size in the forward model is not acceptable in a study whose
+purpose is to calibrate the posterior.
+\item \textbf{Coarsening the trunk energy grid} fails because its premise is
+false. The trunk is not a smooth continuum: measured on the native
+$P=24212$ grid, the one-bin curvature $|d^2\log_{10}\rho|$ peaks at $0.0016$ for
+He but at $1.75$, $2.45$ and $4.91$ for O, Si and Fe respectively. Only H and He
+are genuinely smooth; every metal carries line structure in the trunk, including
+elements that also have a line head. Evaluating every second point and
+interpolating back costs Fe an order of magnitude in density error and $43.5\%$
+in broadened flux, with the worst bin at $70\%$ of the peak --- and the
+broadening does not wash this out, because narrow lines are being lost rather
+than noise being added. The same objection applies to any scheme that
+interpolates the trunk over a precomputed temperature grid.
+\end{itemize}
+Increasing the walker sub-batch changes nothing (the GPU is already saturated at
+$16$), and CUDA graph capture is not indicated: the profile shows the CPU
+blocked on a full command buffer, i.e.\ running ahead of the GPU rather than
+failing to feed it. We therefore treat the forward as converged at
+$1.88\times$, and note that at ${\sim}5.9\,$h per chain the productive direction
+for a calibration campaign is fewer forward evaluations, not faster ones.
+
+
 \begin{thebibliography}{9}
 \bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\
 1983, ApJ, 270, 119.
@@ -396,6 +488,15 @@ in X-IFU counts.
 \bibitem[XRISM Collaboration(2026)]{xrism_perseus} XRISM Collaboration 2026,
 Chemical enrichment of the Perseus cluster core seen by XRISM/Resolve,
 arXiv:2606.17141.
+\bibitem[Hitomi Collaboration(2016)]{hitomi2016} Hitomi Collaboration 2016,
+Nature, 535, 117 (The quiescent intracluster medium in the core of the Perseus
+cluster).
+\bibitem[Hitomi Collaboration(2018)]{hitomi2018} Hitomi Collaboration 2018,
+PASJ, 70, 9 (Atmospheric gas dynamics in the Perseus cluster observed with
+Hitomi).
+\bibitem[Zhang et al.(2025)]{xrism_perseus_kinematics} Zhang, C., et al.\ 2025,
+Mapping the Perseus galaxy cluster with XRISM: gas kinematic features and their
+implications for turbulence, arXiv:2510.12782.
 \bibitem[Cucchetti et al.(2018)]{cucchetti2018} Cucchetti, E., Pointecouteau, E.,
 Peille, P., et al.\ 2018, A\&A, 620, A173 (Athena X-IFU synthetic observations of
 galaxy clusters to probe the chemical enrichment of the Universe).

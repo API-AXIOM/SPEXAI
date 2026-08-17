@@ -19,7 +19,8 @@ from spexai.inference.fit_plots import (plot_corner_overlay, plot_emcee_trace,
                                         plot_posterior_predictive,
                                         plot_ultranest_diagnostics)
 from spexai.inference.abundances import AbundanceModel
-from spexai.inference.fitting import Param, run_emcee, run_ultranest
+from spexai.inference.fitting import (Param, run_emcee, run_ultranest,
+                                      SIGMA_V_PRIOR)
 from spexai.inference.operator_model import JointOperatorModel
 from spexai.inference.response import Response
 from spexai.inference.simulate import simulate_observation
@@ -86,7 +87,7 @@ def main():
     params = [Param("temp", 0.5, 6.0, "T [keV]", args.temp),
               Param("log_norm", true_lognorm - 1.5, true_lognorm + 1.5,
                     r"$\log_{10}$ norm", true_lognorm),
-              Param("velocity", 0.0, 600.0, "v [km/s]", args.velocity)]
+              Param("velocity", *SIGMA_V_PRIOR, "v [km/s]", args.velocity)]
     fixed = {"abundances": {}, "logz": -10.0}
 
     # Optional free abundances. `--metallicity` frees one global metal parameter

@@ -32,6 +32,27 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "models")
 
 
+def ensure_recompile_limit(n_needed):
+    """Raise dynamo's per-code-object recompile limit to ``n_needed``.
+
+    Dynamo caches compiled entries **per code object**, not per compiled callable
+    (PyTorch docs: "if you dynamically create multiple copies of a function, they
+    will all share the same code cache"). Both places this repo compiles in a
+    loop -- ``enable_inference_acceleration`` over elements, and
+    ``_TrunkGroup``'s vmapped forward over groups -- therefore share a single
+    budget. Past the limit dynamo does not merely stop adding entries: it
+    suppresses compilation for that code object entirely and falls back to eager,
+    reporting only a log warning (look for ``[0/8]`` in dynamo output).
+
+    Only ever raises, never lowers a user's setting. ``torch.compile``'s newer
+    ``isolate_recompiles=True`` is the alternative fix where available."""
+    import torch._dynamo as dynamo
+    for attr in ("recompile_limit", "cache_size_limit"):   # name varies by ver.
+        cur = getattr(dynamo.config, attr, None)
+        if isinstance(cur, int) and cur < n_needed:
+            setattr(dynamo.config, attr, n_needed)
+
+
 def enable_inference_acceleration(models, device):
     """Turn on the validated production inference accelerations, in place.
 
@@ -56,6 +77,14 @@ def enable_inference_acceleration(models, device):
     torch.backends.cuda.matmul.allow_tf32 = True       # TF32 tensor cores (Ampere+)
     torch.backends.cudnn.allow_tf32 = True
     _broadening.USE_FLOAT32_FFT = True                  # float32 continuum FFT
+    models = list(models)
+    # Every element compiles the SAME code object (SpectralOperator.forward_norm)
+    # with a different `self`, and dynamo's cache is per *code object*, so the
+    # elements share one budget -- the documented factory-pattern trap. With the
+    # default limit of 8 a 30-element store exhausts it and dynamo then suppresses
+    # compilation for the whole code object, silently running every remaining
+    # element eager. Size the limit to the store before compiling anything.
+    ensure_recompile_limit(8 * max(1, len(models)))
     for m in models:                                   # compile the net hot path
         m.forward_norm = torch.compile(m.forward_norm, dynamic=True)
     return ["tf32", "compile", "fft32"]

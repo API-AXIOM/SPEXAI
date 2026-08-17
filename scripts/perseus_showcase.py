@@ -30,7 +30,7 @@ from spexai.inference.response import Response
 from spexai.inference.absorption import Absorption
 from spexai.inference.abundances import AbundanceModel
 from spexai.inference.simulate import Observation, simulate_observation
-from spexai.inference.fitting import Param, run_emcee
+from spexai.inference.fitting import Param, run_emcee, SIGMA_V_PRIOR
 from spexai.inference import tempdist as td
 
 RESP_DIR = os.path.expanduser("~/work/data/spexai/responses")
@@ -81,7 +81,7 @@ def run_single(truth, emu, response, absorption, args):
     abmodel = AbundanceModel(emu.elements).global_metallicity("Z")
     params = [Param("temp", 1.0, 8.0, truth=PERSEUS["kT"]),
               Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
-              Param("velocity", 0.0, 400.0, truth=PERSEUS["vel"]),
+              Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
               Param("log_norm", ln - 1.5, ln + 1.5, truth=ln)]
     res = run_emcee(obs, emu, params,
                     {"abundances": {}, "logz": logz, "n_h": PERSEUS["n_h"],
@@ -117,7 +117,7 @@ def run_dem(truth, emu, response, absorption, args):
     params = [Param("T_mean", 1.0, 8.0, truth=PERSEUS["dem_mean"]),
               Param("T_sigma", 0.1, 3.0, truth=PERSEUS["dem_sigma"]),
               Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
-              Param("velocity", 0.0, 400.0, truth=PERSEUS["vel"]),
+              Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
               Param("log_norm", ln - 1.5, ln + 1.5, truth=ln)]
     res = run_emcee(obs, emu, params,
                     {"abundances": {}, "logz": logz, "n_h": PERSEUS["n_h"],
