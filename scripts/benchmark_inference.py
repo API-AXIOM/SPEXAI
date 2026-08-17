@@ -151,6 +151,11 @@ def stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
         print(f"  {name:<20} {t/B*1e3:8.3f}   {100*t/tot:4.0f}%")
 
 
+def _only(joint, z):
+    """Abundances isolating one element (the rest zeroed)."""
+    return {zz: (1.0 if zz == z else 0.0) for zz in joint.elements}
+
+
 def config_flux(cfg, joint, edges, temps, ab, args, absn, n_h):
     """One flux() call under a config's settings -- the accuracy probe."""
     batched, kw = forward_kwargs(cfg, args, absn, n_h)
@@ -158,16 +163,32 @@ def config_flux(cfg, joint, edges, temps, ab, args, absn, n_h):
     return flux_fn(temps, ab, args.velocity, edges, **kw)
 
 
-def rel_errors(got, ref):
-    """Relative error of ``got`` vs the float64 reference, per bin.
+def rel_errors(got, ref, edges, sig_frac=1e-3):
+    """Error of ``got`` vs the float64 reference, restricted to bins that carry
+    real flux.
 
-    Bins are normalised by the reference's own peak rather than their own value,
-    so the far continuum wings (where the flux is ~0 and any absolute difference
-    looks enormous in relative terms) cannot dominate the statistic."""
-    ref = ref.double()
-    denom = ref.abs().clamp(min=ref.abs().max() * 1e-6)
-    e = (got.double() - ref).abs() / denom
-    return e.max().item(), e.median().item()
+    Statistics over *all* bins are useless on a real RMF grid: most incident-
+    energy bins sit outside the model band and are exactly zero in both arrays,
+    so the median is 0.0 no matter how wrong the config is, and a peak-clamped
+    max cannot say whether the worst bin is a bright one or an empty one.
+
+    So: keep only bins with ref >= sig_frac * peak, and report the true relative
+    error (ref is its own denominator there, no clamp) plus *where* the worst one
+    is and how bright that bin is, which is what decides whether the error
+    matters. Returns (max, p99, median, worst_energy_keV, worst_bin_frac_of_peak).
+    """
+    ref, got = ref.double().reshape(-1), got.double().reshape(-1)
+    peak = ref.abs().max()
+    sig = ref.abs() >= sig_frac * peak
+    if not bool(sig.any()):
+        return float("nan"), float("nan"), float("nan"), float("nan"), 0.0
+    e = (got[sig] - ref[sig]).abs() / ref[sig].abs()
+    i = int(e.argmax())
+    # bin centres, tiled over the walker axis so the flat index maps back
+    cen = torch.sqrt(edges[:-1] * edges[1:]).double()
+    cen = cen.repeat(ref.numel() // cen.numel())[sig]
+    return (e.max().item(), e.quantile(0.99).item(), e.median().item(),
+            cen[i].item(), (ref[sig][i].abs() / peak).item())
 
 
 def detailed_profile(cfg, joint, edges, fold, temps, ab, args, absn, n_h, sync):
@@ -232,6 +253,12 @@ def main():
                     help="relative error of each config vs the float64 reference")
     ap.add_argument("--acc_walkers", type=int, default=8,
                     help="walkers used for the --accuracy comparison")
+    ap.add_argument("--acc_sig_frac", type=float, default=1e-3,
+                    help="accuracy stats use bins >= this fraction of the peak "
+                         "(most RMF bins are exactly zero and would swamp them)")
+    ap.add_argument("--acc_by_element", action="store_true",
+                    help="per-element error table for the most aggressive "
+                         "config (one fp64 reference per element; slow)")
     ap.add_argument("--stages", action="store_true")
     ap.add_argument("--detailed", action="store_true")
     ap.add_argument("--fft-bench", dest="fft_bench", action="store_true")
@@ -270,11 +297,16 @@ def main():
     # accuracy reference: captured BEFORE any acceleration is enabled in place,
     # so it is the genuine float64 / no-TF32 path. Flux only (pre-fold), so the
     # numbers are instrument-independent.
-    acc_ref, t_acc = None, None
+    acc_ref, t_acc, el_refs = None, None, {}
     if args.accuracy:
         t_acc = temps[:args.acc_walkers]
         acc_ref = joint.flux(t_acc, ab, args.velocity, edges, absorption=absn,
                              n_h=n_h, redshift=args.redshift).double()
+        if args.acc_by_element:               # one fp64 reference per element
+            for z in joint.elements:
+                el_refs[z] = joint.flux(t_acc, _only(joint, z), args.velocity,
+                                        edges, absorption=absn, n_h=n_h,
+                                        redshift=args.redshift).double()
 
     results, errs, accel_on = [], {}, False
     for cfg in order:
@@ -287,7 +319,7 @@ def main():
         if acc_ref is not None:
             errs[cfg] = rel_errors(
                 config_flux(cfg, joint, edges, t_acc, ab, args, absn, n_h),
-                acc_ref)
+                acc_ref, edges, args.acc_sig_frac)
         if args.stages and CONFIGS[cfg][0]:               # batched configs only
             stage_breakdown(cfg, joint, edges, fold, temps, ab, args, absn,
                             n_h, sync)
@@ -303,13 +335,28 @@ def main():
 
     if acc_ref is not None:
         print(f"\n=== accuracy vs float64 reference ({args.acc_walkers} walkers, "
-              f"flux only) ===")
-        print(f"{'config':<17}{'max rel':>12}{'median rel':>13}")
+              f"flux only; bins >= {args.acc_sig_frac:g} of peak) ===")
+        print(f"{'config':<17}{'max rel':>10}{'p99':>10}{'median':>10}"
+              f"{'worst @ keV':>13}{'that bin/peak':>15}")
         for name, _ in results:
-            mx, md = errs[name]
-            print(f"{name:<17}{mx:>12.2e}{md:>13.2e}")
-        print("  context: the emulator's own test MRE is ~3e-3, so a config "
-              "well below that adds no meaningful error.")
+            mx, p99, md, ekev, frac = errs[name]
+            print(f"{name:<17}{mx:>10.2e}{p99:>10.2e}{md:>10.2e}"
+                  f"{ekev:>13.3f}{frac:>15.2e}")
+        print("  context: the emulator's own test MRE is ~3e-3. A worst bin that "
+              "is a small fraction of peak matters far less than one at the peak.")
+        if el_refs:
+            cfg = order[-1]                   # the most aggressive rung run
+            print(f"\n=== per-element accuracy [{cfg}] (worst 12) ===")
+            print(f"{'Z':>4}{'max rel':>12}{'p99':>10}{'worst @ keV':>13}")
+            rows = []
+            for z, ref_z in el_refs.items():
+                got = config_flux(cfg, joint, edges, t_acc, _only(joint, z),
+                                  args, absn, n_h)
+                mx, p99, _, ekev, _ = rel_errors(got, ref_z, edges,
+                                                 args.acc_sig_frac)
+                rows.append((mx, p99, ekev, z))
+            for mx, p99, ekev, z in sorted(rows, reverse=True)[:12]:
+                print(f"{z:>4}{mx:>12.2e}{p99:>10.2e}{ekev:>13.3f}")
 
     best = min(results, key=lambda r: r[1])
     chain = best[1] * args.nsteps
