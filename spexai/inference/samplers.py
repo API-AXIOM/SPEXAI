@@ -16,6 +16,7 @@ to its mixing -- hence ``n_eval`` is counted in *walkers evaluated*, so the two
 effects can be told apart.
 """
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -86,11 +87,28 @@ def _ess(chain: np.ndarray, names: Sequence[str]) -> np.ndarray:
 
     arviz wants (chain, draw, ...), so the walker axis becomes the chain axis --
     correct for ensemble samplers, whose walkers are genuinely separate (if
-    correlated) chains."""
-    import arviz as az
-    posterior = {n: chain[:, :, i].T for i, n in enumerate(names)}
-    return np.array([float(az.ess(az.convert_to_dataset({n: v}))[n])
-                     for n, v in posterior.items()])
+    correlated) chains.
+
+    **Never raises.** ESS is a diagnostic; the chain is the result. This used to
+    be evaluated inside the caller's ``return`` expression, so a missing arviz
+    destroyed a completed multi-hour run at the last instant, before anything
+    reached disk. A diagnostic must not be able to do that -- on any failure it
+    reports NaN and says why, and the sampling still lands."""
+    try:
+        import arviz as az
+    except ImportError:
+        warnings.warn("arviz not installed: ESS reported as NaN (the chain is "
+                      "unaffected; `pip install arviz` to get the diagnostic)",
+                      RuntimeWarning, stacklevel=2)
+        return np.full(len(names), np.nan)
+    try:
+        posterior = {n: chain[:, :, i].T for i, n in enumerate(names)}
+        return np.array([float(az.ess(az.convert_to_dataset({n: v}))[n])
+                         for n, v in posterior.items()])
+    except Exception as exc:                                     # noqa: BLE001
+        warnings.warn(f"ESS computation failed ({exc}); reporting NaN. The "
+                      f"chain is unaffected.", RuntimeWarning, stacklevel=2)
+        return np.full(len(names), np.nan)
 
 
 def _init_walkers(prior, nwalkers, rng, center=None, scatter=0.02):
@@ -105,21 +123,40 @@ def _init_walkers(prior, nwalkers, rng, center=None, scatter=0.02):
 # --- gradient-free ensembles ------------------------------------------------
 
 def run_emcee(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
-              center=None, progress_every=None) -> SamplerResult:
+              center=None, progress_every=None, backend_path=None,
+              resume=False) -> SamplerResult:
     """Affine-invariant ensemble MCMC, the established baseline.
 
     ``vectorize=True`` hands the whole (half-)ensemble to the posterior at once,
-    which is what makes the batched forward pay off."""
+    which is what makes the batched forward pay off.
+
+    ``backend_path`` writes the chain to HDF5 *as it advances*, so a run that
+    dies at step 700 of 800 -- for any reason, including something downstream of
+    the sampling itself -- leaves a usable chain behind instead of nothing.
+    With ``resume=True`` an existing file is continued rather than truncated.
+    Strongly recommended for multi-hour GPU jobs."""
     import emcee
     if nwalkers < 2 * post.prior.ndim:
         raise ValueError(f"emcee needs nwalkers >= 2*ndim = "
                          f"{2 * post.prior.ndim}, got {nwalkers}")
     rng = np.random.default_rng(seed)
     p0 = _init_walkers(post.prior, nwalkers, rng, center)
+
+    backend = None
+    if backend_path is not None:
+        backend = emcee.backends.HDFBackend(backend_path)
+        if resume and backend.iteration > 0:
+            print(f"  resuming from {backend_path} at step "
+                  f"{backend.iteration}", flush=True)
+            p0 = None                       # emcee continues from the backend
+            nsteps = max(0, nsteps - backend.iteration)
+        else:
+            backend.reset(nwalkers, post.prior.ndim)
+
     post.n_eval = 0
     t0 = time.time()
     sampler = emcee.EnsembleSampler(nwalkers, post.prior.ndim, post.logp,
-                                    vectorize=True)
+                                    vectorize=True, backend=backend)
     every = progress_every or max(1, nsteps // 20)
     for i, _ in enumerate(sampler.sample(p0, iterations=nsteps)):
         if i == 0 or (i + 1) % every == 0:
@@ -161,20 +198,33 @@ def run_zeus(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
 
 
 def run_ultranest(post, min_num_live_points=400, frac_remain=0.01,
-                  logdir=None, seed=0, show_status=False) -> SamplerResult:
+                  logdir=None, seed=0, show_status=False,
+                  resume=False) -> SamplerResult:
     """Reactive nested sampling: the only sampler here that returns log Z.
 
     Genuinely vectorised -- the previous ``fitting.run_ultranest`` wrapper
     looped the likelihood one row at a time, which threw away the batched
     forward entirely. Since ``ptform`` guarantees points inside the box, the
-    likelihood is called directly and skips the bounds check."""
+    likelihood is called directly and skips the bounds check.
+
+    ``logdir`` turns on UltraNest's own checkpointing: it writes live points and
+    results as the run advances, so a job that dies partway leaves recoverable
+    state instead of nothing -- the same protection the emcee HDF5 backend
+    gives. ``resume=True`` continues such a run; the default overwrites, which
+    is what you want for a fresh fit and is why it cannot be the default the
+    other way round (a stale checkpoint silently resumed would mix two runs).
+    Nested sampling has no fixed step count, so an interrupted run has no
+    meaningful partial posterior -- resuming, not salvaging, is the point."""
     import ultranest
     np.random.seed(seed)
     post.n_eval = 0
     t0 = time.time()
+    # 'resume' needs an existing log_dir; 'overwrite' is valid even when
+    # log_dir is None (passing resume=None there used to crash)
+    resume_mode = "resume" if (resume and logdir) else "overwrite"
     sampler = ultranest.ReactiveNestedSampler(
         list(post.prior.names), post.loglike, post.prior.ptform,
-        vectorized=True, log_dir=logdir, resume="overwrite")
+        vectorized=True, log_dir=logdir, resume=resume_mode)
     res = sampler.run(min_num_live_points=min_num_live_points,
                       frac_remain=frac_remain, show_status=show_status)
     runtime = time.time() - t0

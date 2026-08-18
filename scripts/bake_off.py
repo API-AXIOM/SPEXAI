@@ -146,9 +146,14 @@ def _model_for(post, names):
 def run_sampler(name, post, pars, names, args):
     center = np.array([p.truth for p in pars])
     if name == "emcee":
+        # chain streamed to HDF5 as it advances: a long GPU job must not be
+        # able to lose everything to a late failure
         return samplers.run_emcee(post, nwalkers=args.nwalkers,
                                   nsteps=args.nsteps, seed=args.seed,
-                                  center=center)
+                                  center=center,
+                                  backend_path=os.path.join(
+                                      args.out, "bakeoff_emcee_chain.h5"),
+                                  resume=args.resume)
     if name == "zeus":
         return samplers.run_zeus(post, nwalkers=args.nwalkers,
                                  nsteps=args.zeus_steps or args.nsteps // 4,
@@ -246,6 +251,9 @@ def main():
                     help="run every sampler serially in this process")
     ap.add_argument("--summarise", action="store_true",
                     help="build the table from saved results and exit")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue emcee from its HDF5 backend instead of "
+                         "restarting (no-op for the other samplers)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--store", default=os.environ.get(
         "SPEXAI_STORE", os.path.join(REPO, "spexai", "models")))

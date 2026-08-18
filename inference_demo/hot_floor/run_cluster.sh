@@ -20,7 +20,11 @@
 # Prerequisites on the cluster (NO 40 GB caches needed -- truth is precomputed):
 #   * repo importable as `spexai` (incl. the modified abundances.py /
 #     operator_model.py and spexai/inference/data/tbabs_sigma.npz);
-#   * store28 + response rsl_Hp_L_2025.rmf + results/truth_single.npz;
+#   * spexai/models (the 30-element store) + response rsl_Hp_L_2025.rmf +
+#     results/truth_single.npz REGENERATED against that store -- a truth built
+#     from the old 28-element store has the same channel grid and so passes
+#     every shape check while being silently wrong (dump_truth.py now records
+#     the element set, and the loaders check it);
 #   * conda env with torch(+CUDA), emcee, numpy, scipy.
 #
 # Usage (acceleration on by default; ~1-1.5 h per count level on an A10 at the
@@ -41,7 +45,7 @@ COUNTS=${COUNTS:-"4e4 1e6 1e8"}    # realistic / deep / near-N* (bias ~ 1 sigma)
 ACCEL=${ACCEL:-"--tf32 --compile --fft32"}
 
 export MKL_THREADING_LAYER=GNU     # or torch import dies on the conda MKL stack
-export SPEXAI_STORE=${SPEXAI_STORE:-$PWD/inference_demo/hot_floor/store28}
+export SPEXAI_STORE=${SPEXAI_STORE:-$PWD/spexai/models}   # all 30 elements
 export SPEXAI_RESPONSES=${SPEXAI_RESPONSES:-$HOME/work/data/spexai/responses}
 
 echo "device=$DEVICE mode=$MODE walkers=$NWALKERS steps=$NSTEPS truth=$TRUTH"
