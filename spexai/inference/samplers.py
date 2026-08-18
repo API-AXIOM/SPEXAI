@@ -148,7 +148,10 @@ def run_emcee(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
         if resume and backend.iteration > 0:
             print(f"  resuming from {backend_path} at step "
                   f"{backend.iteration}", flush=True)
-            p0 = None                       # emcee continues from the backend
+            # the walker state has to be read back explicitly: passing None
+            # only continues a sampler that ran in *this* process (emcee looks
+            # at its own _previous_state), which a fresh object does not have
+            p0 = backend.get_last_sample()
             nsteps = max(0, nsteps - backend.iteration)
         else:
             backend.reset(nwalkers, post.prior.ndim)

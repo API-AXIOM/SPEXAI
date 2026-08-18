@@ -172,3 +172,87 @@ def test_nuts_evaluates_one_point_at_a_time(post):
 def test_emcee_rejects_too_few_walkers(post):
     with pytest.raises(ValueError, match="nwalkers >="):
         samplers.run_emcee(post, nwalkers=4, nsteps=10)
+
+
+def test_ultranest_writes_checkpoints(post, tmp_path):
+    # a log_dir must actually produce recoverable state on disk: the point of
+    # checkpointing is that an interrupted multi-hour run is not a total loss
+    pytest.importorskip("ultranest")
+    d = tmp_path / "un"
+    res = samplers.run_ultranest(post, min_num_live_points=100, logdir=str(d))
+    assert d.exists(), "no log_dir created"
+    written = [p for p in d.rglob("*") if p.is_file()]
+    assert written, "log_dir is empty -- nothing was checkpointed"
+    assert res.logz is not None and np.isfinite(res.logz)
+
+
+def test_ultranest_resume_continues_an_existing_run(post, tmp_path):
+    # resume=True must pick the existing checkpoint up rather than silently
+    # starting over (which would look identical from the outside)
+    pytest.importorskip("ultranest")
+    d = tmp_path / "un_resume"
+    first = samplers.run_ultranest(post, min_num_live_points=100, logdir=str(d))
+    again = samplers.run_ultranest(post, min_num_live_points=100, logdir=str(d),
+                                   resume=True)
+    # a resumed run reuses the finished state, so it costs far fewer new
+    # likelihood evaluations than the original
+    assert again.n_eval < first.n_eval, (
+        f"resume evaluated {again.n_eval} vs {first.n_eval} fresh -- it "
+        f"restarted instead of resuming")
+    assert np.isclose(again.logz, first.logz, atol=0.5)
+
+
+def test_ultranest_without_logdir_still_runs(post):
+    # log_dir=None must stay valid (resume='overwrite' with no dir used to crash)
+    pytest.importorskip("ultranest")
+    res = samplers.run_ultranest(post, min_num_live_points=100, logdir=None)
+    assert np.isfinite(res.logz)
+
+
+def test_emcee_backend_streams_the_chain(post, tmp_path):
+    # THE protection that was missing when a completed run was lost: the chain
+    # must be on disk as the run advances, not only after it returns
+    h5 = tmp_path / "chain.h5"
+    res = samplers.run_emcee(post, nwalkers=16, nsteps=40, seed=0,
+                             backend_path=str(h5), progress_every=10**9)
+    assert h5.exists(), "no HDF5 backend written"
+    import emcee
+    back = emcee.backends.HDFBackend(str(h5), read_only=True)
+    assert back.iteration == 40
+    # what is on disk must be the chain that was returned, not a stub
+    assert np.allclose(back.get_chain(), res.chain)
+
+
+def test_emcee_backend_resume_continues(post, tmp_path):
+    h5 = tmp_path / "chain_resume.h5"
+    samplers.run_emcee(post, nwalkers=16, nsteps=20, seed=0,
+                       backend_path=str(h5), progress_every=10**9)
+    res = samplers.run_emcee(post, nwalkers=16, nsteps=50, seed=0,
+                             backend_path=str(h5), resume=True,
+                             progress_every=10**9)
+    import emcee
+    back = emcee.backends.HDFBackend(str(h5), read_only=True)
+    assert back.iteration == 50, (
+        f"resumed run ended at {back.iteration}, expected 50 -- it restarted "
+        f"or double-counted instead of continuing")
+    assert res.chain.shape[0] == 50
+
+
+def test_ess_survives_missing_arviz(post, monkeypatch):
+    # the failure that destroyed a real run: a missing diagnostic dependency
+    # must degrade to NaN, never propagate out and take the chain with it
+    import builtins
+    real_import = builtins.__import__
+
+    def no_arviz(name, *a, **kw):
+        if name == "arviz":
+            raise ImportError("simulated missing arviz")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_arviz)
+    with pytest.warns(RuntimeWarning, match="arviz not installed"):
+        res = samplers.run_emcee(post, nwalkers=16, nsteps=20, seed=0,
+                                 progress_every=10**9)
+    assert np.all(np.isnan(res.ess))          # diagnostic degraded
+    assert res.samples.shape[0] > 0           # chain intact
+    assert np.isnan(res.ess_per_eval)

@@ -159,8 +159,13 @@ def run_sampler(name, post, pars, names, args):
                                  nsteps=args.zeus_steps or args.nsteps // 4,
                                  seed=args.seed, center=center)
     if name == "ultranest":
+        # its own checkpoint dir, so an interrupted run can be resumed rather
+        # than restarted from scratch
         return samplers.run_ultranest(post, min_num_live_points=args.live,
-                                      seed=args.seed, show_status=True)
+                                      seed=args.seed, show_status=True,
+                                      logdir=os.path.join(args.out,
+                                                          "ultranest"),
+                                      resume=args.resume)
     if name == "nuts":
         return samplers.run_nuts(_model_for(post, names),
                                  n_samples=args.nuts_samples,
