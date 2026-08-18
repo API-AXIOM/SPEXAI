@@ -108,6 +108,33 @@ def uniform_log_edges(emin, emax, dlx):
 # unchanged.
 USE_FLOAT32_FFT = False
 
+# Zero-padding is rounded up to a multiple of this. The padding only has to be
+# *at least* the kernel's reach, so rounding up is always numerically safe -- it
+# adds zeros and nothing else. The point is plan stability: cuFFT builds (and
+# caches, with a GPU workspace) one plan per distinct transform length, and the
+# raw padding is a continuous function of the batch's maximum velocity. With a
+# per-walker sigma_v that changes every MCMC step, so an un-quantised length
+# allocates a fresh plan per step until the GPU runs out of memory and cuFFT
+# fails with CUFFT_INTERNAL_ERROR. Quantising collapses a run to a couple of
+# lengths. 256 costs at most ~0.3% extra transform on a ~160k-bin grid.
+FFT_PAD_QUANTUM = 256
+
+
+def limit_cufft_plan_cache(max_size=16):
+    """Bound cuFFT's per-device plan cache (no-op off CUDA).
+
+    A backstop for the same failure: even with quantised lengths, distinct batch
+    row counts produce distinct plans, and torch's default cache holds many.
+    Each entry pins a workspace, so an unbounded cache is a slow GPU memory
+    leak. Evicting old plans costs a re-plan, which is negligible next to the
+    transforms themselves."""
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.backends.cuda.cufft_plan_cache.max_size = int(max_size)
+    except (AttributeError, RuntimeError):          # older/newer torch layouts
+        pass
+
 
 def fft_broaden(flux_uni, dlx, velocity):
     """Broaden integrated fluxes on a uniform log10-E grid by FFT.
@@ -126,7 +153,11 @@ def fft_broaden(flux_uni, dlx, velocity):
                         device=flux_uni.device).reshape(-1)
     sigma_u = (v / C_KMS).clamp(min=1e-12)  # width in ln E
     du = dlx * math.log(10.0)
-    pad = int(torch.ceil(8.0 * sigma_u.max() / du)) + 1
+    # round the kernel reach up to FFT_PAD_QUANTUM so the transform length is
+    # stable across calls (see the constant's note); more padding is always safe
+    reach = int(torch.ceil(8.0 * sigma_u.max() / du)) + 1
+    q = max(1, int(FFT_PAD_QUANTUM))
+    pad = -(-reach // q) * q
     n = K + 2 * pad
     # in float32 the FFT's leakage noise (~1e-7 of the peak, spread over
     # every bin) dominates the wings of spiky spectra, so float64 is used

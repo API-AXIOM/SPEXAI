@@ -31,8 +31,8 @@ from spexai.train.operator import SpectralOperator
 from spexai.inference.operator_model import (abundance_weight,
                                              ensure_recompile_limit)
 from spexai.train.broadening import (deposit_gaussian_lines, fft_broaden,
-                                      rebin_flux, scatter_to_grid,
-                                      uniform_log_edges)
+                                      limit_cufft_plan_cache, rebin_flux,
+                                      scatter_to_grid, uniform_log_edges)
 
 _DLX = 1e-5  # fine-grid log spacing for the FFT broadening (matches the serial)
 
@@ -144,6 +144,9 @@ class BatchedJointForward:
         self.joint = joint
         self.device = joint.device
         self.track_grad = False        # see grad_enabled / _grad_aware
+        # this path drives long runs of large FFTs whose shapes must not
+        # accumulate plans; see limit_cufft_plan_cache
+        limit_cufft_plan_cache()
         m0 = joint.models[joint.elements[0]]
         # batched continuum requires a shared training energy grid + energy
         # normalisation across elements (temperature norm may still differ).
@@ -289,20 +292,35 @@ class BatchedJointForward:
         # a per-walker n_h gives (B, K); gather rather than tile to (N*B, K),
         # which at K ~ 2e5 would be gigabytes for no reason.
         per_walker_nh = absorb and trans.dim() == 2 and trans.shape[0] > 1
-        rchunk = max(1, min(N * B, int(0.25 * float(mem_gb) * 1e9
-                                       / max(1, K * 8 * 4))))
+        # A FIXED row-chunk, with the final partial block zero-padded up to it.
+        # Sizing it as min(N*B, cap) instead made the transform's batch size
+        # follow N*B -- which changes whenever the sampler rejects a different
+        # number of walkers -- and every distinct batch size is another cached
+        # cuFFT plan holding a GPU workspace, until allocation fails with
+        # CUFFT_INTERNAL_ERROR partway through a long run. Padded rows are
+        # zeros, so they broaden to zeros and are sliced off: no numerical
+        # effect, only a stable shape.
+        n_rows = N * B
+        rchunk = max(1, int(0.25 * float(mem_gb) * 1e9 / max(1, K * 8 * 4)))
         cont = []
-        for lo in range(0, N * B, rchunk):
-            hi = min(lo + rchunk, N * B)
+        for lo in range(0, n_rows, rchunk):
+            hi = min(lo + rchunk, n_rows)
+            m = hi - lo
+            block = f_train[lo:hi]
             v = vel[lo:hi] if per_walker_v else vel
-            fu = fft_broaden(scatter_to_grid(f_train[lo:hi], te, uni), _DLX, v)
+            rows = torch.arange(lo, hi, device=self.device)
+            if m < rchunk:                       # pad up to the fixed shape
+                block = torch.cat(
+                    [block, block.new_zeros(rchunk - m, block.shape[1])], dim=0)
+                if per_walker_v:
+                    # repeat the last velocity: it must stay inside the real
+                    # range so the padding does not inflate the kernel reach
+                    v = torch.cat([v, v[-1:].expand(rchunk - m)])
+                rows = torch.cat([rows, rows[-1:].expand(rchunk - m)])
+            fu = fft_broaden(scatter_to_grid(block, te, uni), _DLX, v)
             if absorb:
-                if per_walker_nh:                                # row -> walker
-                    fu = fu * trans[torch.arange(lo, hi,
-                                                 device=self.device) % B]
-                else:
-                    fu = fu * trans
-            cont.append(rebin_flux(fu, uni, bin_edges))          # (rc, M)
+                fu = fu * (trans[rows % B] if per_walker_nh else trans)
+            cont.append(rebin_flux(fu, uni, bin_edges)[:m])      # drop padding
         return torch.cat(cont, dim=0).reshape(N, B, -1)          # (N, B, M)
 
     @_grad_aware

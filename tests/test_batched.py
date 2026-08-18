@@ -277,3 +277,63 @@ def test_batched_tiny_mem_budget_invariant(joint, edges):
     ref = joint.flux(T, ab, 150.0, edges)
     bat = joint.batched.flux(T, ab, 150.0, edges, mem_gb=1e-4)
     assert _max_rel(bat, ref) < 1e-4
+
+
+def test_fft_transform_length_is_stable_across_velocities(joint, edges):
+    # THE regression test for CUFFT_INTERNAL_ERROR: the transform length must
+    # not track the batch's maximum velocity. It used to, so a per-walker
+    # sigma_v allocated a fresh cuFFT plan (and GPU workspace) almost every MCMC
+    # step until the device ran out of memory partway through a run.
+    import spexai.train.broadening as br
+
+    seen = set()
+    orig = torch.fft.rfft
+
+    def spy(x, *a, **kw):
+        seen.add(int(x.shape[-1]))
+        return orig(x, *a, **kw)
+
+    torch.fft.rfft = spy
+    try:
+        for v in (35.0, 80.0, 150.0, 260.0, 410.0, 590.0):
+            br.fft_broaden(torch.ones(4, 5000), 1e-5, torch.full((4,), v))
+    finally:
+        torch.fft.rfft = orig
+    # 30-600 km/s spans a ~20x range in kernel reach; quantisation must collapse
+    # that to a couple of lengths rather than one per velocity
+    assert len(seen) <= 3, f"{len(seen)} distinct FFT lengths: {sorted(seen)}"
+
+
+def test_fft_padding_is_quantised_but_sufficient():
+    # rounding up must never pad LESS than the kernel reach, or the broadening
+    # wraps around and quietly corrupts the band edges
+    import math
+    import spexai.train.broadening as br
+
+    du = 1e-5 * math.log(10.0)
+    for v in (30.0, 180.0, 600.0, 1200.0):
+        reach = int(math.ceil(8.0 * (v / br.C_KMS) / du)) + 1
+        pad = -(-reach // br.FFT_PAD_QUANTUM) * br.FFT_PAD_QUANTUM
+        assert pad >= reach, f"v={v}: pad {pad} < reach {reach}"
+
+
+def test_row_padding_does_not_change_the_continuum(joint, edges):
+    # the fixed row-chunk zero-pads its final block; that must be invisible in
+    # the result, including with a per-walker velocity and n_h
+    from spexai.inference.absorption import Absorption
+    absn = Absorption.default()
+    T = torch.tensor([2.0, 4.0, 6.0, 3.0, 5.0])
+    v = torch.tensor([60.0, 150.0, 300.0, 450.0, 90.0])
+    nh = torch.tensor([1e20, 2e21, 5e20, 8e21, 1e21])
+    ab = {8: 0.8, 26: 1.2}
+    ref = joint.batched.flux(T, ab, v, edges, absorption=absn, n_h=nh,
+                             redshift=0.02, mem_gb=2.0)
+    # a tiny budget forces many small row-chunks and a padded remainder
+    tiny = joint.batched.flux(T, ab, v, edges, absorption=absn, n_h=nh,
+                              redshift=0.02, mem_gb=1e-4)
+    assert _max_rel(tiny, ref) < 1e-5
+
+
+def test_limit_cufft_plan_cache_is_a_noop_off_cuda():
+    from spexai.train.broadening import limit_cufft_plan_cache
+    limit_cufft_plan_cache(8)      # must not raise on a CPU-only machine
