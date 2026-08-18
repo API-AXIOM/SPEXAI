@@ -139,6 +139,105 @@ def test_per_walker_velocity_rejects_wrong_length(joint, edges):
                                torch.as_tensor(edges), torch.tensor([1.0, 2.0]))
 
 
+def test_per_walker_abundance_matches_walker_loop(joint, edges):
+    # THE test for per-walker abundances: a {Z: (B,)} dict must reproduce,
+    # walker by walker, what scalar abundances give for that walker alone.
+    # Distinct values per walker and per element, so a weight broadcast against
+    # the wrong axis (or shared across the batch) cannot pass.
+    T = torch.tensor([1.2, 3.0, 6.0])
+    per = {8: torch.tensor([0.4, 0.9, 1.6]), 26: torch.tensor([1.3, 0.7, 1.0])}
+    for name, fn in (("serial", joint.flux), ("batched", joint.batched.flux)):
+        got = fn(T, per, 150.0, edges)                     # (3, M)
+        for i in range(3):
+            scalar = {z: float(v[i]) for z, v in per.items()}
+            ref = fn(T[i:i + 1], scalar, 150.0, edges)
+            assert _max_rel(got[i:i + 1], ref) < 1e-5, f"{name} walker {i}"
+
+
+def test_per_walker_abundance_constant_equals_scalar(joint, edges):
+    # a constant (B,) abundance must take the tensor branch yet land on the
+    # scalar answer -- guards abundance_weight's (B, 1) reshape
+    T = torch.tensor([1.5, 4.0])
+    ref = joint.batched.flux(T, {26: 0.8}, 150.0, edges)
+    vec = joint.batched.flux(T, {26: torch.full((2,), 0.8)}, 150.0, edges)
+    assert _max_rel(vec, ref) < 1e-5
+
+
+def test_per_walker_n_h_matches_walker_loop(joint, edges):
+    # per-walker N_H: _continuum's rows are element-major (row = n*B + b), so a
+    # (B, K) transmission has to be gathered by each row's walker index. A
+    # scalar n_h broadcasts either way, so only distinct per-walker values
+    # catch a mis-aligned screen.
+    from spexai.inference.absorption import Absorption
+    absn = Absorption.default()
+    T = torch.tensor([2.0, 5.0, 3.0])
+    nh = torch.tensor([1e20, 4e21, 2e22])
+    ab = {8: 0.9, 26: 1.1}
+    got = joint.batched.flux(T, ab, 150.0, edges, absorption=absn, n_h=nh,
+                             redshift=0.02)
+    for i in range(3):
+        ref = joint.flux(T[i:i + 1], ab, 150.0, edges, absorption=absn,
+                         n_h=float(nh[i]), redshift=0.02)
+        assert _max_rel(got[i:i + 1], ref) < 1e-4, f"walker {i}"
+
+
+def test_flux_drops_the_graph_by_default(joint, edges):
+    # the default must stay no_grad even when the inputs require grad: an
+    # autograd graph over the trunk pins every activation (the 21 GiB OOM)
+    T = torch.tensor([3.0], requires_grad=True)
+    v = torch.tensor([150.0], requires_grad=True)
+    out = joint.batched.flux(T, {26: 1.0}, v, edges)
+    assert not out.requires_grad
+
+
+def test_grad_enabled_matches_finite_differences(joint, edges):
+    # NUTS and reparameterised VI need d(flux)/d(theta). Check the graph
+    # survives grad_enabled() AND that the gradients are right, against a
+    # central difference -- a detached intermediate (e.g. the .item() that used
+    # to sit in the line deposit) yields a clean zero, which "is not None"
+    # would happily pass.
+    b = joint.batched
+    ab = {8: 0.9, 26: 1.1}
+    w = torch.rand(edges.numel() - 1, generator=torch.Generator().manual_seed(0))
+
+    def scalarised(t, v, requires_grad=False):
+        T = torch.tensor([t], requires_grad=requires_grad)
+        V = torch.tensor([v], requires_grad=requires_grad)
+        with b.grad_enabled():
+            out = b.flux(T, ab, V, edges)
+        return (out.squeeze(0) * w).sum(), T, V
+
+    loss, T, V = scalarised(3.0, 150.0, requires_grad=True)
+    assert loss.requires_grad
+    loss.backward()
+
+    for name, p, base, h, tol in (("temp", T, 3.0, 1e-3, 0.05),
+                                  ("velocity", V, 150.0, 1.0, 0.15)):
+        assert p.grad is not None and torch.isfinite(p.grad).all(), name
+        args = {"temp": lambda d: (base + d, 150.0),
+                "velocity": lambda d: (3.0, base + d)}[name]
+        # detach: the operator's own parameters require grad, so under
+        # grad_enabled the perturbed losses carry a graph we have no use for
+        fd = float((scalarised(*args(h))[0] - scalarised(*args(-h))[0]).detach()
+                   / (2 * h))
+        ad = float(p.grad.reshape(-1)[0])
+        # float32 forward + truncation: agreement to a few percent is the most
+        # a central difference can show here
+        assert abs(ad - fd) <= tol * max(abs(fd), 1e-30), (
+            f"{name}: autodiff {ad:.4e} vs finite-diff {fd:.4e}")
+
+
+def test_grad_enabled_restores_previous_setting(joint, edges):
+    b = joint.batched
+    assert not b.track_grad
+    with b.grad_enabled():
+        assert b.track_grad
+        with b.grad_enabled(False):
+            assert not b.track_grad
+        assert b.track_grad
+    assert not b.track_grad
+
+
 def test_batched_tiny_mem_budget_invariant(joint, edges):
     # a tiny mem_gb forces minimal trunk/broadening chunks (the OOM-mitigation
     # path); result must be unchanged vs the serial reference

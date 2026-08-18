@@ -141,6 +141,18 @@ print("emcee median :", dict(zip(er.names, er.median)))
 print("ultranest lnZ:", ur.logz, "+-", ur.logzerr)
 ```
 
+Both default to `vectorized=True`, which evaluates the whole walker ensemble (or
+UltraNest's live-point block) in a single batched forward instead of one point
+at a time. The speedup grows with the number of elements — it is marginal on a
+3-element CPU fit and ~2.2x on the full 30-element store on a GPU.
+
+`vectorized=False` selects the scalar reference likelihood (`make_loglike`)
+instead. The two are numerically identical — `tests/test_fitting.py` asserts
+they produce the same chain from the same seed — so the flag is for debugging
+and cross-checking, not for changing results. Fits that the batched forward
+cannot express fall back to the scalar path automatically and warn: fitting a
+DEM, a sampled redshift, or a sampled luminosity distance.
+
 ### 2c. Fitting abundances (and tying elements)
 
 `AbundanceModel` maps fit parameters to a `{Z: value}` dict. Free a global
@@ -183,6 +195,18 @@ params = [Param("T_mean", 1.0, 8.0, truth=4.0),
           Param("log_norm", ln-1.5, ln+1.5, truth=ln)]
 er = run_emcee(obs, model, params, fixed, dem=dem)   # combine with abundance_model=... if desired
 ```
+
+DEM fits vectorize too. Each walker is evaluated on the whole temperature grid
+and the fluxes summed with that walker's own weights, so a `G`-point grid makes
+the effective batch `G` times larger — the walker sub-batch shrinks by `G`
+automatically to hold peak memory where `chunk` intended it.
+
+This needs the DEM shape to provide `weights_batch(params)` (`{name: (B,)}` →
+`(B, G)`, pure torch and differentiable) alongside the scalar `weights`. Every
+shape here does: `gaussian_logT`, `gaussian_T`, `lognormal_T`, `TwoGaussianDEM`
+and `BinnedDEM`. A `ParametricDEM` built around some other `scipy.stats`
+distribution has no torch equivalent, so it keeps the scalar path only and
+`run_emcee` falls back with a warning naming the reason.
 
 Note: the corner plot works for any parameter set, but
 `plot_posterior_predictive` is single-temperature only (it calls

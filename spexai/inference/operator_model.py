@@ -32,6 +32,22 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "models")
 
 
+def abundance_weight(value, device):
+    """Normalise one element's abundance to a weight broadcastable over (B, M).
+
+    Accepts a scalar -- every walker shares the abundance, the classic case --
+    or a ``(B,)`` tensor, one abundance per walker, which is what an ensemble
+    sampler with free abundances actually produces. Returns ``(weight, skip)``:
+    scalars stay Python floats so the ``skip`` shortcut still elides elements
+    switched off with 0.0, while a per-walker tensor becomes ``(B, 1)``. A
+    tensor is never skipped -- with walkers at different abundances the element
+    is live for the batch as a whole, even if one walker sits at zero."""
+    if torch.is_tensor(value) and value.numel() > 1:
+        return value.to(device).view(-1, 1), False
+    v = float(value)
+    return v, v == 0.0
+
+
 def ensure_recompile_limit(n_needed):
     """Raise dynamo's per-code-object recompile limit to ``n_needed``.
 
@@ -249,8 +265,9 @@ class JointOperatorModel:
 
         temp_kev: (B,) tensor. abundances: {Z: solar-relative value}; any
         loaded element not in the dict defaults to 1.0 for the primordial
-        set and to 1.0 (solar) otherwise. velocity: km/s, scalar or (B,) for a
-        per-walker sigma_v. bin_edges: (M+1,).
+        set and to 1.0 (solar) otherwise. Each value may be a scalar or a
+        ``(B,)`` tensor for a per-walker abundance. velocity: km/s, scalar or
+        (B,) for a per-walker sigma_v. bin_edges: (M+1,).
         Optional Galactic absorption (``absorption``, ``n_h`` cm^-2) is applied
         as a foreground screen in the observed frame (``redshift`` = source z).
         """
@@ -261,8 +278,9 @@ class JointOperatorModel:
         total = torch.zeros((temp_kev.numel(), bin_edges.numel() - 1),
                             device=self.device)
         for z, model in self.models.items():
-            a = float(abundances.get(z, 1.0)) if abundances else 1.0
-            if a == 0.0:
+            raw = abundances.get(z, 1.0) if abundances else 1.0
+            a, skip = abundance_weight(raw, self.device)
+            if skip:
                 continue
             total = total + a * element_broadened_flux(
                 model, temp_kev, velocity, bin_edges,

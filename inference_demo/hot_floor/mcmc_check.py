@@ -79,7 +79,9 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
     ens = EnsembleForward(emu, response, absorption, keep, args.mode,
                           PERSEUS["vel"] if args.fix_sigma_v else None,
                           args.device, chunk=args.chunk,
-                          compile_nets=args.compile)
+                          compile_nets=args.compile,
+                          batched=not args.serial_forward,
+                          mem_gb=args.mem_gb)
     pars = ens.params(log_norm_truth)
     names = [p.name for p in pars]
     lo = np.array([p.low for p in pars])
@@ -100,6 +102,24 @@ def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
     p0 = x0 + np.array([p.step * 5 for p in pars]) * rng.standard_normal(
         (args.nwalkers, ndim))
     p0 = np.clip(p0, lo + 1e-9, hi - 1e-9)
+
+    # One-off torch.compile stall: the benchmarks all warm up before timing, so
+    # this cost never appeared in the ladder. Amortised over nwalkers*nsteps it
+    # should be negligible, but it is worth knowing for short runs (e.g. an SBC
+    # campaign of many short chains, where it is paid once per chain).
+    sync = (lambda: torch.cuda.synchronize()) if args.device == "cuda" else (
+        lambda: None)
+    t0 = time.time()
+    ens(p0[:1])
+    sync()
+    t_first = time.time() - t0
+    t0 = time.time()
+    ens(p0[:1])
+    sync()
+    t_warm = time.time() - t0
+    print(f"forward: first call {t_first:.1f}s, warm {t_warm:.2f}s "
+          f"(one-off overhead {t_first - t_warm:.1f}s)", flush=True)
+
     t0 = time.time()
     sampler = emcee.EnsembleSampler(args.nwalkers, ndim, logprob, vectorize=True)
     every = max(1, args.nsteps // 20)                    # ~20 progress lines
@@ -170,7 +190,15 @@ def main():
     ap.add_argument("--tf32", action="store_true",
                     help="enable TF32 tensor-core matmul (Ampere+)")
     ap.add_argument("--compile", action="store_true",
-                    help="torch.compile the per-element coordinate-MLP")
+                    help="torch.compile the trunk (the grouped vmap forward on "
+                         "the batched path, the per-element MLP on the serial "
+                         "one); this is where the batched path's 2.19x lives")
+    ap.add_argument("--serial_forward", action="store_true",
+                    help="use the old per-element serial loop instead of the "
+                         "element-batched trunk (reference / debugging)")
+    ap.add_argument("--mem_gb", type=float, default=2.0,
+                    help="memory budget steering the batched forward's energy "
+                         "and row chunking (numerically transparent)")
     ap.add_argument("--fft32", action="store_true",
                     help="float32 FFT continuum broadening on CUDA (~4x)")
     ap.add_argument("--smoke", action="store_true",
@@ -186,7 +214,10 @@ def main():
         import spexai.train.broadening as _br
         _br.USE_FLOAT32_FFT = True
     if args.smoke:
-        args.nwalkers, args.nsteps, args.counts = 16, 40, 1e6
+        # 24 >= 2*ndim: emcee's red-blue move refuses fewer walkers than twice
+        # the dimension, and ndim is 11 here (8 abundances + kT + sigma_v + n_h
+        # + log_norm, less one when sigma_v is pinned).
+        args.nwalkers, args.nsteps, args.counts = 24, 40, 1e6
     for key, val in (("vel", args.sigma_v), ("kT", args.kT)):
         if val is not None:
             PERSEUS[key] = val

@@ -12,6 +12,11 @@
 # emulator's ~3e-3 MRE (and the hot-floor study shows even 3e-3 does not bias
 # science below ~1e7 counts). Set ACCEL="" only for a float64 reference run.
 #
+# The forward is now ELEMENT-BATCHED by default: all 30 trunks are evaluated as
+# a few grouped GEMMs (vmap) which --compile then fuses, worth a further 2.19x
+# over the old per-element serial loop at no accuracy cost (max rel vs fp64
+# 6.24e-04 -> 6.22e-04). Pass --serial_forward to fall back to the loop.
+#
 # Prerequisites on the cluster (NO 40 GB caches needed -- truth is precomputed):
 #   * repo importable as `spexai` (incl. the modified abundances.py /
 #     operator_model.py and spexai/inference/data/tbabs_sigma.npz);

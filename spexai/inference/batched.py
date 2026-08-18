@@ -20,18 +20,39 @@ Requires all elements to share one training energy grid (true for the store;
 checked in ``__init__``). Per-element temperature normalisation (``t_lo/t_hi``)
 may still differ and is handled element-by-element when building ``tnorm``.
 """
+import contextlib
 import copy
+import functools
 
 import torch
 from torch.func import functional_call, stack_module_state
 
 from spexai.train.operator import SpectralOperator
-from spexai.inference.operator_model import ensure_recompile_limit
+from spexai.inference.operator_model import (abundance_weight,
+                                             ensure_recompile_limit)
 from spexai.train.broadening import (deposit_gaussian_lines, fft_broaden,
                                       rebin_flux, scatter_to_grid,
                                       uniform_log_edges)
 
 _DLX = 1e-5  # fine-grid log spacing for the FFT broadening (matches the serial)
+
+
+def _grad_aware(fn):
+    """``@torch.no_grad()`` unless this forward has gradients switched on.
+
+    Sampling only ever needs the value, and building an autograd graph over the
+    trunk pins every activation -- that is the bug that presented as a 21 GiB
+    CUDA OOM when the staged methods were called directly, so no_grad stays the
+    default on every stage, not just on ``flux``. Gradient-based samplers
+    (HMC/NUTS, reparameterised VI) do need d(flux)/d(theta), so
+    :meth:`BatchedJointForward.grad_enabled` flips these to grad-tracking for
+    the duration of a block. Every stage is decorated, so entering the context
+    is enough however the forward is called."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with torch.set_grad_enabled(self.track_grad):
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 def _trunk_view(m):
@@ -122,6 +143,7 @@ class BatchedJointForward:
     def __init__(self, joint):
         self.joint = joint
         self.device = joint.device
+        self.track_grad = False        # see grad_enabled / _grad_aware
         m0 = joint.models[joint.elements[0]]
         # batched continuum requires a shared training energy grid + energy
         # normalisation across elements (temperature norm may still differ).
@@ -158,6 +180,26 @@ class BatchedJointForward:
         self._max_ef = max(len(g.zs) * (1 + 2 * g.models[0].config.n_freqs)
                            for g in self.groups)
 
+    @contextlib.contextmanager
+    def grad_enabled(self, on=True):
+        """Track gradients through the forward for the duration of the block.
+
+        Off by default: sampling needs only the value, and the autograd graph
+        over the trunk is what turned a staged call into a 21 GiB CUDA OOM.
+        Gradient-based samplers (NUTS, reparameterised VI) need
+        d(counts)/d(theta), which is available through temperature, sigma_v,
+        n_h and the abundances alike -- backward costs ~0.8x the forward.
+
+        Note the *inputs* still have to carry ``requires_grad``; this only stops
+        the forward from throwing the graph away. Nesting restores the previous
+        setting, so a grad block inside a no-grad benchmark is safe."""
+        prev = self.track_grad
+        self.track_grad = bool(on)
+        try:
+            yield self
+        finally:
+            self.track_grad = prev
+
     @staticmethod
     def _key(m):
         c = m.config
@@ -180,7 +222,7 @@ class BatchedJointForward:
         n = -(-self._P // cap)                  # ceil: number of chunks needed
         return -(-self._P // n)                 # spread evenly over those n
 
-    @torch.no_grad()
+    @_grad_aware
     def _density(self, temp_kev, echunk, compile_trunk):
         """Batched trunk: log10 continuum density for every element, stacked as
         (N, B, P). Returns (dens, zs) with zs the element order of the N axis.
@@ -202,49 +244,62 @@ class BatchedJointForward:
             zs += g.zs
         return torch.cat(dens, dim=0), zs                        # (N, B, P)
 
-    @torch.no_grad()
+    @_grad_aware
     def _continuum(self, dens, bin_edges, velocity, absorb, tfun, n_h,
                    redshift, mem_gb):
         """Broaden + absorb + rebin the stacked densities to (N, B, M). The fine
         grid K is large, so the (N*B, K) work is done in row-chunks (per-row
         independent, so numerically identical).
 
-        ``velocity`` may be a (B,) per-walker tensor. Rows here are element-major
-        (row = n*B + b), so it is tiled N times to line up with the flattened
-        stack, then sliced per row-chunk."""
+        ``velocity`` and ``n_h`` may be (B,) per-walker tensors. Rows here are
+        element-major (row = n*B + b), so neither lines up with the flattened
+        stack on its own: the velocity is tiled N times, and the (B, K)
+        transmission is gathered by each row's walker index. Both are then
+        sliced per row-chunk. A scalar velocity or n_h broadcasts as before."""
         N, B, P = dens.shape
         uni, te, K = self._uni, self._train_edges, self._K
         f_train = (dens * self._widths).reshape(N * B, P)        # (N*B, P)
         vel = velocity
-        if torch.is_tensor(vel) and vel.numel() > 1:
+        per_walker_v = torch.is_tensor(vel) and vel.numel() > 1
+        if per_walker_v:
             vel = vel.reshape(-1).repeat(N)                      # (N*B,) row-aligned
         trans = None
         if absorb:                                               # observed frame
             uni_cent = torch.sqrt(uni[:-1] * uni[1:])
             trans = tfun(uni_cent / (1.0 + redshift), n_h, device=self.device)
+        # a per-walker n_h gives (B, K); gather rather than tile to (N*B, K),
+        # which at K ~ 2e5 would be gigabytes for no reason.
+        per_walker_nh = absorb and trans.dim() == 2 and trans.shape[0] > 1
         rchunk = max(1, min(N * B, int(0.25 * float(mem_gb) * 1e9
                                        / max(1, K * 8 * 4))))
         cont = []
         for lo in range(0, N * B, rchunk):
-            v = (vel[lo:lo + rchunk] if torch.is_tensor(vel) and vel.numel() > 1
-                 else vel)
-            fu = fft_broaden(scatter_to_grid(f_train[lo:lo + rchunk], te, uni),
-                             _DLX, v)
+            hi = min(lo + rchunk, N * B)
+            v = vel[lo:hi] if per_walker_v else vel
+            fu = fft_broaden(scatter_to_grid(f_train[lo:hi], te, uni), _DLX, v)
             if absorb:
-                fu = fu * trans
+                if per_walker_nh:                                # row -> walker
+                    fu = fu * trans[torch.arange(lo, hi,
+                                                 device=self.device) % B]
+                else:
+                    fu = fu * trans
             cont.append(rebin_flux(fu, uni, bin_edges))          # (rc, M)
         return torch.cat(cont, dim=0).reshape(N, B, -1)          # (N, B, M)
 
-    @torch.no_grad()
+    @_grad_aware
     def _combine(self, cont, zs, abundances, temp_kev, bin_edges, velocity,
                  absorb, tfun, n_h, redshift):
         """Abundance-weight the continua and add the ragged per-element line
-        heads -> (B, M)."""
+        heads -> (B, M).
+
+        Abundances may be scalars or ``(B,)`` per-walker tensors (see
+        :func:`abundance_weight`); mixing the two across elements is fine."""
         B = cont.shape[1]
         total = torch.zeros((B, bin_edges.numel() - 1), device=self.device)
         for i, z in enumerate(zs):
-            a = float(abundances.get(z, 1.0)) if abundances else 1.0
-            if a == 0.0:
+            raw = abundances.get(z, 1.0) if abundances else 1.0
+            a, skip = abundance_weight(raw, self.device)
+            if skip:
                 continue
             out_e = cont[i]
             model = self.joint.models[z]
@@ -254,7 +309,7 @@ class BatchedJointForward:
             total = total + a * out_e
         return total
 
-    @torch.no_grad()
+    @_grad_aware
     def flux(self, temp_kev, abundances, velocity, bin_edges, absorption=None,
              n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0, compile_trunk=False):
         """Abundance-weighted summed flux on ``bin_edges`` — see

@@ -13,6 +13,11 @@ only a scalar velocity. ``deposit_gaussian_lines`` now accepts a ``(B,)``
 velocity, so it is a free, sampled parameter like the rest. Pass
 ``velocity=<float>`` to pin it again for a Tier-1-style reference run.
 
+The element loop is likewise gone: ``batched=True`` (the default) evaluates
+every element's trunk as a few grouped GEMMs via ``BatchedJointForward``, worth
+2.19x over the serial-accel production path. ``batched=False`` keeps the old
+per-element loop as a reference.
+
 Correctness is checked against the trusted serial forward
 (``fisher_bias.Forward`` -> ``JointOperatorModel.predict_counts``) on CPU:
 ``python inference_demo/hot_floor/gpu_forward.py`` (device cpu).
@@ -45,7 +50,7 @@ class EnsembleForward:
     """
 
     def __init__(self, emu, response, absorption, keep, mode, velocity, device,
-                 chunk=32, compile_nets=False):
+                 chunk=32, compile_nets=False, batched=True, mem_gb=2.0):
         if mode != "single":
             raise NotImplementedError("EnsembleForward: single-T only for now")
         self.emu, self.absn, self.device = emu, absorption, device
@@ -56,14 +61,23 @@ class EnsembleForward:
         # bounded (the forward's embedding/FFT grids scale with the batch); the
         # emcee ensemble size is then independent of GPU memory.
         self.chunk = int(chunk)
-        # torch.compile the per-element coordinate-MLP (the ~75% bottleneck: the
-        # Fourier embedding + FiLM + linear/gelu stack); the FFT and analytic line
-        # deposition stay eager (data-dependent shapes would only graph-break).
-        # First call pays a one-off compile cost for all elements.
-        if compile_nets:
-            # dynamo's cache is per code object, and every element compiles the
-            # same forward_norm, so they share one budget -- without this the
-            # default limit of 8 is exhausted and the rest silently run eager.
+        self.mem_gb = float(mem_gb)
+        # Element-batched trunk (grouped vmap) instead of the per-element serial
+        # loop: 2.19x over the serial-accel production path at 30 elements/96
+        # walkers, and numerically free (6.24e-04 -> 6.22e-04 max rel vs fp64).
+        # `compile_nets` then compiles the *grouped* forward (compile o vmap),
+        # which is where that factor actually comes from -- the grouped GEMMs
+        # alone are worth only 1.18x. Set batched=False for the old serial path.
+        self.use_batched = bool(batched)
+        self.compile_trunk = bool(compile_nets) and self.use_batched
+        if compile_nets and not self.use_batched:
+            # serial path: torch.compile the per-element coordinate-MLP (the
+            # ~75% bottleneck: Fourier embedding + FiLM + linear/gelu stack);
+            # the FFT and analytic line deposit stay eager (data-dependent
+            # shapes would only graph-break). dynamo's cache is per code object,
+            # and every element compiles the same forward_norm, so they share
+            # one budget -- without this the default limit of 8 is exhausted and
+            # the rest silently run eager.
             ensure_recompile_limit(8 * max(1, len(emu.models)))
             for m in emu.models.values():
                 m.forward_norm = torch.compile(m.forward_norm, dynamic=True)
@@ -94,14 +108,14 @@ class EnsembleForward:
         return [p for p in build_params(self, log_norm_truth)
                 if self.fit_sigma_v or p.name != "sigma_v"]
 
-    def _flux(self, theta):
-        """Abundance-weighted, broadened flux on the response grid -> (B, M).
+    def _unpack(self, th):
+        """theta ``(B, ndim)`` -> the physical inputs the forward takes.
 
-        The emissivity/broadening stage (per-element operator nets, FFT
-        continuum broadening, on-device absorption, rebin, analytic lines) --
-        i.e. everything except the fold. Split out so it can be timed alone."""
-        th = np.atleast_2d(np.asarray(theta, dtype=np.float64))   # (B, ndim)
-        B, dev = th.shape[0], self.device
+        Returns ``(temps, vel, n_h, abund)`` with every value a ``(B,)`` tensor
+        on ``self.device`` (``vel`` is a scalar when pinned), and ``abund`` the
+        literature tying scheme as ``{Z: (B,) tensor}``: H/He solar, the free
+        elements sampled, every other metal tied to Fe."""
+        dev = self.device
         temps = torch.as_tensor(th[:, self.col["kT"]], dtype=torch.float32,
                                 device=dev)                        # (B,)
         n_h = torch.as_tensor(th[:, self.col["n_h"]] * 1e21, dtype=torch.float32,
@@ -110,20 +124,43 @@ class EnsembleForward:
                                device=dev)                         # (B,) km/s
                if self.fit_sigma_v else self.velocity)             # or scalar
         fe = torch.as_tensor(th[:, self.fe_idx], dtype=torch.float32, device=dev)
+        ones = torch.ones(th.shape[0], device=dev)
+        abund = {}
+        for z in self.emu.models:
+            if z in (1, 2):
+                abund[z] = ones                                    # H/He solar
+            elif z in FREE_Z:
+                abund[z] = torch.as_tensor(th[:, self.col[SYMBOL[z]]],
+                                           dtype=torch.float32, device=dev)
+            else:
+                abund[z] = fe                                      # tied to Fe
+        return temps, vel, n_h, abund
+
+    def _flux(self, theta):
+        """Abundance-weighted, broadened flux on the response grid -> (B, M).
+
+        The emissivity/broadening stage (operator nets, FFT continuum
+        broadening, on-device absorption, rebin, analytic lines) -- i.e.
+        everything except the fold. Split out so it can be timed alone.
+
+        The batched path evaluates all elements' trunks as a few grouped GEMMs
+        and takes the per-walker abundances straight through; the serial path
+        loops elements and weights each one outside the flux. Same numbers."""
+        th = np.atleast_2d(np.asarray(theta, dtype=np.float64))   # (B, ndim)
+        temps, vel, n_h, abund = self._unpack(th)
+        if self.use_batched:
+            return self.emu.batched.flux(
+                temps, abund, vel, self.edges_rest, absorption=self.absn,
+                n_h=n_h, redshift=self.z, mem_gb=self.mem_gb,
+                compile_trunk=self.compile_trunk)                  # (B, M)
         total = None
         for z, model in self.emu.models.items():
-            if z in (1, 2):
-                a = torch.ones(B, device=dev)                      # H/He solar
-            elif z in FREE_Z:
-                a = torch.as_tensor(th[:, self.col[SYMBOL[z]]],
-                                    dtype=torch.float32, device=dev)
-            else:
-                a = fe                                             # tied to Fe
             ef = element_broadened_flux(                           # (B, M)
                 model, temps, vel, self.edges_rest,
                 absorption=self.absn, n_h=n_h, redshift=self.z,
                 use_torch_absorption=True)
-            total = a[:, None] * ef if total is None else total + a[:, None] * ef
+            a = abund[z][:, None] * ef
+            total = a if total is None else total + a
         return total
 
     def _fold(self, total, theta):
@@ -171,11 +208,13 @@ def _check(ens, ser, tag, insert_v=None):
 
 
 def _validate():
-    """Batched EnsembleForward vs serial fisher_bias.Forward, on CPU.
+    """EnsembleForward vs serial fisher_bias.Forward, on CPU.
 
-    Two cases: sigma_v sampled per walker (the default) and sigma_v pinned (the
-    Tier-1 reference path). The per-walker case is the load-bearing one -- the
-    walkers get *different* sigma_v, so a silently-shared width would show up.
+    Four cases: the element-batched and per-element-serial paths, each with
+    sigma_v sampled per walker (the default) and pinned (the Tier-1 reference).
+    The per-walker case is the load-bearing one -- the walkers get *different*
+    sigma_v and *different* abundances, so a silently-shared width or a weight
+    broadcast against the wrong axis would show up.
     """
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
@@ -184,12 +223,16 @@ def _validate():
     emu = JointOperatorModel(models_dir=STORE28, device="cpu")
     ser = Forward(emu, response, absorption, keep, "single")       # has sigma_v
 
-    free = EnsembleForward(emu, response, absorption, keep, "single",
-                           velocity=None, device="cpu")
-    pinned = EnsembleForward(emu, response, absorption, keep, "single",
-                             velocity=PERSEUS["vel"], device="cpu")
-    ok = _check(free, ser, "per-walker sigma_v")
-    ok &= _check(pinned, ser, "pinned sigma_v   ", insert_v=PERSEUS["vel"])
+    ok = True
+    for batched in (True, False):
+        tag = "batched" if batched else "serial "
+        for velocity in (None, PERSEUS["vel"]):
+            mode = "per-walker sigma_v" if velocity is None else "pinned sigma_v   "
+            ens = EnsembleForward(emu, response, absorption, keep, "single",
+                                  velocity=velocity, device="cpu",
+                                  batched=batched)
+            ok &= _check(ens, ser, f"{tag} {mode}",
+                         insert_v=None if velocity is None else velocity)
     print("ALL PASS" if ok else "FAILURES ABOVE")
 
 

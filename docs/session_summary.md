@@ -124,12 +124,29 @@ Goal: make one vectorised MCMC forward step cheap enough for a 30-element SBC
 campaign. Measured on the cluster GPU (22 GiB), full 30-element store,
 `nwalkers=96`, via `scripts/benchmark_inference.py`.
 
-## Result: 1.88x, and the ladder is now closed
+## Result: 2.19x over the production path, and the ladder is now closed
 
-| config | ms/walker | vs previous rung |
-|---|---|---|
-| batched-accel (TF32 + float32 FFT) | 209.1 | — |
-| batched-compile (`compile ∘ vmap`) | 111.3 | **1.88x** |
+Full ladder, 30 elements, 96 walkers, real RMF fold, after the recompile-limit
+fix (bug 4 below); accuracy is vs the float64 reference on bins >= 0.1% of peak:
+
+| config | ms/walker | vs fp64 | vs serial-accel | max rel | p99 |
+|---|---|---|---|---|---|
+| serial-fp64 | 411.7 | 1.00x | 0.60x | reference | — |
+| serial-accel (TF32 + compile + fp32 FFT) | 246.2 | 1.67x | 1.00x | 9.68e-04 | 2.83e-04 |
+| batched-accel (grouped vmap) | 208.6 | 1.97x | 1.18x | 6.24e-04 | 2.35e-04 |
+| batched-compile (`compile ∘ vmap`) | 112.7 | 3.65x | **2.19x** | 6.22e-04 | 2.35e-04 |
+
+**`serial-accel` is the current production path** (`run_cluster.sh`), so 2.19x is
+the real margin for switching production to the batched forward. The grouped
+vmap alone is worth only 1.18x; compiling the grouped GEMMs is what pays. The
+compile step is numerically free (6.24e-04 -> 6.22e-04), and every config sits
+well below the emulator's own ~3e-3 MRE with worst bins at 0.8-1.6% of peak.
+
+Caveat: `serial-accel` was never measured *before* the recompile-limit fix, so
+the fix's contribution is unquantified. Its 1.67x is below the ~3.0x cumulative
+quoted in the methodology report for the same three knobs -- but that figure was
+measured on the hot-floor `EnsembleForward` (store28, single-T, chunk 32), not
+this serial loop, so the two are not directly comparable.
 
 Stage split at B=16: **trunk 95%**, broaden+rebin 2%, lines+combine 2%. Every
 remaining option is therefore Amdahl-bound by the trunk.
@@ -248,13 +265,15 @@ parameter and a prior added to the fitting glue.
 
 ## Recommendation
 
-The forward is done for now: 1.88x banked, every other kernel-level lever closed
-on measurement. At **5.9 h/chain** and **~1170 GPU-h for 200 SBC sims**, the
+The forward is done for now: 2.19x over production banked, every other
+kernel-level lever closed on measurement. At **6.0 h/chain** and **~1200 GPU-h
+for 200 SBC sims**, the
 productive direction is fewer forwards — fewer sims, shorter chains, or better
 sampler efficiency — not a faster one.
 
-**Not yet measured:** `batched-compile` vs `serial-accel` (the current
-production path in `run_cluster.sh`, where the per-element compile *does*
-apply). That is the comparison that decides whether the batched path should
-replace the serial production forward. Also unmeasured: the one-off compile
-stall (`timeit` warms up before timing).
+**Next action:** port the production forward (`EnsembleForward`, used by
+`run_cluster.sh`) from the per-element serial loop onto `BatchedJointForward`
+with `compile_trunk=True` -- measured at 2.19x with no accuracy cost. The
+batched path already supports the per-walker `sigma_v` and `n_h` that
+`EnsembleForward` needs. Still unmeasured: the one-off compile stall (`timeit`
+warms up before timing).

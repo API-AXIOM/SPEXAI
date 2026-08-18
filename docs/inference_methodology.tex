@@ -429,19 +429,32 @@ campaign. Measured on an A10-class GPU with the full 30-element store at 96
 walkers, evaluating the per-element trunks together (grouped \code{vmap} over
 same-shape elements) and then compiling that batched call gives
 \begin{center}
-\begin{tabular}{lrr}
+\begin{tabular}{lrrrr}
 \toprule
-configuration & ms/walker & speedup \\
+configuration & ms/walker & vs.\ fp64 & vs.\ prod. & max.\ rel.\ err. \\
 \midrule
-batched, TF32 + float32 FFT      & 209.1 & --- \\
-\quad + \code{torch.compile} of the batched trunk & 111.3 & $1.88\times$ \\
+serial, float64, no acceleration        & 411.7 & $1.00\times$ & $0.60\times$ & (reference) \\
+serial + TF32 + compile + float32 FFT   & 246.2 & $1.67\times$ & $1.00\times$ & $9.7\times10^{-4}$ \\
+batched (grouped \code{vmap})           & 208.6 & $1.97\times$ & $1.18\times$ & $6.2\times10^{-4}$ \\
+\quad + \code{torch.compile}            & 112.7 & $3.65\times$ & $2.19\times$ & $6.2\times10^{-4}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
-The compile step is a genuine gain rather than a duplicate of the per-element
-compilation applied elsewhere: the batched wrapper deliberately calls the
-unbound \code{forward\_norm} so as to bypass any compiled instance attribute,
-so before this the batched trunk was never compiled at all.
+The second row is the current production configuration, so the batched and
+compiled forward is $2.19\times$ faster than what is deployed, and
+$3.65\times$ faster than the unaccelerated reference. Grouping the element
+trunks is worth only $1.18\times$ on its own; compiling the resulting grouped
+GEMMs is what pays. That compile step is a genuine gain rather than a duplicate
+of the per-element compilation applied elsewhere: the batched wrapper
+deliberately calls the unbound \code{forward\_norm} so as to bypass any compiled
+instance attribute, so before this the batched trunk was never compiled at all.
+
+Accuracy is not traded for any of this. Against the float64 reference, on bins
+carrying at least $0.1\%$ of the peak flux, the deployed accelerations cost
+$9.7\times10^{-4}$ at worst and the batched path $6.2\times10^{-4}$, with $99$th
+percentiles of $2.8$ and $2.4\times10^{-4}$; the compile step changes the result
+by less than one part in $10^{3}$ of the error itself. All of this sits well
+below the emulator's own ${\sim}3\times10^{-3}$ test error.
 
 The forward is strongly dominated by the trunk. A stage breakdown at batch $16$
 gives trunk $95\%$, continuum broadening and rebinning $2\%$, and line

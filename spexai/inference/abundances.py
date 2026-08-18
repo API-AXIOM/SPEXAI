@@ -23,8 +23,21 @@ referenced element's already-resolved value, or absolute when ``ref`` is None).
 """
 from typing import Dict, Iterable, List, Optional
 
+import torch
+
 # elements always held at solar and never managed here (primordial)
 FIXED_SOLAR = {1, 2}
+
+
+def _value(x):
+    """Pass tensors through, coerce everything else to a float.
+
+    A vectorised sampler hands in a ``(B,)`` tensor per parameter -- one value
+    per walker -- and the downstream forward broadcasts it (see
+    ``operator_model.abundance_weight``). ``float()`` would collapse that to a
+    single walker's abundance, silently, so tensors must survive the whole
+    resolution chain: global baseline, free overrides, ratio ties."""
+    return x if torch.is_tensor(x) else float(x)
 
 
 class AbundanceModel:
@@ -83,14 +96,17 @@ class AbundanceModel:
         return names
 
     def to_abundances(self, params: Dict[str, float]) -> Dict[int, float]:
-        """Resolve a flat parameter dict to ``{Z: solar-relative}``."""
-        base = float(params[self._global]) if self._global else 1.0
+        """Resolve a flat parameter dict to ``{Z: solar-relative}``.
+
+        Values may be scalars or ``(B,)`` tensors (one per walker); the two can
+        be mixed, e.g. a sampled Fe against a fixed global metallicity."""
+        base = _value(params[self._global]) if self._global else 1.0
         ab: Dict[int, float] = {z: base for z in self.metals}
         for z, name in self._free.items():                 # absolute overrides
             if z in ab:
-                ab[z] = float(params[name])
+                ab[z] = _value(params[name])
         for zs, name, ref in self._ties:
-            val = float(params[name])
+            val = _value(params[name])
             scale = ab[ref] if ref is not None else 1.0
             for z in zs:
                 if z in ab:
