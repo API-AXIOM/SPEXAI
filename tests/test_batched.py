@@ -8,6 +8,7 @@ absorption code paths. Element set is chosen to exercise a real grouped pass
 a trunk-only element (O has no line head) and a small singleton group (He)."""
 import os
 
+import numpy as np
 import pytest
 import torch
 
@@ -225,6 +226,36 @@ def test_grad_enabled_matches_finite_differences(joint, edges):
         # a central difference can show here
         assert abs(ad - fd) <= tol * max(abs(fd), 1e-30), (
             f"{name}: autodiff {ad:.4e} vs finite-diff {fd:.4e}")
+
+
+def test_gradient_checkpointing_does_not_change_gradients(joint, edges):
+    # checkpointing recomputes activations in backward; the gradients must be
+    # identical, only the memory differs. Two echunk sizes => different numbers
+    # of checkpointed segments, which must not matter.
+    b = joint.batched
+    ab = {26: 1.1}
+    w = torch.rand(edges.numel() - 1, generator=torch.Generator().manual_seed(1))
+
+    def grad_at(echunk):
+        T = torch.tensor([3.0], requires_grad=True)
+        V = torch.tensor([180.0], requires_grad=True)
+        with b.grad_enabled():
+            out = b.flux(T, ab, V, edges, echunk=echunk)
+        (out.squeeze(0) * w).sum().backward()
+        return float(T.grad[0]), float(V.grad[0])
+
+    coarse = grad_at(None)
+    fine = grad_at(2048)
+    assert np.isclose(coarse[0], fine[0], rtol=1e-4), f"{coarse} vs {fine}"
+    assert np.isclose(coarse[1], fine[1], rtol=1e-3), f"{coarse} vs {fine}"
+
+
+def test_checkpointing_only_engages_under_grad(joint, edges):
+    # the no-grad path must not pay the recompute cost
+    b = joint.batched
+    assert not b.track_grad
+    out = b.flux(torch.tensor([3.0]), {26: 1.0}, 150.0, edges)
+    assert not out.requires_grad
 
 
 def test_grad_enabled_restores_previous_setting(joint, edges):

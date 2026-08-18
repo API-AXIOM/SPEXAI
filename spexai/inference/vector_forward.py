@@ -88,7 +88,8 @@ class VectorForward:
                  velocity: Optional[float] = None, fixed: Optional[Dict] = None,
                  n_h_scale: float = 1e21, device: str = "cpu", chunk: int = 32,
                  batched: bool = True, compile_trunk: bool = False,
-                 mem_gb: float = 2.0, exposure: float = 1.0,
+                 mem_gb: float = 2.0, echunk: Optional[int] = None,
+                 exposure: float = 1.0,
                  temp_name: str = "kT", norm_name: str = "log_norm",
                  velocity_name: str = "sigma_v", nh_name: str = "n_h",
                  dem=None):
@@ -109,6 +110,12 @@ class VectorForward:
         self.n_h_scale = float(n_h_scale)
         self.chunk = int(chunk)
         self.mem_gb = float(mem_gb)
+        # Energy-axis chunk. Auto-sized from mem_gb when None, which is right
+        # for the value-only path. Under gradients it is also the checkpoint
+        # segment size, and therefore the main memory lever: the retained graph
+        # scales with one chunk, so halving it roughly halves peak memory at
+        # the cost of a little more recompute.
+        self.echunk = echunk
         self.temp_name = temp_name
         self.norm_name = norm_name
         self.velocity_name = velocity_name
@@ -216,6 +223,7 @@ class VectorForward:
             return self.emu.batched.flux(
                 temps, abund, vel, self.edges_rest, absorption=self.absn,
                 n_h=n_h, redshift=self.z, mem_gb=self.mem_gb,
+                echunk=self.echunk,
                 compile_trunk=self.compile_trunk)                  # (B, M)
         total = None
         for z, model in self.emu.models.items():
@@ -260,6 +268,7 @@ class VectorForward:
             flux = self.emu.batched.flux(
                 temps, abund_f, vel_f, self.edges_rest, absorption=self.absn,
                 n_h=nh_f, redshift=self.z, mem_gb=self.mem_gb,
+                echunk=self.echunk,
                 compile_trunk=self.compile_trunk)              # (B*G, M)
         else:
             flux = None

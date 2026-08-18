@@ -230,8 +230,19 @@ class BatchedJointForward:
         The trunk is evaluated on every native energy point. Subsampling it and
         interpolating back was measured and rejected -- the trunk is not a smooth
         continuum, it carries the metals' line structure (see
-        docs/session_summary.md), so even stride 2 costs ~44% in flux."""
+        docs/session_summary.md), so even stride 2 costs ~44% in flux.
+
+        **Under ``grad_enabled`` each energy chunk is gradient-checkpointed.**
+        Chunking alone bounds *forward* memory but not the autograd graph: every
+        chunk's activations are kept alive for backward, so the graph grows as
+        ``N_elements x B x P x hidden x n_layers`` regardless of ``echunk`` --
+        ~40 GB for 28 elements at 8 particles, which no device will hold.
+        Checkpointing stores only each chunk's inputs and recomputes its
+        activations during backward, trading roughly one extra forward for a
+        graph that scales with one chunk instead of all of them. Without it,
+        gradient-based sampling is simply not runnable at production scale."""
         B, P, x = temp_kev.numel(), self._P, self._x
+        use_ckpt = self.track_grad and torch.is_grad_enabled()
         dens, zs = [], []
         for g in self.groups:
             gd = []
@@ -239,7 +250,15 @@ class BatchedJointForward:
                 hi = min(lo + echunk, P)
                 xb = x[:, lo:hi].expand(B, -1, -1)              # (B, chunk, 1)
                 bins = torch.arange(lo, hi, device=self.device)
-                gd.append(g.log_density(temp_kev, xb, bins, compile_trunk))
+                if use_ckpt:
+                    # use_reentrant=False: the reentrant variant needs an input
+                    # that requires grad, and temp_kev may not when only the
+                    # abundances are being differentiated
+                    gd.append(torch.utils.checkpoint.checkpoint(
+                        g.log_density, temp_kev, xb, bins, compile_trunk,
+                        use_reentrant=False))
+                else:
+                    gd.append(g.log_density(temp_kev, xb, bins, compile_trunk))
             dens.append(torch.pow(10.0, torch.cat(gd, dim=2)))  # (E, B, P)
             zs += g.zs
         return torch.cat(dens, dim=0), zs                        # (N, B, P)

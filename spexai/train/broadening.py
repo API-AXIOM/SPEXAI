@@ -212,7 +212,10 @@ def deposit_gaussian_lines(line_energies, line_flux, bin_edges, velocity,
 
     if v.numel() == 1:                       # ---- shared window (scalar) ----
         out = torch.zeros(B, M, dtype=torch.float64, device=dev)
-        sigma = line_energies.double() * (v.item() / C_KMS)          # (N,)
+        # v is (1,) here, so this broadcasts to (N,) exactly as v.item() did --
+        # but without detaching, which would silently zero d(flux)/d(sigma_v)
+        # for every gradient-based sampler.
+        sigma = line_energies.double() * (v / C_KMS)                 # (N,)
         for s in range(0, N, chunk):
             en = line_energies[s:s + chunk].double()
             sg = sigma[s:s + chunk].clamp(min=1e-12)
