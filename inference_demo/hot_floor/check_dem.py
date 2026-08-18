@@ -11,14 +11,14 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import json
 
-from experiment import STORE28, DATADIR, gaussian_dem                 # noqa: E402
+from experiment import STORE, DATADIR, gaussian_dem                 # noqa: E402
 from spexai.inference.spex_truth import ElementTruth                  # noqa: E402
 
 dem, _ = gaussian_dem()
 grid = dem.temp_grid.numpy()
 print(f"DEM grid: {grid.min():.4f}..{grid.max():.3f} keV, n={grid.size}")
 
-manifest = json.load(open(os.path.join(STORE28, "manifest.json")))
+manifest = json.load(open(os.path.join(STORE, "manifest.json")))
 for zstr in sorted(manifest["elements"], key=int):
     z = int(zstr)
     cache = os.path.join(DATADIR, f"element{z}")

@@ -29,7 +29,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
-    PERSEUS, STORE28, FREE_Z, HOT_SCIENCE, HOT_WEAK, injected_abundances,
+    PERSEUS, STORE, FREE_Z, HOT_SCIENCE, HOT_WEAK, injected_abundances,
     find_xrism_response, band_mask, TruthConfig, stream_truth_counts,
     gaussian_dem)
 from spexai.inference.response import Response               # noqa: E402
@@ -227,7 +227,7 @@ def main():
     response = Response(rmf, arf)
     absorption = Absorption.default()
     keep = band_mask(response)
-    emu = JointOperatorModel(models_dir=STORE28, device="cpu")
+    emu = JointOperatorModel(models_dir=STORE, device="cpu")
     print(f"emulator elements: {emu.elements}")
     dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
 

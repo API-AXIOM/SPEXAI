@@ -46,7 +46,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
 
 from experiment import (                                          # noqa: E402
-    PERSEUS, STORE28, FREE_Z, injected_abundances, find_xrism_response,
+    PERSEUS, STORE, FREE_Z, injected_abundances, find_xrism_response,
     band_mask)
 from fisher_bias import SYMBOL, build_params                      # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
@@ -80,6 +80,22 @@ def build_problem(args):
             f"response/band gives {int(keep.sum())}. Regenerate it with "
             f"dump_truth.py against THIS store and response -- a truth built "
             f"for the 28-element store is not valid for a 30-element one.")
+    # the element set matters as much as the channel count: a 28-element truth
+    # has the identical channel grid, so only this catches a stale one
+    if "elements" in tz:
+        truth_els = [int(z) for z in tz["elements"]]
+        if truth_els != list(emu.elements):
+            missing = sorted(set(emu.elements) - set(truth_els))
+            raise SystemExit(
+                f"truth npz was built from {len(truth_els)} elements but the "
+                f"store has {len(emu.elements)} (missing from truth: "
+                f"{missing}). Regenerate it against THIS store:\n"
+                f"  SPEXAI_STORE={args.store} python -u "
+                f"inference_demo/hot_floor/dump_truth.py --mode single")
+    else:
+        print("WARNING: truth npz predates element-set recording; it may have "
+              "been built from a different store. Regenerate to be sure.",
+              flush=True)
     d_inband, norm_ref = tz["d_inband"], float(tz["norm_ref"])
     scale = args.counts / d_inband.sum()
     mu_true = d_inband * scale

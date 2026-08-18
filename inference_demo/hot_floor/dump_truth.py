@@ -17,7 +17,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
-    PERSEUS, STORE28, injected_abundances, find_xrism_response, band_mask,
+    PERSEUS, STORE, injected_abundances, find_xrism_response, band_mask,
     TruthConfig, stream_truth_counts, gaussian_dem)
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
@@ -42,7 +42,7 @@ def main():
     response = Response(rmf, arf)
     absorption = Absorption.default()
     keep = band_mask(response)
-    emu = JointOperatorModel(models_dir=STORE28, device="cpu")   # for element set
+    emu = JointOperatorModel(models_dir=STORE, device="cpu")   # for element set
     dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
 
     ab = injected_abundances(emu.elements)
@@ -52,8 +52,14 @@ def main():
     d_inband = d_ref[keep]
     suffix = f"_{args.tag}" if args.tag else ""
     outp = os.path.join(args.out, f"truth_{args.mode}{suffix}.npz")
+    # record the element set, not just the channel count: a truth built from a
+    # 28-element store has the same number of channels as a 30-element one, so
+    # without this a stale truth passes every shape check and silently biases
+    # the whole campaign
     np.savez(outp, d_inband=d_inband, norm_ref=cfg.norm_ref,
              n_channels=len(keep), n_keep=int(keep.sum()),
+             elements=np.asarray(emu.elements, dtype=np.int64),
+             store=os.path.abspath(STORE),
              kT=PERSEUS["kT"], sigma_v=PERSEUS["vel"], mode=args.mode)
     print(f"in-band counts at norm_ref={cfg.norm_ref:.1e}: {d_inband.sum():.3e} "
           f"over {len(d_inband)} channels\nsaved {outp}")

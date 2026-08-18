@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from experiment import PERSEUS, STORE28, find_xrism_response, band_mask  # noqa: E402
+from experiment import PERSEUS, STORE, find_xrism_response, band_mask  # noqa: E402
 from fisher_bias import FREE_Z, SYMBOL, build_params, Forward             # noqa: E402
 from spexai.inference.operator_model import (                             # noqa: E402
     JointOperatorModel, element_broadened_flux, ensure_recompile_limit)
@@ -220,7 +220,7 @@ def _validate():
     response = Response(rmf, arf)
     absorption = Absorption.default()
     keep = band_mask(response)
-    emu = JointOperatorModel(models_dir=STORE28, device="cpu")
+    emu = JointOperatorModel(models_dir=STORE, device="cpu")
     ser = Forward(emu, response, absorption, keep, "single")       # has sigma_v
 
     ok = True

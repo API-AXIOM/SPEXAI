@@ -32,8 +32,12 @@ from spexai.inference import tempdist as td
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Paths are overridable by environment variable for cluster deployment.
-STORE28 = os.environ.get(
-    "SPEXAI_STORE", os.path.join(REPO, "inference_demo", "hot_floor", "store28"))
+# The package model store (all 30 elements) is the default. It used to be the
+# 28-element `inference_demo/hot_floor/store28`, which lacks Cl (17) and Sc
+# (21); that store's files are byte-identical to their counterparts here, so it
+# is a strict subset kept only as provenance for the completed hot-floor
+# results. Override with SPEXAI_STORE to reproduce those.
+STORE = os.environ.get("SPEXAI_STORE", os.path.join(REPO, "spexai", "models"))
 DATADIR = os.environ.get(
     "SPEXAI_PROCESSED", os.path.expanduser("~/data/spexai_data/processed"))
 RESP_DIR = os.environ.get(
@@ -129,7 +133,7 @@ def gaussian_dem(mean=None, sigma=None, lo=0.7, hi=10.0, n=48):
 
 
 def stream_truth_counts(cfg: TruthConfig, response, absorption,
-                        store=STORE28, datadir=DATADIR, device="cpu",
+                        store=STORE, datadir=DATADIR, device="cpu",
                         verbose=False) -> np.ndarray:
     """Noise-free channel counts for ``cfg``, summed one element at a time.
 
@@ -193,7 +197,7 @@ def _smoke():
     print(f"truth total counts (norm_ref, full band): {mu.sum():.3e}; "
           f"in-band: {mu[keep].sum():.3e}")
 
-    emu = JointOperatorModel(models_dir=STORE28, device="cpu", elements=els)
+    emu = JointOperatorModel(models_dir=STORE, device="cpu", elements=els)
     logz = float(np.log10(PERSEUS["z"]))
     ce = emu.predict_counts(
         torch.tensor([PERSEUS["kT"]]), ab, logz, cfg.norm_ref, PERSEUS["vel"],

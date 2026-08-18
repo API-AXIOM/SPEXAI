@@ -16,7 +16,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from experiment import (STORE28, find_xrism_response, band_mask,          # noqa: E402
+from experiment import (STORE, find_xrism_response, band_mask,          # noqa: E402
                         PERSEUS)
 from gpu_forward import EnsembleForward                                    # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel             # noqa: E402
@@ -40,7 +40,7 @@ def main():
     absn = Absorption.default()
     # accelerate=False: deterministic (seed=0) reference reconstruction, kept
     # on the unaccelerated float64 path for exact reproducibility.
-    emu = JointOperatorModel(models_dir=STORE28, device=args.device,
+    emu = JointOperatorModel(models_dir=STORE, device=args.device,
                              accelerate=False)
     ens = EnsembleForward(emu, response, absn, keep, "single", PERSEUS["vel"],
                           args.device)

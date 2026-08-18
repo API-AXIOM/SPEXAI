@@ -25,7 +25,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
-    PERSEUS, STORE28, find_xrism_response, band_mask,
+    PERSEUS, STORE, find_xrism_response, band_mask,
     TruthConfig, stream_truth_counts, gaussian_dem)
 from fisher_bias import Forward, build_params, N_REF        # noqa: E402
 from spexai.inference.response import Response               # noqa: E402
@@ -229,7 +229,7 @@ def main():
     # accelerate=False: this cross-check drives the accel knobs itself
     # (--tf32/--compile/--fft32, and the vectorized EnsembleForward compile) so
     # ACCEL="" gives a genuine float64 reference; the model must not auto-enable.
-    emu = JointOperatorModel(models_dir=STORE28, device=args.device,
+    emu = JointOperatorModel(models_dir=STORE, device=args.device,
                              accelerate=False)
     dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
 
@@ -242,6 +242,16 @@ def main():
         tz = np.load(args.truth_npz)
         assert int(tz["n_keep"]) == int(keep.sum()), (
             "truth npz was built with a different response/band")
+        # element set too: a 28-element truth has the identical channel grid,
+        # so the check above cannot tell it from a 30-element one
+        if "elements" in tz:
+            assert [int(z) for z in tz["elements"]] == list(emu.elements), (
+                f"truth npz has {len(tz['elements'])} elements but the store "
+                f"has {len(emu.elements)}; regenerate with dump_truth.py "
+                f"against this store")
+        else:
+            print("WARNING: truth npz predates element-set recording; "
+                  "regenerate it to be sure it matches this store", flush=True)
         d_inband, norm_ref = tz["d_inband"], float(tz["norm_ref"])
     else:                                                # local path: stream truth
         from experiment import injected_abundances
