@@ -65,6 +65,13 @@ SAMPLERS = ("emcee", "zeus", "ultranest", "nautilus", "pocomc", "inessai",
 # quantity and a reader will otherwise compare them as if they were
 WEIGHTED = {"nautilus", "pocomc", "inessai"}
 
+# samplers whose ESS is fixed by construction rather than measured. VI draws
+# are iid by definition, so run_svi sets ESS = n_posterior and ESS/eval is then
+# just n_posterior/evals -- an artefact of two settings, not a mixing result.
+# Left in the table because the wall-clock and recovery columns are real, but
+# it must never be read as "31x better than nested sampling".
+BY_CONSTRUCTION = {"svi"}
+
 
 # --- problem -----------------------------------------------------------------
 
@@ -206,7 +213,10 @@ def run_sampler(name, post, pars, names, args):
     if name == "svi":
         return samplers.run_svi(_model_for(post, names), steps=args.svi_steps,
                                 num_particles=args.svi_particles,
-                                lr=args.svi_lr, seed=args.seed)
+                                lr=args.svi_lr, seed=args.seed,
+                                guide=args.svi_guide,
+                                guide_transforms=args.svi_transforms,
+                                particle_chunk=args.svi_particle_chunk)
     raise SystemExit(f"unknown sampler {name!r}; choose from {SAMPLERS}")
 
 
@@ -244,11 +254,16 @@ def summarise(outdir, reference="emcee"):
         print(f"{name:>10} {float(z['runtime_s']):>10.1f} "
               f"{int(z['n_eval']):>12d} {m:>9.0f} {per:>10.2e} "
               f"{('%.2f' % lz) if np.isfinite(lz) else '-':>12}"
-              f"{'  *' if name in WEIGHTED else ''}")
+              f"{'  *' if name in WEIGHTED else '  !' if name in BY_CONSTRUCTION else ''}")
     if any(n in WEIGHTED for n in got):
         print("  * minESS is a Kish effective size over importance weights, "
               "not a draw count.\n    Comparable to the others as an ESS, but "
               "the raw sample array is larger.")
+    if any(n in BY_CONSTRUCTION for n in got):
+        print("  ! minESS is FIXED BY CONSTRUCTION (n_posterior), not "
+              "measured. ESS/eval for this\n    row is an artefact of the "
+              "settings and is NOT comparable -- judge it on the recovery\n"
+              "    and agreement tables instead.")
     print("  Read ESS/eval with wall-clock: the ensembles amortise a batch "
           "into each\n  forward, NUTS evaluates one point per gradient.")
 
@@ -351,6 +366,17 @@ def main():
     ap.add_argument("--svi_steps", type=int, default=2000)
     ap.add_argument("--svi_particles", type=int, default=64)
     ap.add_argument("--svi_lr", type=float, default=1e-2)
+    ap.add_argument("--svi_guide", default="mvn",
+                    choices=["mvn", "iaf", "lowrank", "normal"],
+                    help="variational family: mvn = full-rank Gaussian "
+                         "(default), iaf = normalizing flow, normal = "
+                         "mean-field control")
+    ap.add_argument("--svi_transforms", type=int, default=2,
+                    help="IAF only: number of autoregressive transforms")
+    ap.add_argument("--svi_particle_chunk", type=int, default=0,
+                    help="particles per backward pass (0 = all at once). "
+                         "THE fix for SVI OOM: memory scales with this, "
+                         "gradient quality with --svi_particles")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny budgets, just to prove the wiring runs")
     args = ap.parse_args()

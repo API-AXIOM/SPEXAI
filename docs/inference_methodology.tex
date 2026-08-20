@@ -744,6 +744,102 @@ failing to feed it. We therefore treat the forward as converged at
 $1.88\times$, and note that at ${\sim}5.9\,$h per chain the productive direction
 for a calibration campaign is fewer forward evaluations, not faster ones.
 
+\section{Sampler comparison}\label{sec:bakeoff}
+Because the forward dominates the cost of every algorithm
+(Sec.~\ref{sec:forwardcost}), the choice of sampler decides whether a
+calibration campaign is affordable at all. We therefore fit the \emph{same}
+simulated Perseus spectrum ($10^{6}$ in-band counts, 12 free parameters, the
+literature modelling strategy of Sec.~\ref{sec:hotfloor}) with each sampler over
+an identical \code{PoissonPosterior}, so that what is compared is the algorithm
+and nothing else. Code: \code{scripts/bake\_off.py}.
+
+\paragraph{Results.} Table~\ref{tab:bakeoff} gives the state of the comparison.
+\emph{These are partial: NUTS and the flow-accelerated samplers
+(\code{nautilus}, \code{pocoMC}, \code{i-nessai}) are outstanding, and the
+variational row is being re-run (see below).}
+
+\begin{table}[t]
+\centering
+\caption{Sampler comparison on one $10^{6}$-count Perseus spectrum, 12 free
+parameters, on an A10-class GPU. ``Evals'' counts walkers pushed through the
+emulator. Agreement is against the \code{emcee} chain.}
+\label{tab:bakeoff}
+\begin{tabular}{lrrrrrl}
+\toprule
+sampler & wall (h) & evals & min ESS & ESS/eval & ms/eval & agreement \\
+\midrule
+\code{emcee}     &  1.65 &  51\,020 &  144 & $2.8\times10^{-3}$ & 117 & (reference) \\
+\code{zeus}      &  5.38 &  70\,800 &  194 & $2.7\times10^{-3}$ & 274 & $0.21\sigma$, width $1.04$--$1.24$ \\
+\code{UltraNest} & 10.83 & 218\,711 & 3507 & $1.6\times10^{-2}$ & 178 & $0.14\sigma$, width $0.94$--$1.11$ \\
+\code{SVI}       &  1.25 &   8\,006 & 4000\rlap{$^\dagger$} & --\rlap{$^\dagger$} & 564 & $2.57\sigma$, width $0.43$--$2.96$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{ESS per evaluation is not the whole story.} Two rows of
+Table~\ref{tab:bakeoff} must not be read as they stand. $^\dagger$A variational
+posterior is independent by construction, so its ``ESS'' is simply the number of
+draws requested and its ESS/eval is an artefact of two settings rather than a
+measurement; the variational row is judged on recovery and agreement only.
+Separately, the importance-based samplers report a Kish effective size over
+their weights, which \emph{is} comparable as an ESS but corresponds to a much
+larger raw sample array. More fundamentally, ESS/eval and wall-clock measure
+different things here: the ensemble samplers amortise a whole batch of walkers
+into each forward, so their per-evaluation cost is the batched
+$112$--$131\,$ms/walker of Sec.~\ref{sec:forwardcost}, whereas a single-point
+sampler pays ${\sim}4\times$ that for a $B{=}1$ forward. A method can therefore
+need far fewer evaluations and still lose badly on wall-clock; that is a fact
+about batching, not about mixing.
+
+\paragraph{UltraNest is the most efficient, but not the cheapest.} Nested
+sampling delivers $5.7\times$ more effective samples per evaluation than
+\code{emcee} and $3.7\times$ more per wall-clock second, and it is the only
+sampler here that returns $\log Z$. Its cost is nonetheless irreducible: it runs
+to an evidence tolerance rather than a step count, so it cannot be asked for
+fewer draws. It produced ESS $3507$ where simulation-based calibration needs
+only ${\sim}100$, at $10.8\,$h. For a campaign of many fits \code{emcee}
+remains the economical choice ($1.65\,$h per posterior) with UltraNest as the
+reference; the information gain from prior to posterior here is ${\sim}44$ nats,
+which sets the nested-sampling iteration count.
+
+\paragraph{Slice sampling is defeated by the hardware, not the algorithm.}
+\code{zeus} needs only ${\sim}5.5$ evaluations per walker per iteration -- its
+mixing is as advertised -- but its vectorised implementation hands the sampler a
+\emph{shrinking} active subset as walkers accept, so the tail of every iteration
+runs at $B{=}8,4,2$ where the GPU is idle. Its effective cost is
+$274\,$ms/eval against \code{emcee}'s $117$. Combined with posteriors $4$--$24\%$
+wider, it is dominated on every axis.
+
+\paragraph{Variational inference is fast and wrong.} SVI was the quickest
+($1.25\,$h) and eleven of its twelve parameters look healthy (pulls of mean
+$+0.18$, standard deviation $1.10$, indistinguishable from \code{emcee}'s
+$-0.17$, $1.00$). The exception is decisive: $\nh$ is recovered $8\sigma$ from
+the truth \emph{in its own units}, which decomposes into a $2.6\sigma$ offset
+combined with a posterior $0.43\times$ too narrow. Across parameters the widths
+range from $0.43$ to $2.96$ times the reference, so no global rescaling repairs
+them. This is the characteristic failure of a Gaussian variational family
+against a posterior with a strong degeneracy, and it is the dangerous kind:
+confidently wrong error bars on one parameter, with nothing anomalous elsewhere.
+We note the run used only $4$ ELBO particles (a memory-driven choice, not an
+accuracy-driven one) and is being repeated with more, so we do not yet
+distinguish an intrinsic limitation of the variational family from an
+under-converged optimisation.
+
+\paragraph{Recovery is consistent across samplers, and consistent with noise.}
+All three sampling methods agree on the same parameter offsets --
+$\mathrm{Ar}$ at ${\sim}-2\sigma$, $\mathrm{Ca}$ at ${\sim}+1.4\sigma$ -- and
+agree with each other to $0.21\sigma$ (zeus) and $0.14\sigma$ (UltraNest). Those
+offsets are therefore a property of the simulated data, not of the samplers. They
+are also fully consistent with counting noise: across the 12 parameters the
+\code{emcee} pulls have mean $-0.23$ and standard deviation $0.98$ against
+expectations of $0\pm0.29$ and $1$, giving $\chi^{2}=11.1$ for 12 degrees of
+freedom ($p=0.52$). The Fisher estimator of Sec.~\ref{sec:fisherbias} predicts a
+maximum emulator-induced bias of $0.23\sigma$ at this exposure, twenty times
+smaller than the largest observed pull. A single fit therefore cannot measure
+emulator bias, which is precisely the argument for the sweep of
+Sec.~\ref{sec:biassweep} and for calibration over many realisations rather than
+one showcase.
+
 
 \begin{thebibliography}{9}
 \bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\

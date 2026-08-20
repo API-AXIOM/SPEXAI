@@ -127,9 +127,45 @@ def test_pocomc_recovers_truth():
 def test_inessai_recovers_truth(tmp_path):
     pytest.importorskip("nessai")
     post = _problem()
-    res = samplers.run_inessai(post, nlive=500, seed=0,
+    res = samplers.run_inessai(post, nlive=500, seed=0, target_ess=1000.0,
                                output=str(tmp_path / "inessai"))
     _check(res, post, "inessai")
+    assert res.min_ess > 500, "i-nessai should reach its target ESS"
+
+
+def test_inessai_default_criterion_does_not_collapse(tmp_path):
+    """Regression for the weight collapse.
+
+    nessai's default ``stopping_criterion="ratio"`` with ``tolerance=0.0``
+    stops once log(Z_live/Z_all) <= 0, which for a peaked likelihood happens
+    within a couple of iterations. The run then returned a weighted set whose
+    Kish ESS was exactly 1.0 -- one point carrying all the weight -- while
+    still looking superficially fine, because the raw point cloud was not
+    degenerate. This pins the fixed default.
+    """
+    pytest.importorskip("nessai")
+    post = _problem()
+    res = samplers.run_inessai(post, nlive=500, seed=0, target_ess=1000.0,
+                               output=str(tmp_path / "inessai_def"))
+    assert res.extra["kish_ess"] > 100, (
+        f"weights collapsed: Kish ESS {res.extra['kish_ess']:.2f}")
+    # the distinct failure signature was a single surviving draw
+    assert len(np.unique(res.samples, axis=0)) > 50
+
+
+def test_inessai_agrees_with_ultranest(tmp_path):
+    """Same cross-check nautilus gets: disagreement means wiring, not
+    algorithm."""
+    pytest.importorskip("nessai")
+    pytest.importorskip("ultranest")
+    post = _problem()
+    ref = samplers.run_ultranest(post, min_num_live_points=200)
+    ine = samplers.run_inessai(post, nlive=500, seed=0, target_ess=1000.0,
+                               output=str(tmp_path / "inessai_x"))
+    shift = np.abs(ine.median - ref.median) / ref.sigma
+    assert shift.max() < 0.5, f"i-nessai vs ultranest shift {shift} sigma"
+    width = ine.sigma / ref.sigma
+    assert np.all((width > 0.6) & (width < 1.6)), f"width ratio {width}"
 
 
 def test_flow_samplers_agree_with_ultranest():

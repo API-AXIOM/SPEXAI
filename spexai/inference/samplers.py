@@ -523,8 +523,39 @@ def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
 
 # --- variational -------------------------------------------------------------
 
+def make_guide(name, model, hidden_dim=None, num_transforms=2, rank=None):
+    """Named variational family -> a Pyro autoguide.
+
+    ``mvn`` (full-rank Gaussian) is the default and can represent a linear
+    degeneracy but nothing beyond it. ``iaf`` is a normalizing flow (inverse
+    autoregressive), the escalation when a Gaussian family is not enough --
+    which is the live question here, since the full-rank guide recovered
+    ``n_h`` 8 sigma from truth with a posterior 0.43x too narrow while eleven
+    other parameters looked healthy. ``normal`` is mean-field and is included
+    only as a deliberate control: it cannot represent correlation at all, so it
+    brackets how much of the error is the family and how much the optimisation.
+    """
+    from pyro.infer import autoguide as ag
+    name = (name or "mvn").lower()
+    if name in ("mvn", "full_rank", "multivariate"):
+        return ag.AutoMultivariateNormal(model)
+    if name in ("iaf", "flow", "normalizing_flow"):
+        # hidden_dim defaults to ~2x latent dim inside Pyro; num_transforms > 1
+        # is what buys non-Gaussian shape
+        return ag.AutoIAFNormal(model, hidden_dim=hidden_dim,
+                                num_transforms=num_transforms)
+    if name in ("lowrank", "low_rank"):
+        return ag.AutoLowRankMultivariateNormal(model, rank=rank)
+    if name in ("normal", "meanfield", "diagonal"):
+        return ag.AutoNormal(model)
+    raise ValueError(f"unknown guide {name!r}; choose from "
+                     f"mvn, iaf, lowrank, normal")
+
+
 def run_svi(model, steps=2000, num_particles=64, lr=1e-2, seed=0,
-            n_posterior=4000, guide=None, progress_every=None) -> SamplerResult:
+            n_posterior=4000, guide=None, progress_every=None,
+            guide_hidden=None, guide_transforms=2,
+            particle_chunk=None) -> SamplerResult:
     """Full-rank Gaussian variational inference on a :class:`SpectrumModel`.
 
     Full-rank rather than mean-field deliberately: this posterior has a known
@@ -535,7 +566,22 @@ def run_svi(model, steps=2000, num_particles=64, lr=1e-2, seed=0,
 
     ``num_particles`` with ``vectorize_particles=True`` is the batch dimension
     of the forward, so a VI step costs one batched forward, not ``num_particles``
-    of them."""
+    of them.
+
+    **``particle_chunk`` decouples memory from particle count.** That same
+    batching is why VI OOMs: peak memory scales linearly with
+    ``num_particles``, and ``echunk`` cannot help because it bounds the trunk's
+    activations, not the number of particles held at once. Lowering
+    ``num_particles`` to fit is the wrong trade -- it degrades the ELBO
+    gradient estimate, and a noisy gradient is the leading suspect for a
+    variational posterior that lands in the wrong place. Instead this splits
+    the particles into sub-batches, calls backward on each, and accumulates
+    into the same ``.grad`` before stepping. Since Pyro's ``Trace_ELBO``
+    averages over particles, each chunk is weighted by its share, so the
+    accumulated gradient is *identical in expectation* to the unchunked one --
+    memory scales with ``particle_chunk``, statistical quality with
+    ``num_particles``. The cost is one extra kernel launch sequence per chunk,
+    which is negligible against the forward."""
     import pyro
     import torch
     from pyro.infer import Trace_ELBO
@@ -543,21 +589,44 @@ def run_svi(model, steps=2000, num_particles=64, lr=1e-2, seed=0,
 
     pyro.set_rng_seed(seed)
     pyro.clear_param_store()
-    guide = guide if guide is not None else AutoMultivariateNormal(model)
-    elbo = Trace_ELBO(num_particles=num_particles, vectorize_particles=True)
+    if guide is None:
+        guide = AutoMultivariateNormal(model)
+    elif isinstance(guide, str):
+        guide = make_guide(guide, model, hidden_dim=guide_hidden,
+                           num_transforms=guide_transforms)
+    # particle sub-batches: sizes sum to num_particles, each weighted by its
+    # share so the accumulated gradient matches the unchunked one
+    pc = int(particle_chunk or num_particles)
+    pc = max(1, min(pc, num_particles))
+    chunks = [pc] * (num_particles // pc)
+    if num_particles % pc:
+        chunks.append(num_particles % pc)
+    elbos = {n: Trace_ELBO(num_particles=n, vectorize_particles=True)
+             for n in set(chunks)}
+    if len(chunks) > 1:
+        print(f"  svi: {num_particles} particles in {len(chunks)} chunks of "
+              f"<= {pc} (memory scales with the chunk, gradient quality with "
+              f"the total)", flush=True)
+
     model.n_eval = 0
     every = progress_every or max(1, steps // 20)
 
     t0 = time.time()
-    loss = elbo.differentiable_loss(model, guide)      # one-off: builds params
+    # one-off: instantiates the guide's parameters before the optimiser sees them
+    elbos[chunks[0]].differentiable_loss(model, guide)
     opt = torch.optim.Adam(guide.parameters(), lr=lr)
     losses = []
     for i in range(steps):
         opt.zero_grad()
-        loss = elbo.differentiable_loss(model, guide)
-        loss.backward()
+        total = 0.0
+        for n in chunks:
+            # weight by share: Trace_ELBO averages over its particles, so
+            # sum_c (n_c/P) * ELBO_c == ELBO over all P particles
+            loss = elbos[n].differentiable_loss(model, guide) * (n / num_particles)
+            loss.backward()                # accumulates into guide.grad
+            total += float(loss.detach())
         opt.step()
-        losses.append(float(loss.detach()))
+        losses.append(total)
         if i == 0 or (i + 1) % every == 0:
             el = time.time() - t0
             print(f"  svi step {i+1}/{steps}  ELBO {-losses[-1]:.4g}  "

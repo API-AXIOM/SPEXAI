@@ -177,3 +177,107 @@ def test_nuts_init_values_actually_move_the_chain_start():
                            max_tree_depth=1, init_values=[3.8, 1.8], seed=0)
     assert np.abs(hi.samples[0] - lo.samples[0]).max() > 0.5, (
         f"init_values appears ignored: {lo.samples[0]} vs {hi.samples[0]}")
+
+
+# --- variational guide families ---------------------------------------------
+
+@pytest.mark.parametrize("guide", ["mvn", "iaf", "lowrank", "normal"])
+def test_svi_guide_families_run_vectorised(guide):
+    """Every guide must work with vectorize_particles=True -- that is what
+    makes an SVI step cost ONE batched forward instead of num_particles of
+    them. A guide that silently breaks it would look merely slow."""
+    pytest.importorskip("pyro")
+    from spexai.inference import samplers
+    res = samplers.run_svi(_tiny_model(), steps=30, num_particles=8,
+                           guide=guide, n_posterior=200, seed=0,
+                           progress_every=10 ** 9)
+    assert res.samples.shape == (200, 2)
+    assert np.isfinite(res.samples).all()
+    assert np.all(res.sigma > 0), f"{guide} collapsed to a point mass"
+    assert np.isfinite(res.extra["final_elbo"])
+
+
+def test_make_guide_rejects_unknown_name():
+    pytest.importorskip("pyro")
+    from spexai.inference import samplers
+    with pytest.raises(ValueError, match="unknown guide"):
+        samplers.make_guide("wishful", _tiny_model())
+
+
+def test_svi_accepts_a_guide_object_not_just_a_name():
+    pytest.importorskip("pyro")
+    from pyro.infer.autoguide import AutoNormal
+    from spexai.inference import samplers
+    model = _tiny_model()
+    res = samplers.run_svi(model, steps=20, num_particles=4,
+                           guide=AutoNormal(model), n_posterior=100, seed=0,
+                           progress_every=10 ** 9)
+    assert np.isfinite(res.samples).all()
+
+
+# --- SVI particle chunking (the OOM fix) ------------------------------------
+
+def _grad_after_one_step(num_particles, particle_chunk, seed=0):
+    """Gradient of the guide parameters after a single accumulated step."""
+    import pyro
+    import torch
+    from pyro.infer import Trace_ELBO
+    from pyro.infer.autoguide import AutoMultivariateNormal
+    from spexai.inference import samplers
+
+    pyro.set_rng_seed(seed)
+    pyro.clear_param_store()
+    model = _tiny_model()
+    guide = AutoMultivariateNormal(model)
+    pc = particle_chunk or num_particles
+    chunks = [pc] * (num_particles // pc)
+    if num_particles % pc:
+        chunks.append(num_particles % pc)
+    elbos = {n: Trace_ELBO(num_particles=n, vectorize_particles=True)
+             for n in set(chunks)}
+    elbos[chunks[0]].differentiable_loss(model, guide)   # build params
+    for p in guide.parameters():
+        p.grad = None
+    pyro.set_rng_seed(seed)                              # same randomness
+    for n in chunks:
+        (elbos[n].differentiable_loss(model, guide) * (n / num_particles)
+         ).backward()
+    return torch.cat([p.grad.reshape(-1) for p in guide.parameters()])
+
+
+def test_particle_chunking_matches_unchunked_gradient():
+    """The correctness claim behind the OOM fix.
+
+    Chunking must change only memory, never the gradient. Pyro's Trace_ELBO
+    averages over its particles, so each chunk is weighted by its share; get
+    that weighting wrong and the optimiser silently takes wrong-sized steps
+    with nothing in the loss curve to show it. Monte-Carlo noise means these
+    are close rather than identical, so the check is on relative agreement.
+    """
+    full = _grad_after_one_step(16, None)
+    chunked = _grad_after_one_step(16, 4)
+    denom = max(float(full.norm()), 1e-12)
+    rel = float((chunked - full).norm()) / denom
+    assert rel < 0.5, f"chunked gradient differs by {rel:.3f} relative"
+    # and the direction must agree
+    cos = float((full @ chunked) / (full.norm() * chunked.norm() + 1e-12))
+    assert cos > 0.8, f"gradient direction disagrees, cos={cos:.3f}"
+
+
+def test_uneven_particle_chunks_are_handled():
+    """num_particles not divisible by the chunk: the remainder must still be
+    weighted by its own share, not by a full chunk's."""
+    from spexai.inference import samplers
+    res = samplers.run_svi(_tiny_model(), steps=5, num_particles=7,
+                           particle_chunk=3, n_posterior=50, seed=0,
+                           progress_every=10 ** 9)
+    assert np.isfinite(res.samples).all()
+    assert np.isfinite(res.extra["final_elbo"])
+
+
+def test_particle_chunk_larger_than_total_is_clamped():
+    from spexai.inference import samplers
+    res = samplers.run_svi(_tiny_model(), steps=3, num_particles=4,
+                           particle_chunk=99, n_posterior=50, seed=0,
+                           progress_every=10 ** 9)
+    assert np.isfinite(res.samples).all()
