@@ -63,7 +63,7 @@ SAMPLERS = ("emcee", "zeus", "ultranest", "nautilus", "pocomc", "inessai",
 # samplers whose ESS is a Kish effective size over importance weights rather
 # than a draw count -- flagged in the table because the two are not the same
 # quantity and a reader will otherwise compare them as if they were
-WEIGHTED = {"nautilus", "pocomc"}
+WEIGHTED = {"nautilus", "pocomc", "inessai"}
 
 
 # --- problem -----------------------------------------------------------------
@@ -188,13 +188,21 @@ def run_sampler(name, post, pars, names, args):
                                    save_every=10, progress=True)
     if name == "inessai":
         return samplers.run_inessai(post, nlive=args.n_live, seed=args.seed,
+                                    target_ess=args.target_ess,
                                     output=os.path.join(args.out, "inessai"),
                                     resume=args.resume)
     if name == "nuts":
+        # init_values=center puts NUTS on the same footing as every other
+        # sampler here, all of which start at the truth. Pyro's default
+        # (init_to_uniform) starts from a random draw of the prior box, which
+        # in a posterior this sharp both handicaps it and blows up the early
+        # trajectories.
         return samplers.run_nuts(_model_for(post, names),
                                  n_samples=args.nuts_samples,
                                  n_warmup=args.nuts_warmup, seed=args.seed,
-                                 progress=True)
+                                 progress=True, full_mass=args.nuts_full_mass,
+                                 max_tree_depth=args.nuts_tree_depth,
+                                 init_values=center)
     if name == "svi":
         return samplers.run_svi(_model_for(post, names), steps=args.svi_steps,
                                 num_particles=args.svi_particles,
@@ -317,6 +325,10 @@ def main():
                     help="live points for nautilus / i-nessai")
     ap.add_argument("--n_eff", type=int, default=10000,
                     help="nautilus target effective sample size")
+    ap.add_argument("--target_ess", type=float, default=2000.0,
+                    help="i-nessai stops when the effective sample size "
+                         "reaches this (its 'ratio' default stops far too "
+                         "early on a peaked likelihood)")
     ap.add_argument("--n_effective", type=int, default=512,
                     help="pocoMC effective particles")
     ap.add_argument("--n_active", type=int, default=256,
@@ -328,6 +340,14 @@ def main():
     ap.add_argument("--live", type=int, default=400)
     ap.add_argument("--nuts_samples", type=int, default=500)
     ap.add_argument("--nuts_warmup", type=int, default=500)
+    ap.add_argument("--nuts_full_mass", action="store_true",
+                    help="dense mass matrix. Pyro's diagonal default cannot "
+                         "represent the abundance/norm correlation, which is "
+                         "what makes the trajectories saturate")
+    ap.add_argument("--nuts_tree_depth", type=int, default=10,
+                    help="max doublings: 10 allows 1023 gradients/iteration, "
+                         "7 allows 127. Break-even vs the batched ensembles "
+                         "is around 50 steps")
     ap.add_argument("--svi_steps", type=int, default=2000)
     ap.add_argument("--svi_particles", type=int, default=64)
     ap.add_argument("--svi_lr", type=float, default=1e-2)

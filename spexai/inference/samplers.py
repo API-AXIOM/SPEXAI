@@ -385,7 +385,8 @@ def run_pocomc(post, n_effective=512, n_active=256, n_total=4096,
 
 
 def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
-                flow_config=None, **kwargs) -> SamplerResult:
+                flow_config=None, target_ess=2000.0,
+                stopping_criterion="ess", **kwargs) -> SamplerResult:
     """i-nessai: importance nested sampling with normalizing flows (PyTorch).
 
     The only one of the accelerated samplers written in the same framework as
@@ -398,6 +399,19 @@ def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
     nessai hand over a whole array at once rather than one point at a time --
     without it the batched forward is wasted, exactly as the old
     ``fitting.run_ultranest`` wrapper wasted it.
+
+    **The stopping criterion is overridden on purpose.** nessai defaults to
+    ``stopping_criterion="ratio"`` with ``tolerance=0.0``, which stops once
+    ``log(Z_live / Z_all) <= 0``. For a spectrum likelihood that is true almost
+    immediately -- the accumulated evidence outruns the live points within a
+    couple of iterations -- so the run terminated after ~2k evaluations with
+    its flow still close to the prior. The weighted output was then dominated
+    by a single point: log-weights spanning 8.7e5 nats and a Kish ESS of
+    **1.0**, which nessai's own ESS estimate agreed with. Stopping on ``ess``
+    instead (comparison ``>=``) runs the sampler until it has actually
+    accumulated ``target_ess`` effective samples, which is the quantity the
+    bake-off scores anyway. Pass ``stopping_criterion="ratio"`` explicitly to
+    get the old behaviour back.
     """
     from nessai.flowsampler import FlowSampler
     from nessai.model import Model
@@ -480,7 +494,9 @@ def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
     t0 = time.time()
     fs = FlowSampler(_Adapter(), output=output, importance_nested_sampler=True,
                      resume=resume, seed=seed, nlive=nlive,
-                     flow_config=flow_config, **kwargs)
+                     flow_config=flow_config,
+                     stopping_criterion=stopping_criterion,
+                     tolerance=target_ess, **kwargs)
     fs.run()
     runtime = time.time() - t0
 
@@ -562,7 +578,8 @@ def run_svi(model, steps=2000, num_particles=64, lr=1e-2, seed=0,
 
 
 def run_nuts(model, n_samples=1000, n_warmup=1000, target_accept=0.8,
-             max_tree_depth=10, seed=0, progress=False) -> SamplerResult:
+             max_tree_depth=10, seed=0, progress=False, full_mass=False,
+             init_values=None, jit_compile=False) -> SamplerResult:
     """No-U-Turn Sampler, via Pyro, on a :class:`SpectrumModel`.
 
     Pyro handles the constrained-to-unconstrained transforms and their
@@ -578,15 +595,56 @@ def run_nuts(model, n_samples=1000, n_warmup=1000, target_accept=0.8,
     it is run, not of how it mixes -- which is exactly why both numbers are
     reported. (A chain-vectorised NUTS would close the gap; one was attempted
     and abandoned as too error-prone to trust for calibration work.)
+
+    Three settings matter far more here than the defaults suggest:
+
+    ``full_mass`` -- Pyro defaults to a **diagonal** mass matrix, which cannot
+    represent parameter correlation at all. This posterior has a strong
+    abundance/normalisation degeneracy, and the marginal scales are *not* the
+    problem (their unconstrained-space condition number is only ~79, worth
+    ~9 leapfrog steps). With a diagonal matrix NUTS has no way to correct the
+    ridge and the trajectories blow up: a production run was observed
+    saturating ``max_tree_depth=10`` (1023 leapfrog steps) on every iteration,
+    ~21x longer than the ~50 steps at which gradients start paying for
+    themselves against the batched ensembles. For 12 parameters a dense mass
+    matrix is essentially free.
+
+    ``init_values`` -- Pyro's default ``init_to_uniform`` starts from a random
+    draw of the prior box. Every other sampler in the bake-off starts at the
+    truth, so leaving this unset both handicaps NUTS and, in a posterior this
+    sharp (~44 nats of information gain), guarantees enormous early
+    trajectories. Pass the truth vector.
+
+    ``max_tree_depth`` -- the cost ceiling. Each unit is a doubling, so 10
+    allows 1023 gradients per iteration and 7 allows 127. Worth capping while
+    the mass matrix adapts; note Pyro's first adaptation window does not close
+    until roughly iteration 75, so a run judged before then is being read at
+    its worst moment.
     """
     import pyro
+    import torch
     from pyro.infer import MCMC, NUTS
 
     pyro.set_rng_seed(seed)
     pyro.clear_param_store()
     model.n_eval = 0
+
+    kernel_kw = {}
+    if init_values is not None:
+        from pyro.infer.autoguide.initialization import init_to_value
+        if not isinstance(init_values, dict):
+            init_values = dict(zip(model.names,
+                                   np.asarray(init_values, dtype=float).ravel()))
+        device = getattr(model.forward, "device", None)
+        # float64 to match the Uniform priors' dtype; a float32 init makes Pyro
+        # promote inconsistently and the transforms then disagree
+        kernel_kw["init_strategy"] = init_to_value(values={
+            n: torch.tensor(float(v), dtype=torch.float64, device=device)
+            for n, v in init_values.items()})
+
     kernel = NUTS(model, target_accept_prob=target_accept,
-                  max_tree_depth=max_tree_depth, jit_compile=False)
+                  max_tree_depth=max_tree_depth, full_mass=full_mass,
+                  jit_compile=jit_compile, **kernel_kw)
     mcmc = MCMC(kernel, num_samples=n_samples, warmup_steps=n_warmup,
                 num_chains=1, disable_progbar=not progress)
     t0 = time.time()
@@ -597,8 +655,23 @@ def run_nuts(model, n_samples=1000, n_warmup=1000, target_accept=0.8,
     samples = np.stack([np.asarray(draws[n]).reshape(-1) for n in model.names],
                        axis=-1)                              # (N, ndim)
     chain = samples[:, None, :]                              # one chain
+    diag = mcmc.diagnostics() or {}
+    # The number that decides whether NUTS is viable here: gradients per
+    # iteration. n_eval counts every theta row pushed through the forward, so
+    # this is a direct measurement of the trajectory length rather than an
+    # inference from wall-clock. Break-even against the batched ensembles is
+    # ~50; saturating max_tree_depth means adaptation has not taken hold.
+    steps_per_iter = model.n_eval / max(1, n_samples + n_warmup)
+    ceiling = 2 ** max_tree_depth - 1
+    print(f"  nuts: {steps_per_iter:.0f} leapfrog steps/iteration "
+          f"(ceiling {ceiling}"
+          f"{', SATURATED' if steps_per_iter > 0.9 * ceiling else ''})",
+          flush=True)
     return SamplerResult("nuts", model.names, samples, runtime, model.n_eval,
                          _ess(chain, model.names), chain=chain,
                          extra={"divergences": int(np.sum(
-                             mcmc.diagnostics().get("divergences", {}).get(
-                                 "chain 0", []))) if mcmc.diagnostics() else 0})
+                             diag.get("divergences", {}).get("chain 0", []))
+                             ) if diag else 0,
+                             "steps_per_iter": float(steps_per_iter),
+                             "tree_depth_ceiling": int(ceiling),
+                             "full_mass": bool(full_mass)})
