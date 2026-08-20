@@ -277,3 +277,369 @@ with `compile_trunk=True` -- measured at 2.19x with no accuracy cost. The
 batched path already supports the per-walker `sigma_v` and `n_h` that
 `EnsembleForward` needs. Still unmeasured: the one-off compile stall (`timeit`
 warms up before timing).
+
+> **DONE 2026-08-18** — see the next section. The port landed, and the compile
+> stall is now instrumented in `mcmc_check.py` (printed as
+> `forward: first call Xs, warm Ys`) but still needs one GPU run to record.
+
+---
+
+# Sampler bake-off infrastructure (2026-08-18 → 08-19)
+
+Goal: put the emulator through the SBC/evaluation machinery with several
+samplers, so the campaign can be run with whichever is actually affordable.
+Everything below is committed (through `4525dfd`); **142 tests pass**. The
+bake-off itself has NOT been run — that is the next action.
+
+## Read next / resume from
+
+This section, then `scripts/bake_off.py --help`. The run procedure is at the
+bottom. Design decisions that were explicitly agreed with the user are marked
+**[agreed]** — do not silently revisit them.
+
+## What was built
+
+| Area | Files | Purpose |
+|---|---|---|
+| **Vectorised forward** | `spexai/inference/vector_forward.py` | `VectorForward`: `EnsembleForward` promoted out of `inference_demo/hot_floor` into the package. Redshift, distance, abundance scheme, parameter names and exposure are all injected instead of hardcoded, so one class serves the hot-floor check, the bake-off and SBC. |
+| **Shared posterior** | `spexai/inference/posterior.py` | `BoxPrior` + `PoissonPosterior`: one likelihood for every sampler. `logp` (numpy, batched) for the gradient-free ones, `ptform` for nested sampling, `potential`/`potential_and_grad` in unconstrained space for NUTS/VI. |
+| **Probabilistic model** | `spexai/inference/ppl.py` | `SpectrumModel`: the same density as a Pyro program, priors declared as distributions. Written batch-first so `vectorize_particles=True` sends `num_particles` to the forward as one batched call. |
+| **Samplers** | `spexai/inference/samplers.py` | `run_emcee`, `run_zeus`, `run_ultranest`, `run_nuts` (Pyro), `run_svi` (Pyro, full-rank Gaussian). All return `SamplerResult` with ESS and `ess_per_eval`. |
+| **Driver** | `scripts/bake_off.py` | One sampler per invocation, own result file, `--summarise` builds the table. Scores wall-clock, evals, ESS/eval, recovery vs truth, agreement vs a reference chain, log Z. |
+| **DEM batching** | `spexai/inference/tempdist.py` | `weights_batch(params)`: `{name: (B,)}` → `(B, G)`, pure torch and differentiable, alongside the scalar scipy `weights`. Implemented for the Gaussian presets, `TwoGaussianDEM` and `BinnedDEM`. |
+| **Refactor** | `spexai/inference/fitting.py` | `run_emcee`/`run_ultranest` default to `vectorized=True` over the shared posterior; the scalar `make_loglike` is kept as a tested reference. `run_ultranest`'s row-by-row likelihood loop is gone. |
+| **Checks** | `scripts/check_deps.py`, `scripts/check_cufft_stability.py` | Dependency audit (exits non-zero); fast GPU reproduction of the cuFFT failure with an `--emulate_old` A/B. |
+
+## Key decisions [agreed]
+
+- **Pyro over hand-rolled**, decided on measurement: Pyro's overhead is a *fixed*
+  ~2.2–3.3 ms/call, not a multiplicative factor — ~0.05% of a batched forward at
+  B=64. Declarative priors and upstream-tested transforms come free.
+- **Pyro's NUTS, not a hand-rolled vectorised one.** A chain-vectorised NUTS was
+  attempted and abandoned (see "Rejected" below).
+- **VI = full-rank Gaussian** (`AutoMultivariateNormal`); mean-field and
+  normalizing flows are one-line swaps kept for a tutorial.
+- **Testbed = the full 30-element store**, literature parametrisation.
+- **The scalar likelihood stays** as an automated cross-check, not just for
+  tutorials — the batched path has produced a silent walker-axis bug once
+  already.
+
+## Bugs found and fixed
+
+1. **Per-walker `n_h` was mis-aligned in the batched forward.** `_continuum`
+   built the absorption screen as `(B, K)` but its rows are element-major
+   `(N*B, K)`. Every existing test used a scalar `n_h`, which broadcasts either
+   way — only the port's real per-walker values exposed it. Now gathered by
+   row→walker index (tiling would be gigabytes at K~2e5).
+2. **`CUFFT_INTERNAL_ERROR` partway through GPU runs** — a plan-cache leak, not
+   a cuFFT bug. See `[[cufft-plan-cache-blowup]]`; fixed by `FFT_PAD_QUANTUM`,
+   a fixed row-chunk with zero-padding, and `limit_cufft_plan_cache()`.
+   **Confirmed on the GPU**: fixed run stable, `--emulate_old` leaks as predicted.
+3. **A missing `arviz` destroyed a completed multi-hour emcee run.** `_ess` was
+   evaluated inside `run_emcee`'s `return` expression, so an optional diagnostic
+   sat between the sampling and the first write to disk. `_ess` can no longer
+   raise, and the emcee chain now streams to HDF5 as it advances.
+4. **`--resume` was broken on the path it exists for.** `p0=None` only continues
+   a sampler that ran in the same process; a fresh one needs
+   `backend.get_last_sample()`.
+5. **`mcmc_check.py --smoke` had been broken since `sigma_v` was freed** — 16
+   walkers against `ndim=11`, below emcee's `2*ndim` floor. Now 24.
+6. **Gradient sampling OOM-killed at realistic scale.** Energy chunking bounds
+   the *forward* but not the autograd graph. Fixed with gradient checkpointing
+   in `_density` (identical gradients, ~1.2–2.5x runtime).
+
+## Measurements
+
+**The forward is differentiable end-to-end** w.r.t. temperature, `sigma_v` and
+`n_h`; autodiff matches central differences to 0.6% / 4% / 0.01%, and backward
+costs **0.78x** the forward. This is what makes NUTS/VI viable at all.
+
+**Gradient memory** (peak RSS, one value+grad step, CPU, `echunk=4096`):
+
+| elements | particles | plain | checkpointed |
+|---|---|---|---|
+| 2 | 1 | 485 MB | 365 MB |
+| 4 | 4 | 7297 MB | 1035 MB |
+| 8 | 4 | 11815 MB | 5936 MB |
+| 12 | 8 | **OOM-killed** | 16346 MB |
+
+Extrapolating ~linearly in elements×particles, **30 elements × 64 particles is
+~300 GB** — far beyond a 22 GiB card. Practically: NUTS runs at B=1 (~5 GB, fine);
+**SVI is capped at ~4 particles**, so its "particles are free batching" advantage
+is largely lost to the memory ceiling. `--echunk` is the lever (it is the
+checkpoint segment size); halving it roughly halves peak memory.
+
+**Pyro overhead** (cheap forward, isolating framework cost): fixed 2.2–3.3 ms per
+call across B=1..64. Negligible against a real forward.
+
+## Rejected / abandoned
+
+**Hand-rolled vectorised NUTS** — built, then dropped **[agreed]**. Six of seven
+tests passed including agreement with Pyro's NUTS on a correlated Gaussian, so
+the trajectory machinery was sound; it failed the ill-conditioned target twice.
+Diagnosis: NaN leaking from the divergence path (`logaddexp(-inf,-inf)` then
+`-inf - (-inf)`) into dual averaging, freezing the chains — `eps=nan` and
+`inv_mass` pinned at its clamp floor, while Pyro solved the same target to 8.5%.
+The un-applied fix would be to sanitise the divergence path. Consequence for the
+bake-off: **Pyro NUTS evaluates at B=1** while every other sampler amortises a
+batch, a structural handicap pinned by a test and reported in the table.
+
+## Store / truth migration
+
+- `STORE28` renamed to **`STORE`** across 8 files (the name asserted something
+  false once pointing at 30 elements), defaulting to `spexai/models`.
+  `SPEXAI_STORE` still overrides; `run_cluster.sh` follows.
+- **Truth regenerated** against the 30-element store, and now records the
+  **element set + store path**. A 28-element truth has an identical channel
+  grid, so the old `n_keep` check could not tell them apart — guards added to
+  both `bake_off.py` and `mcmc_check.py`.
+- `store28` is now unreferenced by any default. Its files are byte-identical to
+  their `spexai/models` counterparts (a strict subset, lacking Cl 17 and Sc 21).
+  Kept only as provenance for the published hot-floor results.
+- **Neither the store nor the truth npz is in git** — both must be rsync'd to
+  the cluster, and the truth *cannot* be regenerated there (it needs the 40 GB
+  SPEX caches).
+
+## Outstanding
+
+**Blocking the SBC campaign (not the bake-off):**
+- **Sc (21) is still the provisional 2026-08-14 checkpoint.** It is the only
+  manifest entry with a `status` flag and the only production element with no
+  `benchmark_test.json`. The final model is not on the laptop (the store copy is
+  byte-identical to the only local candidate); it must be rsync'd from the
+  cluster and re-collected with `scripts/collect_models.py`. Sc is *tied to Fe*,
+  not fitted, so it lands as a systematic in `b_sys` — fine for comparing
+  samplers, not fine for calibration.
+
+**Needs a GPU (nothing else does):**
+- The **bake-off** itself.
+- `python scripts/benchmark_ppl.py --device cuda --real --skip_overhead` — the
+  forward's B-scaling curve, which is what makes the NUTS row interpretable.
+- The **compile stall**, printed by any `--vectorized` run as
+  `forward: first call Xs, warm Ys`.
+
+**Deferred [agreed]:** user-facing prior specification for every sampler
+(currently uniform boxes only). Required before the package is usable by
+outsiders; with Pyro chosen it is mostly `biject_to` plumbing.
+
+**Not covered by checkpointing:** zeus, NUTS, SVI. emcee (HDF5) and UltraNest
+(`log_dir`) are protected; the others are short enough that it was judged not
+worth it.
+
+## How to run the bake-off
+
+```bash
+# transfer (neither is in git; rsync is just faster than rebuilding the truth)
+# CORRECTION 2026-08-19: the truth CAN be rebuilt on the cluster. The
+# preprocessing that produced ~/work/data/spexai/processed was itself run
+# there, so the SPEX caches exist on both machines.
+rsync -av spexai/models/ REMOTE:$DEST/spexai/models/
+rsync -av inference_demo/hot_floor/results/truth_single.npz \
+    REMOTE:$DEST/inference_demo/hot_floor/results/
+
+# on the cluster
+export MKL_THREADING_LAYER=GNU          # or the torch import dies
+export SPEXAI_RESPONSES=...             # dir holding rsl_Hp_L_2025.rmf
+python scripts/check_deps.py            # exits non-zero if anything is missing
+python -u scripts/check_cufft_stability.py --device cuda    # ~1-3 min
+
+COMMON="--device cuda --compile --tf32 --fft32 --counts 1e6"
+nohup python -u scripts/bake_off.py --sampler emcee $COMMON > logs/bo_emcee.log 2>&1 &
+# then, one at a time (they share one GPU):
+#   --sampler zeus / ultranest
+#   --sampler nuts --echunk 2048
+#   --sampler svi --svi_particles 4 --echunk 2048
+python scripts/bake_off.py --summarise
+```
+
+If SVI or NUTS OOMs, drop `--echunk` to 1024 then 512 **before** cutting
+particles — the chunk is the checkpoint segment, so it buys memory without
+costing gradient quality. If SVI cannot exceed 1–2 particles, that is a finding
+about VI's viability here, not a tuning failure.
+
+---
+
+# SBC campaign infrastructure + pluggable priors (2026-08-19)
+
+Built while the bake-off was running on the cluster, so none of it needed a
+GPU. **All new code is tested; nothing here has been run at scale.**
+
+## Why the 200-sim plan had to be rescoped
+
+At the measured ~5–6 h/chain, 200 SBC sims is ~1100 GPU-h ≈ 46 days on one
+card. The levers, in the order they should be pulled:
+
+1. **SBC needs ESS, not chain length.** A rank only consumes `L`≈100
+   near-independent draws. If the bake-off reports minESS ≫ 100, the chain
+   shortens proportionally. This is the dominant lever and the bake-off is
+   measuring it right now.
+2. **Sampler choice.** If SVI survives, per-sim cost drops to minutes. If VI
+   *fails* SBC, that is a result, not a wasted run.
+3. **Fewer sims.** Sensitivity goes as 1/√N, so N=100 costs 1.4× sensitivity
+   for 2× compute.
+4. **Dimensionality** — SBC is per-parameter and need not free every element.
+
+**Dead lever:** batching sims into larger forwards. The GPU is already
+saturated at B=16–48 (wchunk 16→48 changed nothing), so there is no throughput
+left to win.
+
+`scripts/sbc_cost_model.py` does this arithmetic from the bake-off npz files:
+
+    python scripts/sbc_cost_model.py --results <bakeoff_dir> --n_sims 100 --gpus 1
+
+It models `t_sim = burn_in + sampling * L/minESS`, because **burn-in does not
+shrink**. That floor dominates: at emcee's `discard_frac=0.4`, even a 0.06
+shrink factor only takes 5.5 h/sim down to ~2.4 h/sim. Nested sampling and VI
+run to a tolerance rather than a step count and are reported unshrunk.
+
+## `scripts/sbc_campaign.py` — the ported driver
+
+Replaces `bias_study.py --stage sbc`, which now exits with a pointer. It runs
+on the bake-off's stack (`VectorForward` / `PoissonPosterior` /
+`spexai.inference.samplers`) and so accepts **any** of the five samplers.
+`--stage point` (emulator-vs-SPEX bias) is a different question and stays in
+`bias_study.py` unchanged.
+
+Three things the old path got wrong, each a correctness bug rather than a
+refactor:
+
+- **Ranks were taken over the raw correlated chain** (`mean(s < t)`). Ranks are
+  uniform only over *independent* draws; correlated ones make a perfectly
+  calibrated sampler look miscalibrated. `spexai/inference/calibration.py`
+  thins by the autocorrelation time implied by the ESS first. The failure mode
+  is counterintuitive and worth knowing: too few effective draws makes the
+  sample cloud too narrow, so the truth falls *outside* it too often and the
+  rank histogram comes out **U-shaped** — which reads as "posterior too
+  narrow". `tests/test_calibration.py::test_correlated_chain_fails_without_thinning`
+  pins this end to end.
+- **The prior depended on the drawn truth.** `fisher_bias.build_params` centres
+  the `log_norm` box on the truth; under SBC that makes `log_norm`'s ranks
+  uniform by construction no matter how the sampler behaves. The campaign uses
+  a fixed box centred on `--log_norm_ref`.
+- **Injection must be the emulator itself.** SBC asks whether the posterior is
+  self-consistent for the fitted model. Injecting SPEX truth measures emulator
+  bias instead, and mixing the two makes any non-uniformity unattributable.
+  (It is also impossible at scale on the cluster — SPEX truth needs the 40 GB
+  caches.)
+
+Emulator and forward are built **once** and reused across sims; only the data
+changes. Every sim appends to `<out>/sbc_<sampler>.jsonl` with `fsync` the
+moment it lands, and `--resume` skips what is already there — the campaign is
+days long and zeus/NUTS/SVI have no sampler-level checkpointing, so the
+protection lives at the sim level. Without `--resume` it refuses to touch an
+existing file rather than mixing two runs.
+
+## `spexai/inference/priors.py` — the deferred prior API
+
+`Uniform`, `LogUniform`, `Normal` (truncated; defaults to ±6σ support) and
+`PriorSet`, a drop-in `BoxPrior` replacement. The obstacle was never Pyro —
+`SpectrumModel` has always taken arbitrary distributions — it was the
+gradient-free samplers, which reach the prior through three different
+interfaces that one declaration now serves: `logpdf` (emcee/zeus), `ptform`
+(UltraNest), `to_pyro` (NUTS/VI).
+
+**The trap, now documented and tested:** `PoissonPosterior.logp` adds the prior
+density, and `loglike` deliberately does **not**. UltraNest draws points
+through `ptform`, where the prior is already encoded in the sampling — adding
+`logpdf` there too would apply the prior twice. `BoxPrior.logpdf` returns
+zeros (unnormalised on purpose) so every existing study reproduces bit-for-bit.
+
+Priors are independent by construction; correlated priors would not survive the
+`ptform` interface.
+
+## Still outstanding
+
+- **Sc (21) is unchanged** and still blocks SBC — needs an rsync from the
+  cluster, which cannot be done from the laptop. See below.
+- Nothing here has been run at scale; the campaign wants one short
+  `--n_sims 2` GPU smoke before a real launch.
+
+---
+
+# Tier B: parameter-space bias sweep (`scripts/bias_sweep.py`, 2026-08-19)
+
+**Correction to the section above:** making SBC self-injected removed the
+campaign's actual purpose. The original `bias_study.py` injected SPEX truth in
+*both* stages to measure **emulator bias**; SBC-the-diagnostic can only
+validate the sampler. Both are needed, and they are now separate tools rather
+than one confused one.
+
+## Why ranks are the wrong instrument for emulator bias
+
+- **No units.** A non-uniform rank histogram says "something is wrong", not
+  "Fe is off by X" or "this matters above N counts". The science question is
+  bias *relative to statistical error at a real exposure*; ranks have no
+  exposure axis.
+- **No attribution.** Emulator error, sampler error and prior mismatch all
+  produce the same non-uniformity.
+- **Worst cost per bit.** A rank costs a full posterior (~5 h).
+  `linear_bias_fisher` gives `b_sys` *and* `sigma_stat` from 2n+1 = 25
+  forwards.
+
+SBC's job is therefore the **control**: self-injected, ~100 cheap sims,
+establishing that the sampler is calibrated so pull studies are attributable to
+the emulator. SPEX-injected rank analysis is still useful as a *screen* over
+the whole prior volume (it catches corners a grid would miss) but should be
+labelled a misspecification test, not SBC.
+
+## The gap this closes
+
+Every science-level bias number was anchored at **one point** — Perseus, plus a
+couple of single-axis `--kT`/`--sigma_v` variants. And `bias_study.py --stage
+point` varies only `temp`/`velocity`/`log_norm`, with **abundances pinned
+solar**, so the abundance dimension had never been probed at the science level.
+
+That matters because of *combinations*: abundance enters truth and emulator
+linearly and so cannot create per-element error, but it changes which elements
+dominate which channels, reweighting the per-element errors and moving
+`b_sys`. Per-element benchmarks structurally cannot see this; `F^{-1}` can.
+
+## Design
+
+Latin hypercube over the **cluster science range** (not the full training box):
+kT / T_mean 1.5–8 keV, T_sigma 0.15–3.0, 8 free abundances 0.2–2× solar,
+sigma_v 30–600 km/s, n_H 0–5e21. Reports `b_sys`, `sigma_ref` and the crossover
+`N* = N_REF (sigma_ref/|b_sys|)^2` per parameter.
+
+Two resumable stages, because they want different machines:
+
+- `--stage truth` — CPU + the 40 GB SPEX caches. These exist on **both** the
+  laptop (`~/work/data/spexai/processed`) and the GPU cluster, because the
+  preprocessing that built them was run on the cluster — so this stage can run
+  either place and the whole sweep can be one cluster job. Loops **elements
+  outermost** so each cache is read once, not once per point. **Measured:** 1–2.6 s to load an element,
+  ~0.6 s per element-point → **~60 min for 200 points**, peak memory one
+  element (~0.4 GB). The natural point-outer loop (what
+  `experiment.stream_truth_counts` does) would be ~7× worse.
+- `--stage bias` — Jacobian + Fisher solve, no caches needed. **Measured 262
+  s/point on laptop CPU** = ~15 h for 200 points, so this one belongs on the
+  GPU. It still uses the serial `fisher_bias.Forward`; porting its 25 Jacobian
+  points onto `BatchedJointForward` is the obvious next speedup.
+
+## Status
+
+Smoke-tested end to end at 3 points, single-T. **3 points is not a result** —
+but the machinery, checkpointing and reporting all work. At 1e6 in-band counts
+nothing exceeded 1 sigma (worst: sigma_v at 0.85), and sigma_v showed by far
+the widest spread across points (median 0.06, max 0.85), which is exactly the
+parameter-dependence the sweep exists to map. Fe median N* ~7e7, consistent
+with the hot-floor verdict.
+
+## Remaining campaign
+
+- **Tier A** — composition check: does the 30-element sum's error follow from
+  the per-element errors, or do they add coherently? Not built.
+- **Tier C** — MCMC pull/coverage at ~10–20 points chosen from the Tier B map;
+  needs `--stage point` extended to vary abundances. Necessary because the
+  linearisation under-predicts (1.5–3× at 1e8 counts, right direction).
+- **Tier D** — the shrunken self-injected SBC control (`sbc_campaign.py`).
+
+Dependency order D → C → B → A: D validates the instrument C uses, C validates
+the approximation B relies on, B covers the space.
+
+**Caveat on record:** `SpexTruthModel` PCHIPs over `data.train_idx` — the rows
+the emulator trained on. On-grid that is exactly SPEX; off-grid it is
+independent of the emulator's *function* but not its *training data*. With
+PCHIP interpolation error ~0.003% vs the emulator's ~0.3%
+(`benchmark_offgrid.py`) that is the right trade, but it measures
+interpolation fidelity, not extrapolation.

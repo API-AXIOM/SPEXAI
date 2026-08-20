@@ -27,14 +27,22 @@ from typing import Dict, Mapping, Sequence
 import torch
 
 
-def uniform_priors(names: Sequence[str], lo, hi) -> Dict[str, "object"]:
+def uniform_priors(names: Sequence[str], lo, hi,
+                   device=None) -> Dict[str, "object"]:
     """``{name: Uniform(lo, hi)}`` -- the box prior, as distributions.
 
     Convenience for reproducing the existing box-prior fits; the model accepts
-    any mapping of name to Pyro distribution, which is the point."""
+    any mapping of name to Pyro distribution, which is the point.
+
+    ``device`` decides where the sampler's parameters live. Pass the forward's
+    device: Pyro samples each site from these distributions, so leaving them on
+    CPU puts the whole chain's state on CPU while the forward runs on GPU. The
+    forward now normalises the device itself, so this is about keeping the
+    sampler's own arithmetic (leapfrog steps, guide parameters) off the
+    host rather than about correctness."""
     import pyro.distributions as dist
-    lo = torch.as_tensor(lo, dtype=torch.float64).reshape(-1)
-    hi = torch.as_tensor(hi, dtype=torch.float64).reshape(-1)
+    lo = torch.as_tensor(lo, dtype=torch.float64, device=device).reshape(-1)
+    hi = torch.as_tensor(hi, dtype=torch.float64, device=device).reshape(-1)
     if not (len(names) == lo.numel() == hi.numel()):
         raise ValueError("names, lo and hi must have matching lengths")
     return {n: dist.Uniform(lo[i], hi[i]) for i, n in enumerate(names)}

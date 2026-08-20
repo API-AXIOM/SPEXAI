@@ -300,8 +300,18 @@ class VectorForward:
 
         The operator is float32, so ``th`` is cast here rather than by the
         caller; the cast is differentiable, so a float64 sampler still gets its
-        gradient back in float64."""
-        th = th.to(torch.float32)
+        gradient back in float64.
+
+        **Device is normalised here too**, not just dtype. A PPL hands over
+        whatever device its sample sites live on, and Pyro's sites default to
+        CPU unless the prior distributions were built on the GPU. ``flux``
+        happens to survive that -- ``batched.flux`` rebuilds ``temp_kev`` with
+        an explicit device -- but ``fold`` reads the normalisation straight off
+        ``th``, so a CPU ``th`` met a CUDA ``counts`` and only blew up at the
+        very last multiply. Moving 12 floats is free; the cast is
+        differentiable, so gradients still flow back to the sampler's
+        device."""
+        th = th.to(device=self.device, dtype=torch.float32)
         if not grad:
             return self._counts_chunked(th)
         with self.emu.batched.grad_enabled():

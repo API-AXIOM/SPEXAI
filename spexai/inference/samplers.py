@@ -241,6 +241,270 @@ def run_ultranest(post, min_num_live_points=400, frac_remain=0.01,
                          float(res["logzerr"]), extra={"result": res})
 
 
+# --- flow / neural-network accelerated ---------------------------------------
+
+def _kish_ess(log_w: np.ndarray) -> float:
+    """Kish effective sample size of importance weights, from log weights.
+
+    ``(sum w)^2 / sum(w^2)``. This is the honest currency for the
+    importance-based samplers: they return *weighted* draws, and quoting the
+    raw draw count would flatter them enormously -- a run can return 100k
+    points whose weight is concentrated on a few hundred. Computed in log space
+    via a max-subtraction so the huge log-likelihoods here (order 1e6) do not
+    overflow.
+    """
+    lw = np.asarray(log_w, dtype=float)
+    lw = lw[np.isfinite(lw)]
+    if lw.size == 0:
+        return float("nan")
+    lw = lw - lw.max()
+    w = np.exp(lw)
+    return float(w.sum() ** 2 / (w ** 2).sum())
+
+
+def _resample_equal(samples: np.ndarray, log_w: np.ndarray,
+                    rng: np.random.Generator, n: Optional[int] = None):
+    """Weighted draws -> equal-weight draws, so the downstream median/percentile
+    scoring (which is unweighted) is correct."""
+    lw = np.asarray(log_w, dtype=float)
+    ok = np.isfinite(lw)
+    samples, lw = samples[ok], lw[ok]
+    w = np.exp(lw - lw.max())
+    w = w / w.sum()
+    n = len(samples) if n is None else n
+    return samples[rng.choice(len(samples), size=n, replace=True, p=w)]
+
+
+def _uniform_box_scipy(prior):
+    """Prior -> list of scipy uniform dists, for samplers that demand them.
+
+    Raises rather than silently approximating: pocoMC takes the prior as
+    distribution objects, so a non-uniform :class:`PriorSet` would have to be
+    translated term by term. Quietly substituting a uniform would change the
+    posterior without any error, which is exactly the kind of failure that is
+    invisible in the output.
+    """
+    from scipy import stats
+    lo = prior.lo.cpu().numpy()
+    hi = prior.hi.cpu().numpy()
+    priors = getattr(prior, "priors", None)
+    if priors is not None:
+        from .priors import Uniform
+        bad = [n for n, p in zip(prior.names, priors)
+               if not isinstance(p, Uniform)]
+        if bad:
+            raise NotImplementedError(
+                f"pocoMC needs the prior as scipy distributions and this "
+                f"wrapper only translates uniform boxes; {bad} are not "
+                f"uniform. Extend _uniform_box_scipy rather than letting a "
+                f"wrong prior through silently.")
+    return [stats.uniform(loc=lo[i], scale=hi[i] - lo[i])
+            for i in range(prior.ndim)]
+
+
+def run_nautilus(post, n_live=2000, f_live=0.01, n_eff=10000, seed=0,
+                 filepath=None, resume=False, n_networks=4,
+                 verbose=False) -> SamplerResult:
+    """Importance nested sampling with neural-network-regressed bounds.
+
+    The reason to try this against UltraNest: it is *importance* nested
+    sampling, so every likelihood evaluation contributes to both the posterior
+    and log Z, where rejection-based nested sampling throws away everything
+    below the current contour. The neural network regresses the iso-likelihood
+    boundary to build proposals that track it, which is what pushes the
+    sampling efficiency up.
+
+    As with UltraNest, the prior enters through ``ptform`` and the likelihood
+    is called *bare* -- adding the prior density here would apply it twice.
+
+    ``filepath`` (an HDF5 file) enables nautilus's own checkpointing;
+    ``resume=True`` continues it. Same rationale as UltraNest's ``log_dir``.
+    """
+    from nautilus import Sampler
+    post.n_eval = 0
+    rng = np.random.default_rng(seed)
+    t0 = time.time()
+    sampler = Sampler(post.prior.ptform, post.loglike,
+                      n_dim=post.prior.ndim, n_live=n_live,
+                      n_networks=n_networks, vectorized=True, pass_dict=False,
+                      seed=seed, filepath=filepath, resume=resume)
+    sampler.run(f_live=f_live, n_eff=n_eff, verbose=verbose)
+    runtime = time.time() - t0
+
+    points, log_w, log_l = sampler.posterior()
+    points = np.asarray(points)
+    ess = np.full(post.prior.ndim, _kish_ess(log_w))
+    samples = _resample_equal(points, log_w, rng)
+    logz = float(sampler.log_z)
+    return SamplerResult("nautilus", post.prior.names, samples, runtime,
+                         post.n_eval, ess, logz, float("nan"),
+                         extra={"points": points, "log_w": np.asarray(log_w),
+                                "log_l": np.asarray(log_l),
+                                "n_raw": len(points)})
+
+
+def run_pocomc(post, n_effective=512, n_active=256, n_total=4096,
+               n_evidence=4096, seed=0, output_dir=None, resume_path=None,
+               save_every=None, flow="nsf6", progress=False) -> SamplerResult:
+    """Preconditioned Monte Carlo: normalizing-flow SMC.
+
+    A normalizing flow learns a change of variables that decorrelates the
+    parameters, and the SMC moves are made in that preconditioned space. That
+    targets this posterior's known weakness directly -- the strong
+    abundance/normalisation degeneracy that costs the affine-invariant and
+    slice ensembles so much of their efficiency.
+
+    The prior is passed as distribution objects (pocoMC samples from it
+    directly), so the likelihood is again called bare.
+
+    ``output_dir`` + ``save_every`` write state periodically;
+    ``resume_path`` continues from one.
+    """
+    import pocomc
+    post.n_eval = 0
+    rng = np.random.default_rng(seed)
+    prior = pocomc.Prior(_uniform_box_scipy(post.prior))
+    t0 = time.time()
+    sampler = pocomc.Sampler(prior, post.loglike, n_dim=post.prior.ndim,
+                             n_effective=n_effective, n_active=n_active,
+                             vectorize=True, flow=flow, random_state=seed,
+                             output_dir=output_dir)
+    sampler.run(n_total=n_total, n_evidence=n_evidence, progress=progress,
+                resume_state_path=resume_path, save_every=save_every)
+    runtime = time.time() - t0
+
+    res = sampler.posterior(return_logw=True)
+    points, log_w = np.asarray(res[0]), np.asarray(res[-1])
+    ess = np.full(post.prior.ndim, _kish_ess(log_w))
+    samples = _resample_equal(points, log_w, rng)
+    logz, logzerr = sampler.evidence()
+    return SamplerResult("pocomc", post.prior.names, samples, runtime,
+                         post.n_eval, ess, float(logz), float(logzerr),
+                         extra={"points": points, "log_w": log_w,
+                                "n_raw": len(points)})
+
+
+def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
+                flow_config=None, **kwargs) -> SamplerResult:
+    """i-nessai: importance nested sampling with normalizing flows (PyTorch).
+
+    The only one of the accelerated samplers written in the same framework as
+    the forward, so its flow trains on the *same* GPU the likelihood runs on
+    with no extra device juggling.
+
+    nessai drives the model through structured ("live point") arrays with one
+    named field per parameter, so the adapter converts to the plain ``(B,
+    ndim)`` block the batched forward wants. ``allow_vectorised`` is what makes
+    nessai hand over a whole array at once rather than one point at a time --
+    without it the batched forward is wasted, exactly as the old
+    ``fitting.run_ultranest`` wrapper wasted it.
+    """
+    from nessai.flowsampler import FlowSampler
+    from nessai.model import Model
+    from nessai.livepoint import live_points_to_array
+
+    names = list(post.prior.names)
+    lo = post.prior.lo.cpu().numpy()
+    hi = post.prior.hi.cpu().numpy()
+    span = hi - lo
+
+    # i-nessai works in the unit hypercube, so it needs the map both ways.
+    # For a uniform box that is the linear rescaling below; a general prior
+    # would need its CDF, which PriorSet does not expose (it has ppf but not
+    # cdf). Refuse rather than silently sampling the wrong prior.
+    priors = getattr(post.prior, "priors", None)
+    if priors is not None:
+        from .priors import Uniform
+        bad = [n for n, p in zip(names, priors) if not isinstance(p, Uniform)]
+        if bad:
+            raise NotImplementedError(
+                f"i-nessai needs to_unit_hypercube/from_unit_hypercube and "
+                f"this adapter implements only the uniform-box map; {bad} are "
+                f"not uniform. Implementing it needs each prior's CDF.")
+
+    class _Adapter(Model):
+        """post -> nessai. Vectorised on both prior and likelihood."""
+
+        allow_vectorised = True
+        allow_vectorised_prior = True
+
+        def __init__(self):
+            super().__init__()
+            self.names = names
+            self.bounds = {n: [float(lo[i]), float(hi[i])]
+                           for i, n in enumerate(names)}
+
+        def _block(self, x):
+            return np.atleast_2d(live_points_to_array(x, self.names))
+
+        # --- unit-hypercube maps, required by the importance sampler ---------
+        # Structured arrays carry bookkeeping fields (logP, logL, it, logW,
+        # logQ, logU) alongside the parameters, so these copy and rewrite only
+        # the named parameter fields.
+
+        def from_unit_hypercube(self, x):
+            out = x.copy()
+            for i, n in enumerate(names):
+                out[n] = lo[i] + x[n] * span[i]
+            return out
+
+        def to_unit_hypercube(self, x):
+            out = x.copy()
+            for i, n in enumerate(names):
+                out[n] = (x[n] - lo[i]) / span[i]
+            return out
+
+        def log_prior_unit_hypercube(self, x):
+            """Flat inside the cube -- the box prior's density is constant and
+            the volume factor is already carried by the transform."""
+            th = self._block(x)
+            inside = np.all((th >= 0.0) & (th <= 1.0), axis=1)
+            return np.where(inside, 0.0, -np.inf)
+
+        def log_prior(self, x):
+            th = self._block(x)
+            out = np.full(th.shape[0], -np.inf)
+            ok = post.prior.inside(th)
+            # the prior DENSITY, not just the bounds check: nessai adds
+            # log_prior to log_likelihood itself, so this is the one place a
+            # non-uniform prior can enter for this sampler
+            if ok.any():
+                out[ok] = post.prior.logpdf(th[ok])
+            return out
+
+        def log_likelihood(self, x):
+            return post.loglike(self._block(x))
+
+    post.n_eval = 0
+    rng = np.random.default_rng(seed)
+    t0 = time.time()
+    fs = FlowSampler(_Adapter(), output=output, importance_nested_sampler=True,
+                     resume=resume, seed=seed, nlive=nlive,
+                     flow_config=flow_config, **kwargs)
+    fs.run()
+    runtime = time.time() - t0
+
+    ns = fs.ns
+    # Deliberately NOT fs.posterior_samples. That property rejection-samples
+    # the weighted set, and with log-likelihoods spanning ~1e6 (as they do for
+    # a real spectrum) the acceptance collapses -- it returned a *single* draw
+    # on the analytic test problem. The weighted set itself is intact, so take
+    # it and reweight explicitly, the same way nautilus and pocoMC are handled.
+    points = np.atleast_2d(live_points_to_array(ns.samples, names))
+    log_w = np.asarray(ns.log_posterior_weights, dtype=float)
+    ess = _kish_ess(log_w)
+    own = float(getattr(ns, "posterior_effective_sample_size", np.nan) or np.nan)
+    if np.isfinite(own) and own > 0:
+        ess = own                      # prefer the sampler's own estimate
+    samples = _resample_equal(points, log_w, rng)
+    logz = float(getattr(fs, "log_evidence", np.nan))
+    logzerr = float(getattr(fs, "log_evidence_error", np.nan))
+    return SamplerResult("inessai", names, samples, runtime, post.n_eval,
+                         np.full(post.prior.ndim, ess), logz, logzerr,
+                         extra={"points": points, "log_w": log_w,
+                                "n_raw": len(points), "kish_ess": _kish_ess(log_w)})
+
+
 # --- variational -------------------------------------------------------------
 
 def run_svi(model, steps=2000, num_particles=64, lr=1e-2, seed=0,

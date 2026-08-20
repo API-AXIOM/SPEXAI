@@ -111,10 +111,17 @@ def main():
     ap.add_argument("--cachedir",
                     default="/Users/danielahuppenkothen/work/data/spexai/processed/element26")
     ap.add_argument("--split", default="test", choices=["test", "val"])
+    ap.add_argument("--device", default="auto",
+                    choices=["auto", "cpu", "mps", "cuda"],
+                    help="'auto' prefers mps/cuda. Use 'cpu' on an Apple "
+                         "laptop: a full-split eval on mps has hung the "
+                         "machine, and this benchmark is not speed-critical.")
     args = ap.parse_args()
 
-    device = ("mps" if torch.backends.mps.is_available()
-              else "cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device
+    if device == "auto":
+        device = ("mps" if torch.backends.mps.is_available()
+                  else "cuda" if torch.cuda.is_available() else "cpu")
     data = SpectrumData(args.cachedir)
     idx = data.test_idx if args.split == "test" else data.val_idx
     target = data.logflux[idx].numpy()

@@ -57,7 +57,13 @@ from spexai.inference.response import Response                    # noqa: E402
 from spexai.inference.vector_forward import VectorForward         # noqa: E402
 from spexai.inference import samplers                             # noqa: E402
 
-SAMPLERS = ("emcee", "zeus", "ultranest", "nuts", "svi")
+SAMPLERS = ("emcee", "zeus", "ultranest", "nautilus", "pocomc", "inessai",
+            "nuts", "svi")
+
+# samplers whose ESS is a Kish effective size over importance weights rather
+# than a draw count -- flagged in the table because the two are not the same
+# quantity and a reader will otherwise compare them as if they were
+WEIGHTED = {"nautilus", "pocomc"}
 
 
 # --- problem -----------------------------------------------------------------
@@ -138,7 +144,8 @@ def _model_for(post, names):
     lo = post.prior.lo.cpu().numpy()
     hi = post.prior.hi.cpu().numpy()
     return SpectrumModel(post.forward, post.data_np,
-                         uniform_priors(names, lo, hi))
+                         uniform_priors(names, lo, hi,
+                                        device=post.forward.device))
 
 
 # --- running -----------------------------------------------------------------
@@ -166,6 +173,23 @@ def run_sampler(name, post, pars, names, args):
                                       logdir=os.path.join(args.out,
                                                           "ultranest"),
                                       resume=args.resume)
+    if name == "nautilus":
+        # its own HDF5 checkpoint, same protection as UltraNest's log_dir
+        return samplers.run_nautilus(post, n_live=args.n_live,
+                                     n_eff=args.n_eff, seed=args.seed,
+                                     filepath=os.path.join(
+                                         args.out, "nautilus.hdf5"),
+                                     resume=args.resume, verbose=True)
+    if name == "pocomc":
+        return samplers.run_pocomc(post, n_effective=args.n_effective,
+                                   n_active=args.n_active,
+                                   n_total=args.n_total, seed=args.seed,
+                                   output_dir=os.path.join(args.out, "pocomc"),
+                                   save_every=10, progress=True)
+    if name == "inessai":
+        return samplers.run_inessai(post, nlive=args.n_live, seed=args.seed,
+                                    output=os.path.join(args.out, "inessai"),
+                                    resume=args.resume)
     if name == "nuts":
         return samplers.run_nuts(_model_for(post, names),
                                  n_samples=args.nuts_samples,
@@ -211,7 +235,14 @@ def summarise(outdir, reference="emcee"):
         lz = float(z["logz"])
         print(f"{name:>10} {float(z['runtime_s']):>10.1f} "
               f"{int(z['n_eval']):>12d} {m:>9.0f} {per:>10.2e} "
-              f"{('%.2f' % lz) if np.isfinite(lz) else '-':>12}")
+              f"{('%.2f' % lz) if np.isfinite(lz) else '-':>12}"
+              f"{'  *' if name in WEIGHTED else ''}")
+    if any(n in WEIGHTED for n in got):
+        print("  * minESS is a Kish effective size over importance weights, "
+              "not a draw count.\n    Comparable to the others as an ESS, but "
+              "the raw sample array is larger.")
+    print("  Read ESS/eval with wall-clock: the ensembles amortise a batch "
+          "into each\n  forward, NUTS evaluates one point per gradient.")
 
     ref = got.get(reference)
     if ref is None:
@@ -282,6 +313,16 @@ def main():
     # per-sampler budgets
     ap.add_argument("--nwalkers", type=int, default=64)
     ap.add_argument("--nsteps", type=int, default=800)
+    ap.add_argument("--n_live", type=int, default=2000,
+                    help="live points for nautilus / i-nessai")
+    ap.add_argument("--n_eff", type=int, default=10000,
+                    help="nautilus target effective sample size")
+    ap.add_argument("--n_effective", type=int, default=512,
+                    help="pocoMC effective particles")
+    ap.add_argument("--n_active", type=int, default=256,
+                    help="pocoMC active particles (its forward batch size)")
+    ap.add_argument("--n_total", type=int, default=4096,
+                    help="pocoMC total posterior samples")
     ap.add_argument("--zeus_steps", type=int, default=0,
                     help="0 = nsteps//4 (zeus mixes faster per step)")
     ap.add_argument("--live", type=int, default=400)

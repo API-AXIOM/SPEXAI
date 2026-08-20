@@ -50,12 +50,28 @@ def metrics_for(ckpt_path):
                    yield_1pct=o.get("yield_1pct"),
                    yield_01pct=o.get("yield_01pct"),
                    params=m.get("params"))
+    # architecture/provenance: prefer the run history, but fall back to the
+    # args the checkpoint carries internally. An interrupted run can leave a
+    # perfectly good checkpoint with no history file (element 21 is exactly
+    # this case), and without the fallback those fields would silently vanish
+    # from the manifest on the next collect.
+    a, src = {}, None
     hist = os.path.join(d, "reweight_full_history.json")
     if os.path.exists(hist):
-        a = json.load(open(hist)).get("args", {})
+        a, src = json.load(open(hist)).get("args", {}), "history"
+    else:
+        try:
+            import torch
+            ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            if isinstance(ck, dict) and isinstance(ck.get("args"), dict):
+                a, src = ck["args"], "checkpoint"
+        except Exception as exc:                                 # noqa: BLE001
+            print(f"  [!] could not read args from {ckpt_path}: {exc}")
+    if a:
         out.update(hidden=a.get("hidden"), layers=a.get("layers"),
                    n_freqs=a.get("n_freqs"), use_linehead=a.get("use_linehead"),
-                   signal_frac=a.get("signal_frac"), lr=a.get("lr"))
+                   signal_frac=a.get("signal_frac"), lr=a.get("lr"),
+                   args_source=src)
     return out
 
 

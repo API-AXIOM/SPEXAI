@@ -109,6 +109,14 @@ def main():
     ap.add_argument("--out", default="bias_study.json")
     args = ap.parse_args()
 
+    if args.stage == "sbc":
+        raise SystemExit(
+            "--stage sbc is superseded by scripts/sbc_campaign.py.\n"
+            "This path is emcee-only on CPU, and its ranks were taken over the\n"
+            "raw correlated chain, which fails the uniformity test even for a\n"
+            "calibrated sampler. --stage point (emulator-vs-SPEX bias) is\n"
+            "unaffected and still lives here.")
+
     elements = None if "all" in args.elements else [int(z) for z in args.elements]
     from spexai.inference.response import Response
     response = Response(args.rmf, args.arf if os.path.exists(args.arf) else None)

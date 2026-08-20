@@ -59,6 +59,16 @@ class BoxPrior:
         hi = self.hi.cpu().numpy()
         return np.all((theta >= lo) & (theta <= hi), axis=1)
 
+    def logpdf(self, theta: np.ndarray) -> np.ndarray:
+        """(B, ndim) -> (B,) zeros: a flat prior is a constant.
+
+        Deliberately *unnormalised*, so ``logp`` keeps the exact values it had
+        before priors became pluggable and every existing study stays
+        reproducible. The general
+        :class:`~spexai.inference.priors.PriorSet` normalises instead, which
+        matters only for absolute log Z."""
+        return np.zeros(np.atleast_2d(theta).shape[0])
+
     def ptform(self, cube) -> np.ndarray:
         """Unit cube (B, ndim) -> parameters (B, ndim), for nested sampling."""
         u = np.atleast_2d(np.asarray(cube, dtype=np.float64))
@@ -123,16 +133,24 @@ class PoissonPosterior:
         return (self.data_np[None, :] * np.log(mu) - mu).sum(1)
 
     def logp(self, theta) -> np.ndarray:
-        """(B, ndim) -> (B,) log posterior, ``-inf`` outside the prior box.
+        """(B, ndim) -> (B,) log posterior, ``-inf`` outside the prior support.
 
         Out-of-bounds rows are dropped before the forward rather than computed
         and discarded: with a wide box that is most of the early ensemble, and
-        the forward is the entire cost."""
+        the forward is the entire cost.
+
+        The prior *density* is added here and **only** here. emcee and zeus
+        reach the prior through this method, so a non-uniform prior has no
+        effect unless it is summed in. UltraNest instead calls ``loglike``
+        with points already drawn through ``prior.ptform``, where the prior is
+        encoded in the sampling rather than the density -- adding ``logpdf``
+        there too would apply the prior twice. That asymmetry is why
+        ``loglike`` stays a pure likelihood."""
         th = np.atleast_2d(np.asarray(theta, dtype=np.float64))
         ok = self.prior.inside(th)
         out = np.full(th.shape[0], -np.inf)
         if ok.any():
-            out[ok] = self.loglike(th[ok])
+            out[ok] = self.loglike(th[ok]) + self.prior.logpdf(th[ok])
         return out
 
     # --- gradient-based ------------------------------------------------------
