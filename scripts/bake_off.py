@@ -43,12 +43,13 @@ import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from experiment import (                                          # noqa: E402
-    PERSEUS, STORE, RESULTS, FREE_Z, injected_abundances,
-    find_xrism_response, band_mask, check_truth_response)
-from fisher_bias import SYMBOL, build_params                      # noqa: E402
+from campaign import (                                            # noqa: E402
+    PERSEUS, FREE_Z, injected_abundances, find_xrism_response,
+    band_mask, check_truth_response, build_params)
+from spexai.config import STORE, RESULTS                          # noqa: E402
+from spexai.inference.abundances import SYMBOL                    # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
@@ -328,8 +329,7 @@ def main():
                     help="continue emcee from its HDF5 backend instead of "
                          "restarting (no-op for the other samplers)")
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--store", default=os.environ.get(
-        "SPEXAI_STORE", os.path.join(REPO, "spexai", "models")))
+    ap.add_argument("--store", default=STORE)
     ap.add_argument("--truth", default=os.path.join(
         RESULTS, "hot_floor", "truth_single.npz"))
     ap.add_argument("--counts", type=float, default=1e6)

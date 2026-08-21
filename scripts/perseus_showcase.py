@@ -48,12 +48,12 @@ PERSEUS["dist_m"] = PERSEUS["dist_mpc"] * MPC_M
 def find_response():
     """XRISM/Resolve RMF+ARF; fall back to Chandra ACIS if Resolve is absent.
 
-    Delegates to ``experiment.find_xrism_response`` so there is one definition
-    of which Resolve files we use. The previous local copy globbed in a
-    different order than experiment.py's, so the two could silently disagree
-    about which RMF they picked."""
-    sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
-    from experiment import find_xrism_response
+    Delegates to ``campaign.find_xrism_response`` so there is one definition
+    of which Resolve files we use. A local copy once globbed in a different
+    order than that module's, so the two could silently disagree about which
+    RMF they picked."""
+    sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
+    from campaign import find_xrism_response
     try:
         rmf, arf = find_xrism_response()
         return rmf, arf, "XRISM/Resolve"

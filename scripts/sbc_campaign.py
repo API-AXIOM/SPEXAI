@@ -50,13 +50,12 @@ import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from experiment import (                                          # noqa: E402
-    PERSEUS, STORE, RESULTS, FREE_Z, injected_abundances,
-    find_xrism_response, band_mask)
-from fisher_bias import SYMBOL                                    # noqa: E402
-from spexai.inference.abundances import AbundanceModel            # noqa: E402
+from campaign import (                                            # noqa: E402
+    PERSEUS, FREE_Z, injected_abundances, find_xrism_response, band_mask)
+from spexai.config import STORE, RESULTS                          # noqa: E402
+from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.fitting import SIGMA_V_PRIOR                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402

@@ -38,6 +38,13 @@ import numpy as np
 import torch
 
 
+# The per-element PCHIP SPEX truth model (``spex_truth.SpexTruthModel``) is
+# fit down to ~0.501 keV; a temperature grid point below that extrapolates
+# and can blow up (e.g. Ar -> inf at 0.5 keV). A grid meant to feed a truth
+# model, not just the emulator, should stay above this with a safety margin.
+PCHIP_TRUTH_SAFE_LO_KEV = 0.7
+
+
 def _normalise(raw: torch.Tensor) -> torch.Tensor:
     """Rows to sum to 1, leaving an all-zero row alone rather than dividing by
     zero (which would turn an out-of-range DEM into NaNs instead of a flat

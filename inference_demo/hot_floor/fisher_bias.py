@@ -16,105 +16,30 @@ published parameter:
 Run (laptop, single-T):
   KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai \
       python inference_demo/hot_floor/fisher_bias.py --mode single
+
+The literature-strategy fit parametrisation (``N_REF``, ``Par``, ``Forward``,
+``build_params``) and the campaign config (``PERSEUS``, ``FREE_Z``, ...) live
+in ``scripts/inference/campaign.py`` -- this module is the general Fisher/
+deviance engine on top of them.
 """
 import argparse
 import os
 import sys
 import time
-from dataclasses import dataclass
-from typing import Callable, Dict, List
 
 import numpy as np
-import torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from experiment import (                                    # noqa: E402
-    PERSEUS, STORE, FREE_Z, HOT_SCIENCE, HOT_WEAK, injected_abundances,
-    find_xrism_response, band_mask, TruthConfig, stream_truth_counts,
-    gaussian_dem, resolve_perseus)
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
+from campaign import (                                      # noqa: E402
+    FREE_Z, HOT_SCIENCE, HOT_WEAK, N_REF, Par, Forward, build_params,
+    injected_abundances, find_xrism_response, band_mask, TruthConfig,
+    stream_truth_counts, gaussian_dem, resolve_perseus)
+from spexai.config import STORE, RESULTS                      # noqa: E402
+from spexai.inference.abundances import SYMBOL                # noqa: E402
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
-from spexai.inference.abundances import AbundanceModel       # noqa: E402
-from spexai.inference.fitting import SIGMA_V_PRIOR           # noqa: E402
-
-SYMBOL = {14: "Si", 16: "S", 18: "Ar", 20: "Ca", 24: "Cr", 25: "Mn",
-          26: "Fe", 28: "Ni", 22: "Ti", 27: "Co", 29: "Cu", 30: "Zn"}
-N_REF = 1e5                    # reference in-band counts for Fisher/deviance
-
-
-@dataclass
-class Par:
-    name: str
-    truth: float
-    step: float                # finite-difference step
-    low: float
-    high: float
-
-
-class Forward:
-    """theta (free-parameter vector) -> in-band emulator counts at N_REF scale."""
-
-    def __init__(self, emu, response, absorption, keep, mode, dem=None,
-                 perseus=None):
-        self.emu, self.resp, self.absn = emu, response, absorption
-        self.keep, self.mode, self.dem = keep, mode, dem
-        self.perseus = PERSEUS if perseus is None else perseus
-        self.logz = float(np.log10(self.perseus["z"]))
-        self.ld = self.perseus["dist_m"]
-        # literature abundance parametrisation: free FREE_Z, tie the rest to Fe.
-        ab = AbundanceModel(emu.elements)
-        for z in FREE_Z:
-            ab.free_element(z, SYMBOL[z])
-        others = [z for z in emu.elements if z >= 3 and z not in FREE_Z]
-        ab.tie_const(others, 1.0, 26)
-        self.abmodel = ab
-        self.abnames = ab.param_names
-        # parameter order: [abundances...] + thermal + [sigma_v, n_h, log_norm]
-        self.thermal = ["kT"] if mode == "single" else ["T_mean", "T_sigma"]
-        self.names = self.abnames + self.thermal + ["sigma_v", "n_h", "log_norm"]
-
-    def __call__(self, theta: np.ndarray) -> np.ndarray:
-        p = dict(zip(self.names, theta))
-        abund = self.abmodel.to_abundances(p)
-        norm = 10.0 ** p["log_norm"]
-        common = dict(luminosity_distance=self.ld, absorption=self.absn,
-                      n_h=p["n_h"] * 1e21)          # n_h sampled in 1e21 cm^-2
-        if self.mode == "single":
-            mu = self.emu.predict_counts(
-                torch.tensor([p["kT"]]), abund, self.logz, norm, p["sigma_v"],
-                self.resp, 1.0, **common)
-        else:
-            w = self.dem.weights({"T_mean": p["T_mean"], "T_sigma": p["T_sigma"]})
-            mu = self.emu.predict_counts_dem(
-                self.dem.temp_grid, w, abund, self.logz, norm, p["sigma_v"],
-                self.resp, 1.0, **common)
-        return mu.squeeze(0).cpu().numpy()[self.keep]
-
-
-def build_params(fwd: Forward, log_norm_truth: float) -> List[Par]:
-    """Truth values, steps and bounds for every free parameter.
-
-    Reads the physical fiducials from ``fwd.perseus`` (falls back to module
-    ``PERSEUS`` for objects that don't set it), so a caller's overrides
-    (via ``resolve_perseus``) flow through as long as they built ``fwd`` with
-    the same dict.
-    """
-    p = getattr(fwd, "perseus", None) or PERSEUS
-    inj = injected_abundances(fwd.emu.elements)
-    out: List[Par] = []
-    for z in FREE_Z:
-        out.append(Par(SYMBOL[z], inj[z], 1e-3, 0.02, 3.0))
-    if fwd.mode == "single":
-        out.append(Par("kT", p["kT"], 5e-3, 1.5, 7.5))
-    else:
-        out.append(Par("T_mean", p["dem_mean"], 5e-3, 1.5, 7.5))
-        out.append(Par("T_sigma", p["dem_sigma"], 5e-3, 0.15, 3.0))
-    out.append(Par("sigma_v", p["vel"], 1.0, *SIGMA_V_PRIOR))
-    out.append(Par("n_h", p["n_h"] / 1e21, 1e-2, 0.0, 5.0))  # 1e21 cm^-2
-    out.append(Par("log_norm", log_norm_truth, 2e-3,
-                   log_norm_truth - 1.0, log_norm_truth + 1.0))
-    return out
 
 
 def poisson_deviance(mu: np.ndarray, d: np.ndarray) -> float:
@@ -217,8 +142,7 @@ def main():
     ap.add_argument("--dem_mean", type=float, default=None)
     ap.add_argument("--dem_sigma", type=float, default=None)
     ap.add_argument("--tag", default="", help="suffix for output files")
-    ap.add_argument("--out", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "results"))
+    ap.add_argument("--out", default=os.path.join(RESULTS, "hot_floor"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 

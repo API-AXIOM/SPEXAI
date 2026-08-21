@@ -15,9 +15,11 @@ import sys
 
 import numpy as np
 
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from experiment import (STORE, find_xrism_response, band_mask,          # noqa: E402
-                        PERSEUS)
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
+from campaign import find_xrism_response, band_mask, PERSEUS               # noqa: E402
+from spexai.config import STORE                                            # noqa: E402
 from gpu_forward import EnsembleForward                                    # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel             # noqa: E402
 from spexai.inference.response import Response                             # noqa: E402

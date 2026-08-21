@@ -58,12 +58,14 @@ import torch
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from experiment import (                                          # noqa: E402
-    PERSEUS, STORE, FREE_Z, HOT_SCIENCE, HOT_WEAK, find_xrism_response,
-    band_mask, gaussian_dem)
-from fisher_bias import (                                         # noqa: E402
-    SYMBOL, N_REF, Par, Forward, linear_bias_fisher)
+from campaign import (                                            # noqa: E402
+    PERSEUS, FREE_Z, HOT_SCIENCE, HOT_WEAK, find_xrism_response,
+    band_mask, gaussian_dem, N_REF, Par, Forward)
+from fisher_bias import linear_bias_fisher                        # noqa: E402
+from spexai.config import STORE, RESULTS                          # noqa: E402
+from spexai.inference.abundances import SYMBOL                    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
 from spexai.inference.response import Response                    # noqa: E402
@@ -326,8 +328,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--store", default=STORE)
     ap.add_argument("--device", default="cpu")
-    ap.add_argument("--out", default=os.path.join(REPO, "inference_demo",
-                                                  "bias_sweep"))
+    ap.add_argument("--out", default=os.path.join(RESULTS, "bias_sweep"))
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--summarise", action="store_true")
     ap.add_argument("--target_counts", type=float, default=1e6,

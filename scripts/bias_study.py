@@ -127,8 +127,8 @@ def main():
     if rmf is None or arf is None:
         sys.path.insert(0, os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "inference_demo", "hot_floor"))
-        from experiment import find_xrism_response
+            "scripts", "inference"))
+        from campaign import find_xrism_response
         d_rmf, d_arf = find_xrism_response()
         rmf, arf = rmf or d_rmf, arf or d_arf
     for path, kind in ((rmf, "RMF"), (arf, "ARF")):

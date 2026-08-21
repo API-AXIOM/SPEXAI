@@ -35,7 +35,7 @@ import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 import spexai.train.broadening as br                              # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -77,7 +77,7 @@ def main():
     if args.rmf:
         response = Response(args.rmf, None)   # FFT-plan stability only; area irrelevant
     else:
-        from experiment import find_xrism_response
+        from campaign import find_xrism_response
         rmf, arf = find_xrism_response()
         response = Response(rmf, arf)
     emu = JointOperatorModel(models_dir=args.store, device=args.device,

@@ -38,7 +38,8 @@ DEVICE=${DEVICE:-cuda}
 NWALKERS=${NWALKERS:-64}           # ensemble (>=2x ndim=11; 64 = one chunk/half)
 NSTEPS=${NSTEPS:-800}              # ample for the ~11-D near-Gaussian posterior
 CHUNK=${CHUNK:-32}                 # walker sub-batch (bounds GPU memory)
-TRUTH=${SPEXAI_TRUTH:-inference_demo/hot_floor/results/truth_${MODE}.npz}
+RESULTS=${SPEXAI_RESULTS:-$HOME/data/spexai_data/results}
+TRUTH=${SPEXAI_TRUTH:-$RESULTS/hot_floor/truth_${MODE}.npz}
 COUNTS=${COUNTS:-"4e4 1e6 1e8"}    # realistic / deep / near-N* (bias ~ 1 sigma)
 # GPU acceleration -- STANDARD for production inference (see header); ACCEL=""
 # disables it for a float64 reference run.
@@ -60,4 +61,4 @@ for c in $COUNTS; do
     --truth_npz "$TRUTH" --nwalkers "$NWALKERS" --nsteps "$NSTEPS" \
     --chunk "$CHUNK" $ACCEL --tag "c${c}"
 done
-echo "done; results in inference_demo/hot_floor/results/mcmc_${MODE}_vec_c*.npz"
+echo "done; results in $RESULTS/hot_floor/mcmc_${MODE}_vec_c*.npz"

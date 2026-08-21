@@ -23,11 +23,14 @@ import time
 import numpy as np
 import torch
 
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from experiment import (                                    # noqa: E402
-    STORE, find_xrism_response, band_mask,
-    TruthConfig, stream_truth_counts, gaussian_dem, resolve_perseus)
-from fisher_bias import Forward, build_params, N_REF        # noqa: E402
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
+from campaign import (                                       # noqa: E402
+    find_xrism_response, band_mask, TruthConfig, stream_truth_counts,
+    gaussian_dem, resolve_perseus, injected_abundances, Forward,
+    build_params, N_REF)
+from spexai.config import STORE, RESULTS                      # noqa: E402
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
@@ -204,8 +207,7 @@ def main():
                     help="float32 FFT continuum broadening on CUDA (~4x)")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run (overrides nwalkers/nsteps/counts)")
-    ap.add_argument("--out", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "results"))
+    ap.add_argument("--out", default=os.path.join(RESULTS, "hot_floor"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     if args.tf32:
@@ -254,7 +256,6 @@ def main():
                   "regenerate it to be sure it matches this store", flush=True)
         d_inband, norm_ref = tz["d_inband"], float(tz["norm_ref"])
     else:                                                # local path: stream truth
-        from experiment import injected_abundances
         cfg = TruthConfig(elements=emu.elements,
                           abundances=injected_abundances(emu.elements),
                           exposure=1.0, dem=dem, dem_params=dem_p)

@@ -8,10 +8,12 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 import json
 
-from experiment import STORE, DATADIR, gaussian_dem                 # noqa: E402
+from campaign import gaussian_dem                                     # noqa: E402
+from spexai.config import STORE, DATADIR                              # noqa: E402
 from spexai.inference.spex_truth import ElementTruth                  # noqa: E402
 
 dem, _ = gaussian_dem()

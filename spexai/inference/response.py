@@ -77,6 +77,36 @@ def load_arf(path):
     return resp, edges
 
 
+def find_response(resp_dir, rmf_name, arf_name):
+    """(RMF, ARF) paths under ``resp_dir``. Both must exist -- no fallback.
+
+    Named explicitly rather than globbed: a glob falls back to picking a file
+    by alphabetical accident and can silently return nothing when no ARF is
+    present at all. Which filenames to ask for (e.g. the specific XRISM/Resolve
+    cycle-3 response, or the aperture-correction choice for an extended
+    source) is campaign configuration and stays with the caller."""
+    rmf = os.path.join(resp_dir, rmf_name)
+    arf = os.path.join(resp_dir, arf_name)
+    for path, kind in ((rmf, "RMF"), (arf, "ARF")):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"{kind} not found: {path}\nSet the responses directory or "
+                f"filename to match what's on disk.")
+    return rmf, arf
+
+
+def band_mask(response, band, exclude=None) -> np.ndarray:
+    """Boolean channel mask: within ``band`` and outside ``exclude`` (keV).
+
+    ``band``/``exclude`` are campaign choices (fit range, a line region to
+    mask out); this just applies them to ``response.chan_e_cent``."""
+    cent = response.chan_e_cent.cpu().numpy()          # (N_channels,)
+    keep = (cent >= band[0]) & (cent <= band[1])
+    if exclude is not None:
+        keep &= ~((cent >= exclude[0]) & (cent <= exclude[1]))
+    return keep
+
+
 class Response:
     """RMF + ARF for one instrument. `energy_edges` is the grid the model
     flux must be evaluated on; `fold` maps that flux to channel counts-rate
