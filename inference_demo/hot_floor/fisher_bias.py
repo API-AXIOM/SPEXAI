@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
     PERSEUS, STORE, FREE_Z, HOT_SCIENCE, HOT_WEAK, injected_abundances,
     find_xrism_response, band_mask, TruthConfig, stream_truth_counts,
-    gaussian_dem)
+    gaussian_dem, resolve_perseus)
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
@@ -55,11 +55,13 @@ class Par:
 class Forward:
     """theta (free-parameter vector) -> in-band emulator counts at N_REF scale."""
 
-    def __init__(self, emu, response, absorption, keep, mode, dem=None):
+    def __init__(self, emu, response, absorption, keep, mode, dem=None,
+                 perseus=None):
         self.emu, self.resp, self.absn = emu, response, absorption
         self.keep, self.mode, self.dem = keep, mode, dem
-        self.logz = float(np.log10(PERSEUS["z"]))
-        self.ld = PERSEUS["dist_m"]
+        self.perseus = PERSEUS if perseus is None else perseus
+        self.logz = float(np.log10(self.perseus["z"]))
+        self.ld = self.perseus["dist_m"]
         # literature abundance parametrisation: free FREE_Z, tie the rest to Fe.
         ab = AbundanceModel(emu.elements)
         for z in FREE_Z:
@@ -91,18 +93,25 @@ class Forward:
 
 
 def build_params(fwd: Forward, log_norm_truth: float) -> List[Par]:
-    """Truth values, steps and bounds for every free parameter."""
+    """Truth values, steps and bounds for every free parameter.
+
+    Reads the physical fiducials from ``fwd.perseus`` (falls back to module
+    ``PERSEUS`` for objects that don't set it), so a caller's overrides
+    (via ``resolve_perseus``) flow through as long as they built ``fwd`` with
+    the same dict.
+    """
+    p = getattr(fwd, "perseus", None) or PERSEUS
     inj = injected_abundances(fwd.emu.elements)
     out: List[Par] = []
     for z in FREE_Z:
         out.append(Par(SYMBOL[z], inj[z], 1e-3, 0.02, 3.0))
     if fwd.mode == "single":
-        out.append(Par("kT", PERSEUS["kT"], 5e-3, 1.5, 7.5))
+        out.append(Par("kT", p["kT"], 5e-3, 1.5, 7.5))
     else:
-        out.append(Par("T_mean", PERSEUS["dem_mean"], 5e-3, 1.5, 7.5))
-        out.append(Par("T_sigma", PERSEUS["dem_sigma"], 5e-3, 0.15, 3.0))
-    out.append(Par("sigma_v", PERSEUS["vel"], 1.0, *SIGMA_V_PRIOR))
-    out.append(Par("n_h", PERSEUS["n_h"] / 1e21, 1e-2, 0.0, 5.0))  # 1e21 cm^-2
+        out.append(Par("T_mean", p["dem_mean"], 5e-3, 1.5, 7.5))
+        out.append(Par("T_sigma", p["dem_sigma"], 5e-3, 0.15, 3.0))
+    out.append(Par("sigma_v", p["vel"], 1.0, *SIGMA_V_PRIOR))
+    out.append(Par("n_h", p["n_h"] / 1e21, 1e-2, 0.0, 5.0))  # 1e21 cm^-2
     out.append(Par("log_norm", log_norm_truth, 2e-3,
                    log_norm_truth - 1.0, log_norm_truth + 1.0))
     return out
@@ -213,14 +222,12 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    # apply physical overrides in-place (experiment.* reads PERSEUS at call time)
-    for key, val in (("vel", args.sigma_v), ("kT", args.kT),
-                     ("dem_mean", args.dem_mean), ("dem_sigma", args.dem_sigma)):
-        if val is not None:
-            PERSEUS[key] = val
+    perseus = resolve_perseus({"vel": args.sigma_v, "kT": args.kT,
+                               "dem_mean": args.dem_mean,
+                               "dem_sigma": args.dem_sigma})
     suffix = (f"_{args.tag}" if args.tag else "")
-    print(f"config: kT={PERSEUS['kT']} sigma_v={PERSEUS['vel']} "
-          f"dem=({PERSEUS['dem_mean']},{PERSEUS['dem_sigma']}) tag='{args.tag}'",
+    print(f"config: kT={perseus['kT']} sigma_v={perseus['vel']} "
+          f"dem=({perseus['dem_mean']},{perseus['dem_sigma']}) tag='{args.tag}'",
           flush=True)
 
     rmf, arf = find_xrism_response()
@@ -229,7 +236,8 @@ def main():
     keep = band_mask(response)
     emu = JointOperatorModel(models_dir=STORE, device="cpu")
     print(f"emulator elements: {emu.elements}")
-    dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
+    dem, dem_p = (gaussian_dem(mean=perseus["dem_mean"], sigma=perseus["dem_sigma"])
+                  if args.mode == "dem" else (None, {}))
 
     # --- noise-free truth, scaled to N_REF in-band counts ---
     els = emu.elements
@@ -237,7 +245,7 @@ def main():
     cfg = TruthConfig(elements=els, abundances=ab, exposure=1.0,
                       dem=dem, dem_params=dem_p)
     t0 = time.time()
-    d_ref = stream_truth_counts(cfg, response, absorption)
+    d_ref = stream_truth_counts(cfg, response, absorption, perseus=perseus)
     assert np.isfinite(d_ref[keep]).all(), (
         "non-finite truth counts -- a DEM grid point is outside the per-element "
         "training temperature range (PCHIP extrapolation blow-up)")
@@ -247,7 +255,8 @@ def main():
     print(f"truth streamed in {time.time()-t0:.1f}s; in-band counts scaled to "
           f"{d.sum():.3e}; log_norm_truth={log_norm_truth:.3f}")
 
-    fwd = Forward(emu, response, absorption, keep, args.mode, dem=dem)
+    fwd = Forward(emu, response, absorption, keep, args.mode, dem=dem,
+                 perseus=perseus)
     pars = build_params(fwd, log_norm_truth)
     t0 = time.time()
     mu0 = fwd(np.array([p.truth for p in pars]))
@@ -280,7 +289,7 @@ def main():
     outp = os.path.join(args.out, f"bias_{args.mode}{suffix}.npz")
     np.savez(outp, names=[p.name for p in pars], truth=[p.truth for p in pars],
              b_sys=b_sys, sigma_ref=sigma_ref, counts=counts, n_ref=N_REF,
-             kT=PERSEUS["kT"], sigma_v=PERSEUS["vel"])
+             kT=perseus["kT"], sigma_v=perseus["vel"])
     print(f"\nsaved {outp}")
 
 

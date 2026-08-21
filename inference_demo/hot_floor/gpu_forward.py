@@ -50,10 +50,12 @@ class EnsembleForward:
     """
 
     def __init__(self, emu, response, absorption, keep, mode, velocity, device,
-                 chunk=32, compile_nets=False, batched=True, mem_gb=2.0):
+                 chunk=32, compile_nets=False, batched=True, mem_gb=2.0,
+                 perseus=None):
         if mode != "single":
             raise NotImplementedError("EnsembleForward: single-T only for now")
         self.emu, self.absn, self.device = emu, absorption, device
+        self.perseus = PERSEUS if perseus is None else perseus
         self.mode = mode
         self.velocity = None if velocity is None else float(velocity)
         self.fit_sigma_v = self.velocity is None
@@ -81,7 +83,7 @@ class EnsembleForward:
             ensure_recompile_limit(8 * max(1, len(emu.models)))
             for m in emu.models.values():
                 m.forward_norm = torch.compile(m.forward_norm, dynamic=True)
-        self.z = 10.0 ** float(np.log10(PERSEUS["z"]))
+        self.z = 10.0 ** float(np.log10(self.perseus["z"]))
         self.abnames = [SYMBOL[z] for z in FREE_Z]
         # order must match build_params (abundances, kT, [sigma_v], n_h, log_norm)
         self.names = self.abnames + ["kT"]
@@ -100,7 +102,7 @@ class EnsembleForward:
         self.arf = torch.as_tensor(response.arf, dtype=torch.float32, device=device)
         self.edges_rest = (response.energy_edges * (1.0 + self.z)).to(device)
         self.keep_idx = torch.as_tensor(np.where(keep)[0], device=device)
-        self.scale_const = distance_factor(PERSEUS["dist_m"]) * FLUX_M2_TO_CM2
+        self.scale_const = distance_factor(self.perseus["dist_m"]) * FLUX_M2_TO_CM2
 
     def params(self, log_norm_truth):
         """Par list (truth/bounds/step) for ``self.names``; drops ``sigma_v``

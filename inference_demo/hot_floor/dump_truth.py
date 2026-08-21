@@ -17,8 +17,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
-    PERSEUS, STORE, RESULTS, injected_abundances, find_xrism_response,
-    band_mask, TruthConfig, stream_truth_counts, gaussian_dem)
+    STORE, RESULTS, injected_abundances, find_xrism_response,
+    band_mask, TruthConfig, stream_truth_counts, gaussian_dem, resolve_perseus)
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
@@ -33,9 +33,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(RESULTS, "hot_floor"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    for key, val in (("vel", args.sigma_v), ("kT", args.kT)):
-        if val is not None:
-            PERSEUS[key] = val
+    perseus = resolve_perseus({"vel": args.sigma_v, "kT": args.kT})
 
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
@@ -47,7 +45,8 @@ def main():
     ab = injected_abundances(emu.elements)
     cfg = TruthConfig(elements=emu.elements, abundances=ab, exposure=1.0,
                       dem=dem, dem_params=dem_p)
-    d_ref = stream_truth_counts(cfg, response, absorption, verbose=True)
+    d_ref = stream_truth_counts(cfg, response, absorption, perseus=perseus,
+                                verbose=True)
     d_inband = d_ref[keep]
     suffix = f"_{args.tag}" if args.tag else ""
     outp = os.path.join(args.out, f"truth_{args.mode}{suffix}.npz")
@@ -63,7 +62,7 @@ def main():
              elements=np.asarray(emu.elements, dtype=np.int64),
              store=os.path.abspath(STORE),
              rmf=os.path.basename(rmf), arf=os.path.basename(arf),
-             kT=PERSEUS["kT"], sigma_v=PERSEUS["vel"], mode=args.mode)
+             kT=perseus["kT"], sigma_v=perseus["vel"], mode=args.mode)
     print(f"in-band counts at norm_ref={cfg.norm_ref:.1e}: {d_inband.sum():.3e} "
           f"over {len(d_inband)} channels\nsaved {outp}")
 

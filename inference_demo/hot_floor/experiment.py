@@ -71,6 +71,20 @@ BAND = (1.9, 12.0)
 EXCLUDE = (6.567, 6.620)
 
 
+def resolve_perseus(overrides: Optional[Dict[str, float]] = None) -> Dict:
+    """A local copy of PERSEUS with CLI-style overrides applied.
+
+    Never mutates the shared module dict -- callers used to do
+    ``PERSEUS[key] = val`` in place, which meant every subsequent reader saw
+    the override (fine for a single-process CLI run) but made the module
+    state itself the channel carrying it. Threading the returned dict through
+    explicitly makes that channel visible at every call site instead."""
+    p = dict(PERSEUS)
+    if overrides:
+        p.update({k: v for k, v in overrides.items() if v is not None})
+    return p
+
+
 def injected_abundances(elements) -> Dict[int, float]:
     """{Z: solar-relative} for every metal in ``elements`` (H/He omitted)."""
     ab = {}
@@ -175,13 +189,20 @@ def gaussian_dem(mean=None, sigma=None, lo=0.7, hi=10.0, n=48):
 
 def stream_truth_counts(cfg: TruthConfig, response, absorption,
                         store=STORE, datadir=DATADIR, device="cpu",
+                        perseus: Optional[Dict] = None,
                         verbose=False) -> np.ndarray:
     """Noise-free channel counts for ``cfg``, summed one element at a time.
+
+    ``perseus`` is the physical-fiducials dict (z, kT, vel, n_h, dist_m);
+    defaults to the module ``PERSEUS`` if not given. Pass the output of
+    ``resolve_perseus(overrides)`` to apply CLI overrides without mutating the
+    shared dict.
 
     Returns the Poisson-mean counts (N_channels,) at ``cfg.norm_ref``; rescale
     linearly to any target total counts.
     """
-    logz = float(np.log10(PERSEUS["z"]))
+    p = PERSEUS if perseus is None else perseus
+    logz = float(np.log10(p["z"]))
     total = None
     for z in cfg.elements:
         z = int(z)
@@ -197,15 +218,15 @@ def stream_truth_counts(cfg: TruthConfig, response, absorption,
             w = cfg.dem.weights(cfg.dem_params)
             c = m.predict_counts_dem(
                 cfg.dem.temp_grid, w, {z: a}, logz, cfg.norm_ref,
-                PERSEUS["vel"], response, cfg.exposure,
-                luminosity_distance=PERSEUS["dist_m"],
-                absorption=absorption, n_h=PERSEUS["n_h"])
+                p["vel"], response, cfg.exposure,
+                luminosity_distance=p["dist_m"],
+                absorption=absorption, n_h=p["n_h"])
         else:
             c = m.predict_counts(
-                torch.tensor([PERSEUS["kT"]]), {z: a}, logz, cfg.norm_ref,
-                PERSEUS["vel"], response, cfg.exposure,
-                luminosity_distance=PERSEUS["dist_m"],
-                absorption=absorption, n_h=PERSEUS["n_h"])
+                torch.tensor([p["kT"]]), {z: a}, logz, cfg.norm_ref,
+                p["vel"], response, cfg.exposure,
+                luminosity_distance=p["dist_m"],
+                absorption=absorption, n_h=p["n_h"])
         c = c.squeeze(0).cpu().numpy()
         total = c if total is None else total + c
         if verbose:

@@ -25,8 +25,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
-    PERSEUS, STORE, find_xrism_response, band_mask,
-    TruthConfig, stream_truth_counts, gaussian_dem)
+    STORE, find_xrism_response, band_mask,
+    TruthConfig, stream_truth_counts, gaussian_dem, resolve_perseus)
 from fisher_bias import Forward, build_params, N_REF        # noqa: E402
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
@@ -70,18 +70,19 @@ def _profile(fwd, response, n, device):
           flush=True)
 
 
-def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d):
+def _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, d,
+                    perseus):
     """Walker-batched all-GPU forward + emcee vectorized=True (single process)."""
     import emcee
     from gpu_forward import EnsembleForward
     # --fix_sigma_v pins sigma_v (the old Tier-1 behaviour); otherwise it is a
     # free per-walker parameter like the rest.
     ens = EnsembleForward(emu, response, absorption, keep, args.mode,
-                          PERSEUS["vel"] if args.fix_sigma_v else None,
+                          perseus["vel"] if args.fix_sigma_v else None,
                           args.device, chunk=args.chunk,
                           compile_nets=args.compile,
                           batched=not args.serial_forward,
-                          mem_gb=args.mem_gb)
+                          mem_gb=args.mem_gb, perseus=perseus)
     pars = ens.params(log_norm_truth)
     names = [p.name for p in pars]
     lo = np.array([p.low for p in pars])
@@ -218,9 +219,7 @@ def main():
         # the dimension, and ndim is 11 here (8 abundances + kT + sigma_v + n_h
         # + log_norm, less one when sigma_v is pinned).
         args.nwalkers, args.nsteps, args.counts = 24, 40, 1e6
-    for key, val in (("vel", args.sigma_v), ("kT", args.kT)):
-        if val is not None:
-            PERSEUS[key] = val
+    perseus = resolve_perseus({"vel": args.sigma_v, "kT": args.kT})
 
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
@@ -234,7 +233,8 @@ def main():
     dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
 
     if args.profile:                                     # measure per-eval cost
-        _profile(Forward(emu, response, absorption, keep, args.mode, dem=dem),
+        _profile(Forward(emu, response, absorption, keep, args.mode, dem=dem,
+                         perseus=perseus),
                  response, args.profile, args.device)
         return
 
@@ -258,7 +258,8 @@ def main():
         cfg = TruthConfig(elements=emu.elements,
                           abundances=injected_abundances(emu.elements),
                           exposure=1.0, dem=dem, dem_params=dem_p)
-        d_inband = stream_truth_counts(cfg, response, absorption)[keep]
+        d_inband = stream_truth_counts(cfg, response, absorption,
+                                       perseus=perseus)[keep]
         norm_ref = cfg.norm_ref
     s = args.counts / d_inband.sum()
     mu_true = d_inband * s                                 # in-band truth mean
@@ -269,10 +270,12 @@ def main():
           flush=True)
 
     if args.vectorized:                                   # GPU walker-batched path
-        _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, _D)
+        _run_vectorized(emu, response, absorption, keep, args, log_norm_truth, _D,
+                        perseus)
         return
 
-    _FWD = Forward(emu, response, absorption, keep, args.mode, dem=dem)
+    _FWD = Forward(emu, response, absorption, keep, args.mode, dem=dem,
+                   perseus=perseus)
     pars = build_params(_FWD, log_norm_truth)
     _LO = np.array([p.low for p in pars])
     _HI = np.array([p.high for p in pars])
