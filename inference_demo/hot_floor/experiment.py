@@ -82,19 +82,58 @@ def injected_abundances(elements) -> Dict[int, float]:
 
 # --- response + fit-band mask ----------------------------------------------
 
+# --- XRISM/Resolve response -------------------------------------------------
+# Named explicitly rather than globbed: the old glob fell back to
+# sorted(rsl_*.arf)[0], which picks a file by alphabetical accident and
+# silently returned None when no ARF was present at all.
+#
+# ARF choice: the 5' flat-field, gate-valve-closed ARF from the Cycle 2/3
+# canned set. Perseus is extended, so a point-source ARF would carry the wrong
+# aperture correction. The flat field is still an approximation for a
+# cool-core cluster's peaked surface brightness -- it is recorded here as an
+# explicit assumption. For emulator testing it does not need to be exact: the
+# same ARF folds both the injected truth and the fitted model, so it cancels.
+# Any absolute-flux claim would need an xaarfgen ARF for the real pointing.
+RESOLVE_RMF = os.environ.get("SPEXAI_RESOLVE_RMF", "rsl_Hp_L_2025.rmf")
+RESOLVE_ARF = os.environ.get("SPEXAI_RESOLVE_ARF", "rsl_extflat5_GVC_2025.arf")
+
+
 def find_xrism_response():
-    """XRISM/Resolve RMF (+ ARF if present) from the responses dir."""
-    import glob
-    for pat in ("rsl_*.rmf", "*resolve*.rmf", "*xrism*.rmf"):
-        hits = sorted(glob.glob(os.path.join(RESP_DIR, pat)))
-        if hits:
-            rmf = hits[0]
-            arf = rmf.replace(".rmf", ".arf")
-            if not os.path.exists(arf):
-                cand = sorted(glob.glob(os.path.join(RESP_DIR, "rsl_*.arf")))
-                arf = cand[0] if cand else None
-            return rmf, arf
-    raise FileNotFoundError(f"no XRISM/Resolve RMF under {RESP_DIR}")
+    """(RMF, ARF) paths for XRISM/Resolve. Both must exist -- no fallback."""
+    rmf = os.path.join(RESP_DIR, RESOLVE_RMF)
+    arf = os.path.join(RESP_DIR, RESOLVE_ARF)
+    for path, kind, env in ((rmf, "RMF", "SPEXAI_RESOLVE_RMF"),
+                            (arf, "ARF", "SPEXAI_RESOLVE_ARF")):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"Resolve {kind} not found: {path}\nSet $SPEXAI_RESPONSES to "
+                f"the responses dir, or ${env} to a different filename. The "
+                f"canned Cycle 3 files are at https://heasarc.gsfc.nasa.gov"
+                f"/docs/xrism/proposals/responses.html")
+    return rmf, arf
+
+
+def check_truth_response(tz, rmf, arf):
+    """Fail if a truth npz was built against a different response than the
+    one this run uses.
+
+    The channel-count and element-set guards cannot catch this: an ARF changes
+    neither ``n_keep`` (band_mask keys off channel centres only) nor the
+    element list, but it rescales ``d_inband`` channel by channel. A truth
+    built with a flat effective area is silently wrong against an ARF-folded
+    fit, which is exactly the failure this exists to stop."""
+    want = (os.path.basename(rmf), os.path.basename(arf))
+    if "arf" not in tz.files:
+        raise SystemExit(
+            "truth npz predates response recording: it was built with a flat "
+            "(unit) effective area and is NOT valid for an ARF-folded fit.\n"
+            "Regenerate it with inference_demo/hot_floor/dump_truth.py.")
+    got = (str(tz["rmf"]), str(tz["arf"]))
+    if got != want:
+        raise SystemExit(
+            f"truth npz was built with RMF/ARF {got} but this run uses {want}."
+            f"\nRegenerate the truth against THIS response, or set "
+            f"$SPEXAI_RESOLVE_RMF / $SPEXAI_RESOLVE_ARF to match it.")
 
 
 def band_mask(response, band=BAND, exclude=EXCLUDE) -> np.ndarray:

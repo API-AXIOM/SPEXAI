@@ -99,7 +99,10 @@ def build_forward(args):
     keep = band_mask(response)
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
-    print(f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}",
+    # SBC draws its own truths through this same forward, so the ARF cancels
+    # by construction -- it is printed only so a run's provenance is on record.
+    print(f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}\n"
+          f"response: {os.path.basename(rmf)} + {os.path.basename(arf)}",
           flush=True)
 
     ab = AbundanceModel(emu.elements)

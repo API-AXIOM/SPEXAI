@@ -643,3 +643,229 @@ independent of the emulator's *function* but not its *training data*. With
 PCHIP interpolation error ~0.003% vs the emulator's ~0.3%
 (`benchmark_offgrid.py`) that is the right trade, but it measures
 interpolation fidelity, not extrapolation.
+
+---
+
+# Bake-off results + new samplers (2026-08-19 → 08-20)
+
+## Read this first if resuming
+
+The bake-off has RESULTS. Three new samplers are built and validated but not
+yet GPU-run. **There is an unsynced cluster fix — see "Must sync" below.**
+
+## MUST SYNC to the cluster before any further sampler run
+
+`spexai/inference/{vector_forward,ppl,priors,samplers}.py` and
+`scripts/bake_off.py`. Plus, on the cluster:
+`pip install nautilus-sampler pocomc nessai` (verified with `--dry-run` to
+leave torch at 2.13.0, so the tuned compile∘vmap path is untouched).
+
+Without the first three files, **NUTS and SVI both die** with
+`Expected all tensors to be on the same device` inside `VectorForward.fold`.
+
+## Results (one 1e6-count Perseus spectrum, 12 free params, A10-class GPU)
+
+| sampler | wall | evals | minESS | ESS/eval | ms/eval | agreement vs emcee |
+|---|---|---|---|---|---|---|
+| emcee | 1.65 h | 51,020 | 144 | 2.8e-3 | 117 | reference |
+| zeus | 5.38 h | 70,800 | 194 | 2.7e-3 | 274 | 0.21σ, width 1.04–1.24 |
+| UltraNest | 10.83 h | 218,711 | 3507 | **1.6e-2** | 178 | 0.14σ, width 0.94–1.11 |
+| SVI (4 particles) | 1.25 h | 8,006 | 4000† | –† | 564 | **2.57σ**, width 0.43–2.96 |
+
+† VI ESS is the *requested draw count*, not measured. Its ESS/eval of 0.50 is
+an artefact (`n_posterior/evals`) and made SVI look 31x better than UltraNest.
+`summarise()` now flags it `!` via the `BY_CONSTRUCTION` set; the importance
+samplers are flagged `*` for Kish-weighted ESS.
+
+**Written up in `docs/inference_methodology.tex`, Sec. `sec:bakeoff`.**
+
+**Decisions:** emcee for the SBC campaign (~165 GPU-h for 100 sims), UltraNest
+as the reference and only logZ source. **Drop zeus** — its mixing is fine
+(~5.5 evals/walker/iter) but `vectorize=True` hands it a *shrinking* active
+subset, so each iteration's tail runs at B=8,4,2 on an idle GPU: 274 ms/eval
+vs emcee's 117, plus 4–24% wider posteriors.
+
+**Recovery offsets are NOISE, not emulator bias.** All samplers agree
+(Ar ≈ −2σ, Ca ≈ +1.4σ). emcee pulls: mean −0.23, sd 0.98, χ²=11.1/12,
+**p=0.52**. Fisher predicts max bias 0.23σ at this exposure — 20x smaller than
+the largest pull. One fit cannot measure emulator bias.
+
+## NUTS — diagnosed, options added, NOT yet re-run
+
+Observed **958 s/iteration**, 21/1000 warmup in 3 h → 532 h projected. Stock
+Pyro (not hand-rolled). Cause: **saturating `max_tree_depth=10`** = 1023
+leapfrog steps/iteration, each a B=1 gradient at 937 ms (implying a B=1 forward
+of 526 ms = **4.0x** the batched 131 ms/walker).
+
+**NUTS is NOT disqualified** (I claimed that first and was wrong). A NUTS
+gradient costs 7.1x an amortised emcee eval, so it needs ESS/eval > 2.0e-2;
+since a well-adapted NUTS gives ~1 independent draw per iteration,
+ESS/eval ≈ 1/(leapfrog steps). **Break-even ≈ 50 steps** — at 31 steps NUTS
+would beat both emcee and UltraNest. It is 21x too long, which is
+adaptation/geometry, not a fundamental limit.
+
+Two likely causes, both now addressable:
+- `full_mass=False` (Pyro default) — a **diagonal** mass matrix cannot
+  represent correlation, and this posterior has the ρ≈−0.85 abundance/norm
+  degeneracy. Checked: marginal scales are NOT the problem (unconstrained
+  condition number only **79**, ~9 steps). It is the correlations.
+- `init_to_uniform` (Pyro default) started NUTS at a **random prior draw**
+  while every other sampler starts at truth — unfair *and* it guarantees huge
+  early trajectories in a 44-nat-sharp posterior.
+
+Added `--nuts_full_mass`, `--nuts_tree_depth`; `init_values=center` is now
+automatic. `run_nuts` prints and records **`steps_per_iter`** from `n_eval` —
+a direct measurement of trajectory length, not a wall-clock inference. Read it
+against ~50. Note Pyro's first mass-matrix window doesn't close until ~iter 75.
+
+**Next:** `--nuts_full_mass --nuts_tree_depth 7 --nuts_warmup 150
+--nuts_samples 150` (~10 h worst case). If it still saturates, the answer is an
+**ensemble gradient sampler** (ChEES-HMC, MEADS) — `potential_and_grad` already
+accepts `(B, ndim)`, and at B=64 a gradient costs 233 ms/chain instead of 936,
+projecting ESS/wall-s ≈ 0.086 vs emcee 0.024, UltraNest 0.090.
+
+## SVI — OOM fixed, guides added, economics understood
+
+**The OOM:** `echunk` cannot help — it bounds the trunk's *energy*-axis
+activations, but `vectorize_particles=True` puts all particles in one batch, so
+peak memory scales linearly with `num_particles`. Added
+**`--svi_particle_chunk`**: particles are split into sub-batches, each calls
+`backward()`, gradients accumulate into the same `.grad` before one step. Pyro's
+`Trace_ELBO` averages over particles, so each chunk is weighted by its share and
+the accumulated gradient is **identical in expectation**. Memory scales with the
+chunk, gradient quality with the total. Pinned by
+`test_particle_chunking_matches_unchunked_gradient` (magnitude + direction).
+Also set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
+**Guide families** via `--svi_guide {mvn,iaf,lowrank,normal}` and
+`samplers.make_guide`. All four verified to work with
+`vectorize_particles=True` (a guide that silently broke it would just look
+slow). Parameter counts at 12 latents: mean-field 24, **full-rank 168**,
+IAF-2 2,786, IAF-4 5,572.
+
+**SVI cost = steps × particles.** Nothing else. The original run (2000 × 4 =
+8,000 evals) was the *fastest* sampler in the table at 0.16x emcee's evals; it
+was fast **because** it was under-resourced, and it was wrong. To stay cheaper
+than emcee needs `steps × particles < 51,020` — so 2000 steps allows ≤25
+particles. A 4000 × 32 configuration is 128,000 evals = 2.5x emcee ≈ 27 h.
+
+**A flow guide is probably NOT the fix.** VI minimises reverse KL, which is
+mode-seeking and systematically *under*-estimates variance; the observed widths
+span 0.43–2.96, and ~3x **too wide** is not a family-mismatch signature, it is
+an unconverged optimiser. Also, at 1e6 counts with 44 nats the posterior should
+be near-Gaussian (Bernstein–von Mises), which is exactly what the whole Fisher
+framework already assumes and validates. A full-rank Gaussian can represent
+ρ≈−0.85 fine.
+
+**Recommended next (not yet implemented): initialise the guide from the Fisher
+matrix.** `F⁻¹` *is* the posterior covariance — set `loc`=truth,
+`scale_tril`=`cholesky(F⁻¹)` instead of `init_to_median`/`init_scale=0.1`. VI
+then starts at the answer with the correct correlation structure instead of
+discovering it by SGD; should cut the step count sharply and is diagnostic (if
+a Fisher-initialised, well-resourced Gaussian *still* fails on n_h, the family
+really is inadequate and IAF becomes justified).
+
+Suggested order: (1) Gaussian 2000 steps × 16 particles, chunk 8; (2) Gaussian
++ Fisher init; (3) IAF only if both fail.
+
+## New samplers: built + validated, NOT GPU-run
+
+`run_nautilus`, `run_pocomc`, `run_inessai` in `spexai/inference/samplers.py`,
+wired into `bake_off.py`. **12 tests in `tests/test_samplers_flow.py`; full
+suite 179+ passing.** Validated on an analytic Poisson problem, including
+cross-checks against UltraNest (medians <0.5σ, width 0.6–1.6, nautilus logZ
+within 1.0 nat) — the test that catches mishandled importance weights, since a
+broken importance sampler still returns a confident, wrong posterior.
+
+**i-nessai trap:** its default `stopping_criterion="ratio"` with
+`tolerance=0.0` stops once `log(Z_live/Z_all) <= 0`, true within a couple of
+iterations for a peaked likelihood. Result: log-weights spanning 8.7e5 nats,
+Kish ESS **exactly 1.0**, one surviving draw — while the raw point cloud looked
+healthy. Fixed by `stopping_criterion="ess"` + `--target_ess` (default 2000).
+Before/after: n_eval 2,037→16,037; ESS 1.0→1,486. Also: `fs.posterior_samples`
+rejection-samples and collapses, so use `ns.samples` + `ns.log_posterior_weights`;
+and the importance sampler needs `to_unit_hypercube`/`from_unit_hypercube`,
+unimplemented in the base `Model`.
+
+**Commands** (one at a time — they share the GPU):
+```bash
+COMMON="--device cuda --compile --tf32 --fft32 --counts 1e6"
+python -u scripts/bake_off.py --sampler nautilus $COMMON --n_live 2000 --n_eff 10000
+python -u scripts/bake_off.py --sampler pocomc  $COMMON --n_effective 512 --n_active 256
+python -u scripts/bake_off.py --sampler inessai $COMMON --n_live 2000 --target_ess 2000
+```
+**Log GPU memory for these three** — all call the likelihood with *varying*
+batch sizes, the pattern behind the earlier `CUFFT_INTERNAL_ERROR` from leaked
+FFT plans. emcee/NUTS have fixed shapes and are safe; these are not.
+
+Run **nautilus first** — it is the direct challenger to UltraNest's 1.6e-2 and
+also returns logZ, so it is like-for-like.
+
+## Outstanding
+
+- Sync the device fix + pip installs to the cluster (blocks NUTS and SVI).
+- Re-run NUTS with `--nuts_full_mass`; re-run SVI per the order above.
+- GPU-run nautilus / pocoMC / i-nessai.
+- Implement the Fisher-initialised VI guide (recommended, not built).
+- Consider `--svi_progress_every` — the progress interval is `steps//20`, so a
+  4000-step run prints only every 200 steps (~80 min of silence at 24 s/step).
+
+## Evaluation campaign: Tier A and Tier C are still UNBUILT
+
+The four-tier design is in the "Bias across parameter space" section above and
+in `docs/inference_methodology.tex` §`sec:biassweep`. Dependency order is
+**D → C → B → A**: D validates the instrument C uses, C validates the
+approximation B relies on, B covers the space. Status:
+
+| tier | what | status |
+|---|---|---|
+| A | joint composition check | **NOT BUILT** |
+| B | Fisher `b_sys` sweep (`scripts/bias_sweep.py`) | built, smoke-tested at 3 points only |
+| C | MCMC pull/coverage at points chosen from B | **NOT BUILT** (needs `--stage point` extended) |
+| D | self-injected SBC control (`scripts/sbc_campaign.py`) | built, tested, not run at scale |
+
+### Tier A — joint composition check (not built)
+
+**Question:** does the 30-element sum's error follow from the per-element
+errors, or do they add *coherently*? Every per-element benchmark is 1-D in
+temperature and single-element; nothing tests whether errors cancel or
+reinforce when 30 elements are summed at a realistic abundance pattern.
+
+**Why it matters:** it gates interpretation of every joint result. If errors
+add coherently the joint error is ~N× a single element's; if they add in
+quadrature it is ~√N×. `b_sys` is a joint quantity, so this sets the scale of
+what Tier B is measuring.
+
+**Shape of the work:** pure emulator-vs-truth in *spectrum* space, no fitting
+and no sampling — compare `JointOperatorModel` against a streamed
+`SpexTruthModel` sum over a handful of (kT, abundance-pattern) points, and
+compare the joint counts-weighted residual against the per-element residuals
+combined under both assumptions. Cheapest tier; hours, not days. Reuse the
+element-outer streaming loop already written in
+`scripts/bias_sweep.py::stage_truth`.
+
+### Tier C — MCMC pull/coverage with free abundances (not built)
+
+**Blocker to fix first:** `scripts/bias_study.py --stage point` varies only
+`temp`, `velocity`, `log_norm`. **Abundances are pinned solar and `logz` is
+fixed** (`REALISTIC`/`EXTREME` dicts near the top of the file, with the comment
+"fixed here to keep the smoke small -- extend as needed"). So the abundance
+dimension has never been probed at the science level, which is exactly the
+dimension Tier B says reweights `b_sys`.
+
+**Why it is needed at all:** the Fisher estimator of Tier B is first order in
+the residual. The hot-floor cross-check found converged MCMC offsets running
+**1.5–3× the linear `b_sys`** at 1e8 counts, though in the predicted direction
+(10/11 parameter signs matched). So Tier B is a calibrated *screen and
+ranking*, not a final number, and its flagged points need confirmation with
+full posteriors.
+
+**Shape of the work:** (1) unpin abundances/`logz` in `bias_study.py --stage
+point`, ideally by reusing `PriorSet` rather than the bespoke range dicts;
+(2) run ~10–20 points **chosen from the Tier B map** — the worst offenders plus
+a few Tier B calls "safe", to check for false negatives; (3) report pulls and
+central-interval coverage, not ranks (ranks are Tier D's job — see
+`spexai/inference/calibration.py` and the thinning trap documented there).
+
+**Cost:** at emcee's 1.65 h/posterior, 20 points ≈ 33 GPU-h. Cheap next to the
+SBC campaign, and it is what makes Tier B publishable.

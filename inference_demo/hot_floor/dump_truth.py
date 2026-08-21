@@ -56,10 +56,14 @@ def main():
     # 28-element store has the same number of channels as a 30-element one, so
     # without this a stale truth passes every shape check and silently biases
     # the whole campaign
+    # rmf/arf are recorded for the same reason as `elements`: an ARF rescales
+    # d_inband channel by channel while leaving n_keep and the element list
+    # untouched, so nothing else here can detect a response mismatch.
     np.savez(outp, d_inband=d_inband, norm_ref=cfg.norm_ref,
              n_channels=len(keep), n_keep=int(keep.sum()),
              elements=np.asarray(emu.elements, dtype=np.int64),
              store=os.path.abspath(STORE),
+             rmf=os.path.basename(rmf), arf=os.path.basename(arf),
              kT=PERSEUS["kT"], sigma_v=PERSEUS["vel"], mode=args.mode)
     print(f"in-band counts at norm_ref={cfg.norm_ref:.1e}: {d_inband.sum():.3e} "
           f"over {len(d_inband)} channels\nsaved {outp}")

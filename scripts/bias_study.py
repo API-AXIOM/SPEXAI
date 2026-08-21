@@ -102,10 +102,14 @@ def main():
     ap.add_argument("--nwalkers", type=int, default=16)
     ap.add_argument("--nsteps", type=int, default=400)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--rmf", default=os.path.expanduser(
-        "~/work/data/spexai/responses/aciss_aimpt_cy28.rmf"))
-    ap.add_argument("--arf", default=os.path.expanduser(
-        "~/work/data/spexai/responses/aciss_aimpt_cy28.arf"))
+    # Default to the same Resolve RMF+ARF as the rest of the campaign. The
+    # old defaults were hardcoded ACIS paths under a laptop-only directory,
+    # so on the cluster --arf silently resolved to a nonexistent file and the
+    # fit ran with a flat effective area.
+    ap.add_argument("--rmf", default=None,
+                    help="RMF path (default: the campaign Resolve RMF)")
+    ap.add_argument("--arf", default=None,
+                    help="ARF path (default: the campaign Resolve ARF)")
     ap.add_argument("--out", default="bias_study.json")
     args = ap.parse_args()
 
@@ -119,7 +123,20 @@ def main():
 
     elements = None if "all" in args.elements else [int(z) for z in args.elements]
     from spexai.inference.response import Response
-    response = Response(args.rmf, args.arf if os.path.exists(args.arf) else None)
+    rmf, arf = args.rmf, args.arf
+    if rmf is None or arf is None:
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "inference_demo", "hot_floor"))
+        from experiment import find_xrism_response
+        d_rmf, d_arf = find_xrism_response()
+        rmf, arf = rmf or d_rmf, arf or d_arf
+    for path, kind in ((rmf, "RMF"), (arf, "ARF")):
+        if not os.path.exists(path):          # never fall back to a flat area
+            raise SystemExit(f"{kind} not found: {path}")
+    print(f"response: {os.path.basename(rmf)} + {os.path.basename(arf)}",
+          flush=True)
+    response = Response(rmf, arf)
     fit_model = JointOperatorModel(device="cpu", elements=elements)
     truth_model = fit_model if args.self_test else SpexTruthModel(
         device="cpu", elements=elements)

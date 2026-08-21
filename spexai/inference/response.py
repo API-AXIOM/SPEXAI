@@ -78,11 +78,20 @@ def load_arf(path):
 
 
 class Response:
-    """RMF (+ optional ARF) for one instrument. `energy_edges` is the grid
-    the model flux must be evaluated on; `fold` maps that flux to channel
-    counts-rate space."""
+    """RMF + ARF for one instrument. `energy_edges` is the grid the model
+    flux must be evaluated on; `fold` maps that flux to channel counts-rate
+    space.
 
-    def __init__(self, rmf_path, arf_path=None):
+    ``arf_path`` is required and has no default: the effective area sets both
+    the normalisation and the energy-dependent weighting of the fit, so
+    dropping it silently is never right. Pass ``arf_path=None`` to opt out
+    explicitly -- that substitutes a flat 1 cm^2 area at every energy, which
+    is only defensible for folding mechanics and timing benchmarks. For
+    XRISM/Resolve in particular the gate valve is closed, so a flat area
+    badly misrepresents the instrument below ~2 keV.
+    """
+
+    def __init__(self, rmf_path, arf_path):
         edges, R, e_min, e_max = load_rmf(rmf_path)
         self.energy_edges = torch.tensor(edges, dtype=torch.float32)
         self.energy_lo = self.energy_edges[:-1]

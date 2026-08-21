@@ -41,7 +41,7 @@ def model():
 def obs(model):
     if not os.path.exists(RMF):
         pytest.skip("ACIS response not available")
-    resp = Response(RMF)
+    resp = Response(RMF, None)   # folding mechanics only; no effective area
     p = {"temp": 3.0, "velocity": 200.0, "norm": 1e10, "logz": -10.0,
          "abundances": {}}
     return simulate_observation(model, resp, p, exposure=1e4,

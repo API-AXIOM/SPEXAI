@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
 
 from experiment import (                                          # noqa: E402
     PERSEUS, STORE, FREE_Z, injected_abundances, find_xrism_response,
-    band_mask)
+    band_mask, check_truth_response)
 from fisher_bias import SYMBOL, build_params                      # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -83,10 +83,12 @@ def build_problem(args):
     keep = band_mask(response)
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
-    print(f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}",
+    print(f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}\n"
+          f"response: {os.path.basename(rmf)} + {os.path.basename(arf)}",
           flush=True)
 
     tz = np.load(args.truth)
+    check_truth_response(tz, rmf, arf)
     if int(tz["n_keep"]) != int(keep.sum()):
         raise SystemExit(
             f"truth npz has {int(tz['n_keep'])} in-band channels but this "

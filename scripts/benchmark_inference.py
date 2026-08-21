@@ -240,7 +240,9 @@ def main():
                     help="soft per-intermediate GPU budget for the batched path")
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--response", default=None, help="RMF path (GPU fold)")
-    ap.add_argument("--arf", default=None)
+    ap.add_argument("--arf", default=None,
+                    help="ARF path. Timing is area-independent, so None is "
+                         "fine here; pass one for any accuracy comparison.")
     ap.add_argument("--n_energy", type=int, default=6000)
     ap.add_argument("--absorption", action="store_true")
     ap.add_argument("--n_h", type=float, default=1e21)

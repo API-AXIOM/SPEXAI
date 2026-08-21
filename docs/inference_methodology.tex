@@ -754,9 +754,11 @@ an identical \code{PoissonPosterior}, so that what is compared is the algorithm
 and nothing else. Code: \code{scripts/bake\_off.py}.
 
 \paragraph{Results.} Table~\ref{tab:bakeoff} gives the state of the comparison.
-\emph{These are partial: NUTS and the flow-accelerated samplers
-(\code{nautilus}, \code{pocoMC}, \code{i-nessai}) are outstanding, and the
-variational row is being re-run (see below).}
+\emph{These are partial. The flow-accelerated samplers (\code{nautilus},
+\code{pocoMC}, \code{i-nessai}) are implemented and verified against analytic
+problems but not yet run at scale; NUTS was diagnosed rather than completed;
+and the variational row is being repeated with a defensible particle count.
+The three ensemble rows are final.}
 
 \begin{table}[t]
 \centering
@@ -810,20 +812,64 @@ runs at $B{=}8,4,2$ where the GPU is idle. Its effective cost is
 $274\,$ms/eval against \code{emcee}'s $117$. Combined with posteriors $4$--$24\%$
 wider, it is dominated on every axis.
 
-\paragraph{Variational inference is fast and wrong.} SVI was the quickest
-($1.25\,$h) and eleven of its twelve parameters look healthy (pulls of mean
-$+0.18$, standard deviation $1.10$, indistinguishable from \code{emcee}'s
-$-0.17$, $1.00$). The exception is decisive: $\nh$ is recovered $8\sigma$ from
-the truth \emph{in its own units}, which decomposes into a $2.6\sigma$ offset
-combined with a posterior $0.43\times$ too narrow. Across parameters the widths
-range from $0.43$ to $2.96$ times the reference, so no global rescaling repairs
-them. This is the characteristic failure of a Gaussian variational family
-against a posterior with a strong degeneracy, and it is the dangerous kind:
-confidently wrong error bars on one parameter, with nothing anomalous elsewhere.
-We note the run used only $4$ ELBO particles (a memory-driven choice, not an
-accuracy-driven one) and is being repeated with more, so we do not yet
-distinguish an intrinsic limitation of the variational family from an
-under-converged optimisation.
+\paragraph{Gradient-based sampling is defeated by the batch size, not by
+mixing.} Pyro's NUTS ran at $958\,$s per iteration, saturating its tree-depth
+ceiling at $1023$ leapfrog steps, each a gradient at $B{=}1$ costing $937\,$ms
+-- implying a single-point forward of ${\sim}526\,$ms, $4\times$ the batched
+$131\,$ms/walker. The comparison that matters is not wall-clock but the
+break-even: a NUTS gradient costs $7.1\times$ an amortised ensemble evaluation,
+so NUTS must reach $\mathrm{ESS/eval}>2.0\times10^{-2}$ to win, and since a
+well-adapted NUTS yields roughly one independent draw per iteration its
+ESS/eval is ${\sim}1/(\text{leapfrog steps})$. \emph{Break-even is therefore
+around $50$ steps}, and at $31$ steps NUTS would beat every other sampler here.
+Running at $1023$ it is a factor ${\sim}21$ from viability, which is a statement
+about adaptation, not about the algorithm. Two defaults are implicated: Pyro
+adapts a \emph{diagonal} mass matrix, which cannot represent correlation at all
+and so cannot follow this posterior's abundance/normalisation degeneracy (the
+marginal scales are not the difficulty -- their condition number in the
+unconstrained space is only ${\sim}79$, worth ${\sim}9$ steps); and the default
+initialisation draws from the prior box, whereas every other sampler here starts
+at the truth. Both are now options. Should they prove insufficient, the
+indicated direction is an \emph{ensemble} gradient method (ChEES-HMC, MEADS)
+that evaluates many chains per forward, since the batched potential and its
+gradient are already available; at $B{=}64$ a gradient costs $233\,$ms per
+chain rather than $936$.
+
+\paragraph{Variational inference is fast and wrong, and the two are related.}
+SVI was the quickest ($1.25\,$h) and eleven of its twelve parameters look
+healthy (pulls of mean $+0.18$, standard deviation $1.10$, indistinguishable
+from \code{emcee}'s $-0.17$, $1.00$). The exception is decisive: $\nh$ is
+recovered $8\sigma$ from the truth \emph{in its own units}, which decomposes
+into a $2.6\sigma$ offset combined with a posterior $0.43\times$ too narrow. It
+is the dangerous kind of failure: confidently wrong error bars on one parameter,
+with nothing anomalous elsewhere.
+
+The speed was, however, borrowed from the accuracy. A variational run costs
+exactly $(\text{steps})\times(\text{particles})$ forward evaluations, and this
+one used only four ELBO particles -- a memory-driven choice, not an
+accuracy-driven one -- for $8\,000$ evaluations, a sixth of \code{emcee}'s. Four
+samples is a very noisy estimate of the ELBO gradient, and restoring a
+defensible particle count costs the speed advantage outright: staying cheaper
+than \code{emcee} allows at most ${\sim}25$ particles over $2000$ steps.
+
+We do not yet attribute the failure. The natural suspicion is an inadequate
+variational family, but the evidence points the other way: minimising the
+reverse Kullback--Leibler divergence is mode-seeking and systematically
+\emph{under}-estimates variance, whereas several of these posteriors came out up
+to $2.96\times$ \emph{too wide}, which is the signature of an unconverged
+optimiser rather than of a family mismatch. A full-rank Gaussian can in any case
+represent a linear degeneracy exactly, and at $10^{6}$ counts with ${\sim}44$
+nats of information the posterior should be close to Gaussian -- an assumption
+the Fisher treatment of Sec.~\ref{sec:fisherbias} already relies on and
+validates. The informative next experiment is therefore not a more expressive
+guide but a better-initialised one: $F^{-1}$ from Sec.~\ref{sec:fisherbias}
+\emph{is} the posterior covariance, so initialising the guide's location at the
+truth and its scale at $\mathrm{chol}(F^{-1})$ starts the optimisation with the
+correct correlation structure instead of requiring it to be discovered by
+stochastic gradient descent. Only if that still fails is a normalizing-flow
+guide indicated -- and it carries $2\,786$ parameters against the full-rank
+Gaussian's $168$, so it would need proportionally more steps and make the cost
+problem worse.
 
 \paragraph{Recovery is consistent across samplers, and consistent with noise.}
 All three sampling methods agree on the same parameter offsets --

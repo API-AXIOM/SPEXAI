@@ -16,13 +16,13 @@ core kT~3.9 keV, Z_Fe~0.55 Zsun, sigma_v~180 km/s; DEM mean~4.27, width~1.11 keV
     conda run -n spexai python scripts/perseus_showcase.py --mode single
 """
 import argparse
-import glob
 import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 
 from spexai.inference.operator_model import JointOperatorModel
 from spexai.inference.spex_truth import SpexTruthModel
@@ -33,7 +33,8 @@ from spexai.inference.simulate import Observation, simulate_observation
 from spexai.inference.fitting import Param, run_emcee, SIGMA_V_PRIOR
 from spexai.inference import tempdist as td
 
-RESP_DIR = os.path.expanduser("~/work/data/spexai/responses")
+RESP_DIR = os.environ.get(
+    "SPEXAI_RESPONSES", os.path.expanduser("~/data/spexai_data/responses"))
 MPC_M = 3.0857e22          # 1 Megaparsec in metres
 # Perseus: z=0.0179 -> luminosity distance ~75 Mpc; emission measure Y in the
 # SPEX unit of 1e64 m^-3 (n_H n_e V). Distance is FIXED (degenerate with Y).
@@ -43,24 +44,24 @@ PERSEUS["dist_m"] = PERSEUS["dist_mpc"] * MPC_M
 
 
 def find_response():
-    """Prefer an XRISM/Resolve response; fall back to Chandra ACIS.
+    """XRISM/Resolve RMF+ARF; fall back to Chandra ACIS if Resolve is absent.
 
-    XRISM/Resolve files are named ``rsl_*`` (e.g. ``rsl_Hp_L_2025.rmf``); a
-    matching ``.arf`` is used if present, otherwise the RMF is used alone (no
-    effective-area weighting -- fine for parameter recovery, but the absolute
-    emission measure needs the real ARF)."""
-    for pat in ("*resolve*.rmf", "*xrism*.rmf", "rsl_*.rmf", "*rsl*.rmf"):
-        hits = sorted(glob.glob(os.path.join(RESP_DIR, pat)))
-        if hits:
-            rmf = hits[0]
-            arf = rmf.replace(".rmf", ".arf")
-            if not os.path.exists(arf):
-                cand = sorted(glob.glob(os.path.join(RESP_DIR, "rsl_*.arf")))
-                arf = cand[0] if cand else None
-            return rmf, arf, "XRISM/Resolve"
-    rmf = os.path.join(RESP_DIR, "aciss_aimpt_cy28.rmf")
-    arf = os.path.join(RESP_DIR, "aciss_aimpt_cy28.arf")
-    return rmf, (arf if os.path.exists(arf) else None), "Chandra ACIS"
+    Delegates to ``experiment.find_xrism_response`` so there is one definition
+    of which Resolve files we use. The previous local copy globbed in a
+    different order than experiment.py's, so the two could silently disagree
+    about which RMF they picked."""
+    sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
+    from experiment import find_xrism_response
+    try:
+        rmf, arf = find_xrism_response()
+        return rmf, arf, "XRISM/Resolve"
+    except FileNotFoundError:
+        rmf = os.path.join(RESP_DIR, "aciss_aimpt_cy28.rmf")
+        arf = os.path.join(RESP_DIR, "aciss_aimpt_cy28.arf")
+        if not (os.path.exists(rmf) and os.path.exists(arf)):
+            raise FileNotFoundError(
+                f"no Resolve response, and no ACIS RMF+ARF under {RESP_DIR}")
+        return rmf, arf, "Chandra ACIS"
 
 
 def metal_abundances(elements, z):

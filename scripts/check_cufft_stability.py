@@ -75,7 +75,7 @@ def main():
         print("EMULATING THE OLD BEHAVIOUR (expect the plan count to climb)\n")
 
     if args.rmf:
-        response = Response(args.rmf)
+        response = Response(args.rmf, None)   # FFT-plan stability only; area irrelevant
     else:
         from experiment import find_xrism_response
         rmf, arf = find_xrism_response()
