@@ -17,3 +17,9 @@ tutorials/log/
 
 # trained emulator weights — do NOT commit until ship time (consider git-lfs then)
 spexai/models/*.pt
+
+# outputs live outside the repo now (see docs/refactor_plan.md Phase 1)
+inference_demo/
+logs/
+sim_plots/
+docs/development_plots/

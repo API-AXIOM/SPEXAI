@@ -42,6 +42,8 @@ DATADIR = os.environ.get(
     "SPEXAI_PROCESSED", os.path.expanduser("~/data/spexai_data/processed"))
 RESP_DIR = os.environ.get(
     "SPEXAI_RESPONSES", os.path.expanduser("~/data/spexai_data/responses"))
+RESULTS = os.environ.get(
+    "SPEXAI_RESULTS", os.path.expanduser("~/data/spexai_data/results"))
 MPC_M = 3.0857e22
 
 # --- Perseus fiducials (arXiv:2606.17141) ----------------------------------

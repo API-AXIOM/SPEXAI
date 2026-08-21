@@ -46,8 +46,8 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
 
 from experiment import (                                          # noqa: E402
-    PERSEUS, STORE, FREE_Z, injected_abundances, find_xrism_response,
-    band_mask, check_truth_response)
+    PERSEUS, STORE, RESULTS, FREE_Z, injected_abundances,
+    find_xrism_response, band_mask, check_truth_response)
 from fisher_bias import SYMBOL, build_params                      # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -331,11 +331,10 @@ def main():
     ap.add_argument("--store", default=os.environ.get(
         "SPEXAI_STORE", os.path.join(REPO, "spexai", "models")))
     ap.add_argument("--truth", default=os.path.join(
-        REPO, "inference_demo", "hot_floor", "results", "truth_single.npz"))
+        RESULTS, "hot_floor", "truth_single.npz"))
     ap.add_argument("--counts", type=float, default=1e6)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default=os.path.join(REPO, "inference_demo",
-                                                  "bakeoff"))
+    ap.add_argument("--out", default=os.path.join(RESULTS, "bakeoff"))
     # forward
     ap.add_argument("--chunk", type=int, default=32)
     ap.add_argument("--mem_gb", type=float, default=2.0)

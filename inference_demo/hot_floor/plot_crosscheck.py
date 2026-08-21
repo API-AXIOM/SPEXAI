@@ -19,8 +19,9 @@ COLOR = {"Fe": "#111111", "Cr": "#d62728", "Mn": "#ff7f0e", "Ni": "#9467bd"}
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results", default=os.path.expanduser(
-        "~/work/data/spexai/inference_demo/hot_floor/results"))
+    ap.add_argument("--results", default=os.path.join(os.environ.get(
+        "SPEXAI_RESULTS", os.path.expanduser("~/data/spexai_data/results")),
+        "hot_floor"))
     args = ap.parse_args()
     R = args.results
 

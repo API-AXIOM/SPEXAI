@@ -35,6 +35,8 @@ from spexai.inference import tempdist as td
 
 RESP_DIR = os.environ.get(
     "SPEXAI_RESPONSES", os.path.expanduser("~/data/spexai_data/responses"))
+RESULTS = os.environ.get(
+    "SPEXAI_RESULTS", os.path.expanduser("~/data/spexai_data/results"))
 MPC_M = 3.0857e22          # 1 Megaparsec in metres
 # Perseus: z=0.0179 -> luminosity distance ~75 Mpc; emission measure Y in the
 # SPEX unit of 1e64 m^-3 (n_H n_e V). Distance is FIXED (degenerate with Y).
@@ -138,7 +140,7 @@ def main():
     ap.add_argument("--nwalkers", type=int, default=24)
     ap.add_argument("--nsteps", type=int, default=800)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default="perseus_showcase")
+    ap.add_argument("--out", default=os.path.join(RESULTS, "showcase"))
     args = ap.parse_args()
 
     elements = None if "all" in args.elements else [int(z) for z in args.elements]

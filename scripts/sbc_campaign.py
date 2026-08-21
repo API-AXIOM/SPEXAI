@@ -53,8 +53,8 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "inference_demo", "hot_floor"))
 
 from experiment import (                                          # noqa: E402
-    PERSEUS, STORE, FREE_Z, injected_abundances, find_xrism_response,
-    band_mask)
+    PERSEUS, STORE, RESULTS, FREE_Z, injected_abundances,
+    find_xrism_response, band_mask)
 from fisher_bias import SYMBOL                                    # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -272,7 +272,7 @@ def main():
     ap.add_argument("--store", default=STORE)
     ap.add_argument("--log_norm_ref", type=float, default=11.0,
                     help="centre of the FIXED log_norm prior box")
-    ap.add_argument("--out", default="sbc_run")
+    ap.add_argument("--out", default=os.path.join(RESULTS, "sbc", "sbc_run"))
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--summarise", action="store_true")
     ap.add_argument("--seed", type=int, default=0)

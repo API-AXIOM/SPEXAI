@@ -17,8 +17,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from experiment import (                                    # noqa: E402
-    PERSEUS, STORE, injected_abundances, find_xrism_response, band_mask,
-    TruthConfig, stream_truth_counts, gaussian_dem)
+    PERSEUS, STORE, RESULTS, injected_abundances, find_xrism_response,
+    band_mask, TruthConfig, stream_truth_counts, gaussian_dem)
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
@@ -30,8 +30,7 @@ def main():
     ap.add_argument("--sigma_v", type=float, default=None)
     ap.add_argument("--kT", type=float, default=None)
     ap.add_argument("--tag", default="")
-    ap.add_argument("--out", default=os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "results"))
+    ap.add_argument("--out", default=os.path.join(RESULTS, "hot_floor"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     for key, val in (("vel", args.sigma_v), ("kT", args.kT)):
