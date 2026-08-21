@@ -190,11 +190,23 @@ def run_sampler(name, post, pars, names, args):
                                          args.out, "nautilus.hdf5"),
                                      resume=args.resume, verbose=True)
     if name == "pocomc":
+        # save_every is deliberately OFF, unlike UltraNest/nautilus above.
+        # pocoMC checkpoints by dill-ing Sampler.__dict__ wholesale (it strips
+        # only `pbar` and `pool`), so our likelihood -- a bound method of
+        # PoissonPosterior holding VectorForward, its torch modules and, with
+        # --compile, a dynamo-compiled trunk -- goes into the pickle and dies
+        # on a pybind11 function record. UltraNest and nautilus are unaffected
+        # because they write their own formats and never serialise the
+        # likelihood. This cost us nothing: resume_state_path was never wired
+        # up here, so the state files were written and never read.
+        if args.resume:
+            print("WARNING: --resume does not apply to pocomc (no usable "
+                  "checkpoint); starting from scratch.", flush=True)
         return samplers.run_pocomc(post, n_effective=args.n_effective,
                                    n_active=args.n_active,
                                    n_total=args.n_total, seed=args.seed,
                                    output_dir=os.path.join(args.out, "pocomc"),
-                                   save_every=10, progress=True)
+                                   save_every=None, progress=True)
     if name == "inessai":
         return samplers.run_inessai(post, nlive=args.n_live, seed=args.seed,
                                     target_ess=args.target_ess,

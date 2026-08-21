@@ -343,6 +343,11 @@ class VectorForward:
 
         The value-only path used by the gradient-free samplers; walkers are
         processed in sub-batches of ``chunk`` to bound device memory."""
-        th = torch.as_tensor(np.atleast_2d(np.asarray(theta, dtype=np.float64)),
-                             dtype=torch.float32, device=self.device)
+        # ascontiguousarray, not asarray: samplers that hand us a view into a
+        # structured array (nessai live points) produce strides that are not a
+        # multiple of the itemsize, which torch.as_tensor refuses. asarray is
+        # a no-op there because the dtype already matches.
+        th = torch.as_tensor(
+            np.ascontiguousarray(np.atleast_2d(theta), dtype=np.float64),
+            dtype=torch.float32, device=self.device)
         return self._counts_chunked(th).detach().cpu().numpy()

@@ -359,6 +359,15 @@ def run_pocomc(post, n_effective=512, n_active=256, n_total=4096,
 
     ``output_dir`` + ``save_every`` write state periodically;
     ``resume_path`` continues from one.
+
+    .. warning::
+       ``save_every`` is unusable with a GPU/torch likelihood and defaults to
+       ``None`` for that reason. pocoMC's ``save_state`` dills
+       ``Sampler.__dict__`` after removing only ``pbar`` and ``pool``, so the
+       likelihood callable is serialised along with everything it closes over.
+       For this posterior that reaches a dynamo-compiled trunk and CUDA-bound
+       C++ objects, and dill raises ``RuntimeError: <pybind11 ... object> is
+       not pickleable``. Setting it is only safe for a pure-numpy likelihood.
     """
     import pocomc
     post.n_eval = 0
@@ -449,7 +458,15 @@ def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
                            for i, n in enumerate(names)}
 
         def _block(self, x):
-            return np.atleast_2d(live_points_to_array(x, self.names))
+            # copy=True is REQUIRED. The default returns a
+            # structured_to_unstructured *view* whose row stride is the whole
+            # live-point record, including nessai's int32 `it` field -- e.g.
+            # 76 bytes for 7 parameters, not a multiple of the 8-byte
+            # itemsize. torch.as_tensor rejects that outright, and
+            # np.asarray(..., dtype=float64) does not fix it because the dtype
+            # already matches so no copy happens.
+            return np.atleast_2d(live_points_to_array(x, self.names,
+                                                      copy=True))
 
         # --- unit-hypercube maps, required by the importance sampler ---------
         # Structured arrays carry bookkeeping fields (logP, logL, it, logW,
