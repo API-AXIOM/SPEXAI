@@ -763,9 +763,31 @@ def run_nuts(model, n_samples=1000, n_warmup=1000, target_accept=0.8,
                              "full_mass": bool(full_mass)})
 
 
+def _chunked_potential_and_grad(post, z, chunk):
+    """``potential_and_grad`` over row-chunks of ``z``, concatenated.
+
+    Unlike ``run_svi``'s ``particle_chunk`` (which must reweight each chunk's
+    ELBO since particles are averaged into one shared guide gradient), each
+    HMC walker's potential and gradient are fully independent -- there is no
+    shared parameter to accumulate into. Splitting the batch and concatenating
+    is therefore an EXACT operation, not an approximation: this must return
+    bit-for-bit (up to floating point) the same ``(u, grad)`` as an unchunked
+    call, which ``test_hmc_walker_chunk_matches_unchunked`` checks directly."""
+    n = z.shape[0]
+    if chunk >= n:
+        return post.potential_and_grad(z)
+    us, grads = [], []
+    for i in range(0, n, chunk):
+        u, g = post.potential_and_grad(z[i:i + chunk])
+        us.append(u)
+        grads.append(g)
+    import torch
+    return torch.cat(us), torch.cat(grads)
+
+
 def run_hmc(post, nwalkers=64, n_samples=500, n_warmup=500, n_leapfrog=20,
            step_size_init=0.01, target_accept=0.8, seed=0, center=None,
-           progress_every=None) -> SamplerResult:
+           progress_every=None, walker_chunk=None) -> SamplerResult:
     """Batched, multi-chain Hamiltonian Monte Carlo directly on
     :class:`~spexai.inference.posterior.PoissonPosterior`, bypassing Pyro.
 
@@ -804,6 +826,19 @@ def run_hmc(post, nwalkers=64, n_samples=500, n_warmup=500, n_leapfrog=20,
     Warmup draws are discarded entirely (matching NUTS's ``warmup_steps``
     convention): the step size is still changing during warmup, so those
     draws are never valid posterior samples.
+
+    **``walker_chunk`` decouples memory from chain count**, the same problem
+    and fix as ``run_svi``'s ``particle_chunk``: ``counts_torch(grad=True)``
+    is deliberately unchunked over its batch dimension (a gradient step needs
+    the whole graph, so ``VectorForward``'s own ``chunk``/``mem_gb`` only
+    bound the *energy*-axis activations, not the walker count), so peak
+    memory scales linearly with ``nwalkers`` and can OOM well before
+    ``nwalkers`` is large enough for batching to pay off. Unlike SVI's chunks
+    (which must be reweighted since Trace_ELBO averages particles into one
+    shared guide gradient), HMC walkers are fully independent, so this is a
+    plain split-and-concatenate -- exact, not approximate. Memory scales with
+    ``walker_chunk``, wall-clock amortisation with ``nwalkers``; set it as
+    large as fits.
     """
     import torch
 
@@ -813,6 +848,12 @@ def run_hmc(post, nwalkers=64, n_samples=500, n_warmup=500, n_leapfrog=20,
     device = post.device
     ndim = prior.ndim
     post.n_eval = 0
+    wc = int(walker_chunk or nwalkers)
+    wc = max(1, min(wc, nwalkers))
+    if wc < nwalkers:
+        print(f"  hmc: {nwalkers} walkers in chunks of <= {wc} (memory scales "
+              f"with the chunk, wall-clock amortisation with the total)",
+              flush=True)
 
     p0 = _init_walkers(prior, nwalkers, rng, center)
     z = prior.to_unconstrained(
@@ -838,14 +879,14 @@ def run_hmc(post, nwalkers=64, n_samples=500, n_warmup=500, n_leapfrog=20,
 
     for it in range(n_total):
         p_mom = torch.randn(nwalkers, ndim, dtype=torch.float64, device=device)
-        u0, du0 = post.potential_and_grad(z)
+        u0, du0 = _chunked_potential_and_grad(post, z, wc)
         h0 = u0 + 0.5 * (p_mom ** 2).sum(-1)
 
         z_new = z.clone()
         p_new = p_mom - 0.5 * epsilon * du0
         for step in range(n_leapfrog):
             z_new = z_new + epsilon * p_new
-            u1, du1 = post.potential_and_grad(z_new)
+            u1, du1 = _chunked_potential_and_grad(post, z_new, wc)
             p_new = p_new - (epsilon if step < n_leapfrog - 1
                              else 0.5 * epsilon) * du1
 
