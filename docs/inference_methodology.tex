@@ -641,6 +641,75 @@ are a screen: points flagged above $1\sigma$ are candidates for confirmation
 with full posterior fits, where the true offset may be larger by a factor of a
 few.
 
+\paragraph{Composition check: does per-element error add coherently or in
+quadrature?} Every $b_{\rm sys}$ reported here is computed on the full
+30-element joint spectrum, so it already reflects however the per-element
+emulator errors actually combine -- there is no independence assumption
+hiding inside it. What was not known going in is the \emph{scale} of that
+combination: if the per-element errors happened to share a sign (a plausible
+outcome, since every element's error stems from the same shared trunk
+architecture and training procedure), the joint residual would be dominated
+by a handful of elements pulling the same way and scale like $N$ times a
+typical per-element error; if they are effectively independent, it scales
+like $\sqrt N$. We checked this directly (\code{scripts/tier\_a\_composition.py}),
+with no fitting involved: at each of four points (the Perseus fiducial plus
+three Latin-hypercube draws from the same range as the sweep), every element
+$Z$'s own (emulator $-$ truth) in-band residual was computed on the shared
+channel grid, then combined two ways -- the actual coherent sum (what the
+science literally sees) and a hypothetical quadrature combination (what $N$
+independent errors of the same per-element magnitudes would give. The ratio
+of the two came out $1.00$--$1.04$ across all four points, indistinguishable
+from $1$ and far from $\sqrt{30}=5.5$: the 30 elements' emulator errors behave
+as independent noise, not a coherent same-direction bias. This is a
+reassuring, not a load-bearing, result -- it rules out the scenario where the
+sweep below would understate the true bias by under-weighting a systematic
+that pervades every element -- and it is consistent with the counts-weighted
+residual figures already on record (${\sim}0.08$--$0.11\%$ here,
+${\sim}0.077\%$ in Sec.~\ref{sec:hotfloor} at the Perseus fiducial).
+
+\paragraph{Results (first sweep, single-temperature, $n=20$).} A 20-point
+Latin-hypercube sweep over the full range above (\code{--seed 3}) gives Table
+\ref{tab:biassweep}, evaluated at $10^{6}$ in-band counts. Every parameter
+stays below $1\sigma$ at every sampled point (\code{frac>1}$=0$ throughout);
+the single worst instance across the whole sweep is $0.95\sigma$ on
+$\mathrm{Fe}$, at a point with $\sigma_v=267\kms$ and a low-$\mathrm{Ca}$
+($0.23\,\zsun$), high-$\mathrm{S}$/$\mathrm{Cr}$/$\mathrm{Mn}$ abundance
+pattern. $kT$ carries the largest \emph{typical} offset (median
+$0.33\sigma$, median $N_\star=9.0\times10^{6}$) -- still an order of
+magnitude above a realistic single-region XRISM exposure
+(${\sim}4\times10^{4}$) -- with every other parameter's median $N_\star$ at
+least $3.6\times10^{7}$. This is a screen over 20 of the combinatorially many
+points in a 12-dimensional box, not an exhaustive map; the sweep is designed
+to be extended cheaply (Sec.~\ref{sec:fisherbias}'s cost argument) rather than
+run once.
+
+\begin{table}[t]
+\centering
+\caption{Linearised bias/statistical-error ratio $|b_{\rm sys}|/\sigma_{\rm
+stat}$ at $10^{6}$ in-band counts, over a 20-point Latin-hypercube sweep of
+the cluster science range (single-temperature). \code{frac>1} is the fraction
+of the 20 points exceeding $1\sigma$.}
+\label{tab:biassweep}
+\begin{tabular}{lrrrrr}
+\toprule
+param & median & p90 & max & frac$>$1 & median $N_\star$ \\
+\midrule
+Si       & 0.014 & 0.038 & 0.120 & 0.00 & $4.9\times10^{9}$ \\
+S        & 0.031 & 0.069 & 0.103 & 0.00 & $1.0\times10^{9}$ \\
+Ar       & 0.039 & 0.099 & 0.159 & 0.00 & $6.6\times10^{8}$ \\
+Ca       & 0.057 & 0.137 & 0.183 & 0.00 & $3.2\times10^{8}$ \\
+Cr       & 0.024 & 0.091 & 0.129 & 0.00 & $1.9\times10^{9}$ \\
+Mn       & 0.029 & 0.093 & 0.205 & 0.00 & $1.2\times10^{9}$ \\
+Fe       & 0.209 & 0.511 & 0.954 & 0.00 & $2.6\times10^{7}$ \\
+Ni       & 0.112 & 0.224 & 0.255 & 0.00 & $8.2\times10^{7}$ \\
+$kT$     & 0.334 & 0.513 & 0.746 & 0.00 & $9.0\times10^{6}$ \\
+$\sigma_v$ & 0.056 & 0.329 & 0.715 & 0.00 & $3.2\times10^{8}$ \\
+$\nh$    & 0.093 & 0.242 & 0.346 & 0.00 & $1.1\times10^{8}$ \\
+$\log(\text{norm})$ & 0.168 & 0.283 & 0.508 & 0.00 & $3.6\times10^{7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \section{Sampling the velocity dispersion}\label{sec:sigmav}
 The line-of-sight velocity dispersion $\sigma_v$ is a free, sampled parameter.
 It was previously pinned in the walker-batched runs for an implementation
@@ -885,6 +954,40 @@ smaller than the largest observed pull. A single fit therefore cannot measure
 emulator bias, which is precisely the argument for the sweep of
 Sec.~\ref{sec:biassweep} and for calibration over many realisations rather than
 one showcase.
+
+\paragraph{Confirmed by multi-seed reseeding: noise, not bias.} The argument
+above is indirect (a Fisher prediction is much smaller than an observed pull);
+a direct test redraws the Poisson realisation at the identical truth and
+exposure with independent seeds and asks whether a parameter's offset stays
+pinned near its original value (bias) or scatters around zero (that one draw's
+noise). Three algorithms agreeing on the original draw cannot distinguish
+these, because all three fit the same single realisation and necessarily agree
+on whatever its particular fluctuation did. We redrew 8 independent
+realisations (\code{scripts/mle\_reseed.py}) and computed a quick point
+estimate for each -- not a full posterior, but batched Fisher scoring
+(iteratively reweighted least squares for the Poisson likelihood, reusing the
+same central-difference Jacobian as Sec.~\ref{sec:fisherbias}, relinearised
+each round and batched across all 8 seeds into one forward call per round; 3
+rounds converged the largest step to $3\times10^{-3}$). A gradient-based
+alternative (batched L-BFGS on the differentiable forward) was tried first and
+abandoned for this exposure on CPU: the autograd path is deliberately
+unchunked (a gradient step needs the whole graph), and 4 seeds at 60
+iterations ran past 10 minutes without converging; it remains available as
+\code{--method lbfgs} for a GPU run, where the same batching that makes the
+ensemble samplers cheap (Sec.~\ref{sec:forwardcost}) applies to it too.
+
+The result is unambiguous for all four flagged parameters: $\mathrm{Ni}$
+scattered over $[-0.91,+0.66]\sigma$ (mean $-0.13$, s.d.\ $0.55$) against an
+original pull of $+2.0\sigma$; $\mathrm{Mn}$ over $[-1.04,+2.28]\sigma$ (mean
+$+0.59$, opposite sign to the original $-1.4\sigma$); $\mathrm{S}$ over
+$[-0.78,+1.00]\sigma$ (mean $+0.03$) against $-1.3\sigma$; $\sigma_v$ over
+$[-2.35,+1.50]\sigma$ (mean $-0.27$) against $+1.45\sigma$. None of the four
+stayed pinned near its original value or even kept a consistent sign across
+reseeds -- exactly the signature of Poisson noise from one unlucky draw, and
+inconsistent with a systematic emulator offset, which by construction would
+reappear at the same magnitude and sign for every realisation of the same
+truth. This closes the question the single-fit comparison above could only
+raise.
 
 
 \begin{thebibliography}{9}
