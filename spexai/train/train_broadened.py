@@ -28,12 +28,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from spexai.train.broadening import (fft_broaden, scatter_to_grid,
+from spexai.broadening import (fft_broaden, scatter_to_grid,
                                      uniform_log_edges)
-from spexai.train.operator import OperatorConfig, SpectralOperator, \
+from spexai.operator import OperatorConfig, SpectralOperator, \
     edges_from_centers
-from spexai.train.train_operator import (FLOOR, SpectrumData,
-                                         relative_error_loss)
+from spexai.train.train_operator import FLOOR, relative_error_loss
+from spexai.data import SpectrumData
 
 # broadened wings below this fraction of the spectrum peak are zeroed:
 # they are physically invisible, and float32 FFT noise lives down there

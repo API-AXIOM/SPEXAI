@@ -29,7 +29,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from spexai.train.operator import OperatorConfig, SpectralOperator, FixedGridMLP
+from spexai.operator import OperatorConfig, SpectralOperator, FixedGridMLP
+from spexai.data import SpectrumData
 
 FLOOR = -10.0  # log10 flux below which the spectrum is treated as empty
 LINE_THRESHOLD_DEX = math.log10(2.0)  # flux > 2x continuum -> line bin
@@ -130,21 +131,6 @@ def find_edge_bins(data, n_sample=256, window=40, jump_dex=0.25,
 # ---------------------------------------------------------------------------
 # data
 # ---------------------------------------------------------------------------
-
-class SpectrumData:
-    """Holds the preprocessed cache in memory (float32)."""
-
-    def __init__(self, cachedir):
-        self.energy = torch.from_numpy(np.load(os.path.join(cachedir, "energy.npy")))
-        self.temps = torch.from_numpy(np.load(os.path.join(cachedir, "temps.npy")))
-        self.logflux = torch.from_numpy(
-            np.load(os.path.join(cachedir, "logflux.npy"), mmap_mode=None))
-        splits = np.load(os.path.join(cachedir, "splits.npz"))
-        self.train_idx = torch.from_numpy(splits["train"]).long()
-        self.val_idx = torch.from_numpy(splits["val"]).long()
-        self.test_idx = torch.from_numpy(splits["test"]).long()
-        self.n_bins = self.logflux.shape[1]
-
 
 # ---------------------------------------------------------------------------
 # losses

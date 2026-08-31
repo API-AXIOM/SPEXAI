@@ -40,9 +40,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from spexai.train.train_operator import (FLOOR, SpectrumData, evaluate,
+from spexai.train.train_operator import (FLOOR, evaluate,
                                          find_edge_bins, find_line_bins,
                                          make_variant, relative_error_loss)
+from spexai.data import SpectrumData, pchip_generate
 
 
 def loo_interpolation_error(lt, Y, chunk=512):
@@ -66,17 +67,6 @@ def loo_interpolation_error(lt, Y, chunk=512):
     return loo
 
 
-def pchip_generate(lt_grid, Y, lt_new, half=4):
-    """Per-bin PCHIP log-flux spectra at new log-temperatures, fit on a
-    local stencil of the training grid (train rows only, never val/test)."""
-    from scipy.interpolate import PchipInterpolator
-    out = np.empty((len(lt_new), Y.shape[1]), dtype=np.float32)
-    for i, lt in enumerate(lt_new):
-        j = int(np.searchsorted(lt_grid, lt))
-        lo, hi = max(0, j - half), min(len(lt_grid), j + half)
-        out[i] = PchipInterpolator(lt_grid[lo:hi], Y[lo:hi],
-                                   axis=0)(lt).astype(np.float32)
-    return out
 
 
 def per_sample_mre(pred, target):

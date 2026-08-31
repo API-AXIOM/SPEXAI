@@ -27,10 +27,10 @@ import functools
 import torch
 from torch.func import functional_call, stack_module_state
 
-from spexai.train.operator import SpectralOperator
+from spexai.operator import SpectralOperator
 from spexai.inference.operator_model import (abundance_weight,
                                              ensure_recompile_limit)
-from spexai.train.broadening import (deposit_gaussian_lines, fft_broaden,
+from spexai.broadening import (deposit_gaussian_lines, fft_broaden,
                                       limit_cufft_plan_cache, rebin_flux,
                                       scatter_to_grid, uniform_log_edges)
 

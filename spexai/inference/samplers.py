@@ -761,3 +761,138 @@ def run_nuts(model, n_samples=1000, n_warmup=1000, target_accept=0.8,
                              "steps_per_iter": float(steps_per_iter),
                              "tree_depth_ceiling": int(ceiling),
                              "full_mass": bool(full_mass)})
+
+
+def run_hmc(post, nwalkers=64, n_samples=500, n_warmup=500, n_leapfrog=20,
+           step_size_init=0.01, target_accept=0.8, seed=0, center=None,
+           progress_every=None) -> SamplerResult:
+    """Batched, multi-chain Hamiltonian Monte Carlo directly on
+    :class:`~spexai.inference.posterior.PoissonPosterior`, bypassing Pyro.
+
+    **Why this exists.** ``run_nuts`` is a *single-point* sampler: every
+    leapfrog gradient is one forward at ``B=1`` (see its docstring), which on
+    a GPU costs nowhere near ``1/nwalkers`` of a batched call -- a structural
+    tax paid regardless of how well NUTS's tree adapts. This sampler pays it
+    off: ``nwalkers`` independent HMC chains are advanced with ONE batched
+    ``potential_and_grad`` call per leapfrog step, the same amortisation
+    emcee/zeus/SVI already get. It deliberately has no recursive tree-doubling
+    or U-turn detection -- a fixed leapfrog trajectory length instead -- both
+    because that machinery is exactly what made an earlier hand-rolled NUTS
+    attempt too error-prone to trust, and because it is not needed to fix the
+    B=1 problem, only to fix trajectory-length selection.
+
+    **What this does and does not fix.** The guaranteed win is per-iteration
+    wall-clock: batching removes the B=1 GPU tax outright, independent of
+    posterior geometry. It is NOT expected to fix, on its own, the abundance/
+    normalisation correlation that a production NUTS run hit (rho ~= -0.85):
+    this sampler uses an IDENTITY mass matrix, which represents parameter
+    correlation no better than Pyro's diagonal default did, and NUTS's own
+    dense (``full_mass=True``) attempt already failed to fix that same
+    correlation. So a collapsed step size or poor ESS/eval here is the
+    expected signal that a correlation-aware (diagonal or dense) mass matrix
+    is needed next, not evidence this implementation is wrong -- judge it
+    first on wall-clock/iteration and on whether it recovers the truth at
+    smoke scale.
+
+    ``n_samples``/``n_warmup`` match ``run_nuts``'s naming (this sampler's
+    direct comparison point), not ``run_emcee``'s single ``nsteps`` that
+    includes burn-in -- the two are not directly comparable by name.
+
+    ``n_leapfrog`` is a fixed trajectory length (no adaptation); if mixing is
+    poor, tune this before reaching for anything more elaborate.
+
+    Warmup draws are discarded entirely (matching NUTS's ``warmup_steps``
+    convention): the step size is still changing during warmup, so those
+    draws are never valid posterior samples.
+    """
+    import torch
+
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    prior = post.prior
+    device = post.device
+    ndim = prior.ndim
+    post.n_eval = 0
+
+    p0 = _init_walkers(prior, nwalkers, rng, center)
+    z = prior.to_unconstrained(
+        torch.as_tensor(p0, dtype=torch.float64, device=device))
+
+    # dual averaging (Hoffman & Gelman 2014, Algorithm 6): one shared scalar
+    # step size across all chains, adapted from their MEAN accept probability
+    # each warmup iteration. Per-chain step sizes were considered and rejected
+    # -- chains start from a tight cloud around `center` (truth), so they
+    # should behave similarly, and a single shared scalar keeps this sampler
+    # as simple as the "why this exists" note above requires.
+    mu = np.log(10.0 * step_size_init)
+    log_eps_bar = 0.0
+    h_bar = 0.0
+    t0_da, gamma_da, kappa_da = 10.0, 0.05, 0.75
+    epsilon = step_size_init
+
+    n_total = n_warmup + n_samples
+    chain = np.empty((n_total, nwalkers, ndim), dtype=np.float64)
+    accepts = np.empty(n_total, dtype=np.float64)
+    t0 = time.time()
+    every = progress_every or max(1, n_total // 20)
+
+    for it in range(n_total):
+        p_mom = torch.randn(nwalkers, ndim, dtype=torch.float64, device=device)
+        u0, du0 = post.potential_and_grad(z)
+        h0 = u0 + 0.5 * (p_mom ** 2).sum(-1)
+
+        z_new = z.clone()
+        p_new = p_mom - 0.5 * epsilon * du0
+        for step in range(n_leapfrog):
+            z_new = z_new + epsilon * p_new
+            u1, du1 = post.potential_and_grad(z_new)
+            p_new = p_new - (epsilon if step < n_leapfrog - 1
+                             else 0.5 * epsilon) * du1
+
+        h1 = u1 + 0.5 * (p_new ** 2).sum(-1)
+        log_accept = torch.clamp(h0 - h1, max=0.0)
+        log_accept = torch.where(torch.isfinite(log_accept), log_accept,
+                                 torch.full_like(log_accept, -np.inf))
+        accept = torch.log(torch.rand(nwalkers, dtype=torch.float64,
+                                      device=device)) < log_accept
+        z = torch.where(accept[:, None], z_new, z)
+
+        accept_prob = torch.exp(log_accept).clamp(max=1.0)
+        accept_prob = torch.where(torch.isfinite(accept_prob),
+                                  accept_prob, torch.zeros_like(accept_prob))
+        accepts[it] = float(accept_prob.mean())
+
+        if it < n_warmup:
+            m = it + 1
+            eta = 1.0 / (m + t0_da)
+            h_bar = (1.0 - eta) * h_bar + eta * (target_accept - accepts[it])
+            log_epsilon = mu - (np.sqrt(m) / gamma_da) * h_bar
+            eta2 = m ** (-kappa_da)
+            log_eps_bar = eta2 * log_epsilon + (1.0 - eta2) * log_eps_bar
+            epsilon = float(np.exp(log_epsilon))
+        elif it == n_warmup:
+            epsilon = float(np.exp(log_eps_bar))
+
+        theta, _ = prior.to_constrained(z)
+        chain[it] = theta.detach().cpu().numpy()
+
+        if it == 0 or (it + 1) % every == 0:
+            el = time.time() - t0
+            print(f"  hmc step {it+1}/{n_total}  {el:.0f}s "
+                  f"(~{el/(it+1)*n_total:.0f}s projected)  "
+                  f"eps={epsilon:.2e} acc={accepts[it]:.2f}", flush=True)
+
+    runtime = time.time() - t0
+    post_warmup = chain[n_warmup:]
+    samples = post_warmup.reshape(-1, ndim)
+    accept_rate = float(accepts[n_warmup:].mean()) if n_samples else float("nan")
+    grads_per_iter = n_leapfrog + 1
+    print(f"  hmc: {grads_per_iter} grads/iteration, final step size "
+          f"{epsilon:.2e}, post-warmup accept rate {accept_rate:.2f}",
+          flush=True)
+    return SamplerResult("hmc", prior.names, samples, runtime, post.n_eval,
+                         _ess(post_warmup, prior.names), chain=chain,
+                         extra={"step_size": float(epsilon),
+                                "accept_rate": accept_rate,
+                                "n_leapfrog": int(n_leapfrog),
+                                "grads_per_iter": int(grads_per_iter)})

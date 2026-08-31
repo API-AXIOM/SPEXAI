@@ -1,8 +1,8 @@
-"""Unit tests for the shared held-out metrics (spexai.train.metrics)."""
+"""Unit tests for the shared held-out metrics (spexai.metrics)."""
 import numpy as np
 import pytest
 
-from spexai.train.metrics import (FLOOR, abs_rel_error, floor_violations,
+from spexai.metrics import (FLOOR, abs_rel_error, floor_violations,
                                    line_continuum_masks, metrics_from_eps,
                                    spectrum_metrics)
 

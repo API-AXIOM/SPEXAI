@@ -4,7 +4,7 @@ Two capabilities missing from the per-element benchmark scripts:
 
 * :func:`evaluate_manifest` iterates every element in ``spexai/models/
   manifest.json``, scores each self-contained checkpoint against its held-out
-  SPEX cache with the shared :func:`spexai.train.metrics.spectrum_metrics`, and
+  SPEX cache with the shared :func:`spexai.metrics.spectrum_metrics`, and
   produces one aggregate table (dict + JSON + markdown). It scales from the
   current 16 elements to the full 30 automatically as the model store grows.
 
@@ -25,8 +25,8 @@ import numpy as np
 import torch
 
 from spexai.inference.operator_model import MODELS_DIR, load_operator
-from spexai.train.train_operator import SpectrumData
-from spexai.train.metrics import spectrum_metrics
+from spexai.data import SpectrumData
+from spexai.metrics import spectrum_metrics
 
 
 def _default_datadir(models_dir: str, manifest: dict) -> str:

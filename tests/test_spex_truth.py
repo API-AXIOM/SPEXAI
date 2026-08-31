@@ -8,7 +8,7 @@ import torch
 
 from spexai.inference.spex_truth import ElementTruth, SpexTruthModel
 from spexai.inference.operator_model import MODELS_DIR
-from spexai.train.operator import edges_from_centers
+from spexai.operator import edges_from_centers
 
 
 def _synthetic_element(n_bins=50, n_t=5):

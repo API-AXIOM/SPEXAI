@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-import spexai.train.broadening as _broadening
+import spexai.broadening as _broadening
 from spexai.inference.operator_model import (MODELS_DIR, element_broadened_flux,
                                              enable_inference_acceleration,
                                              load_operator)

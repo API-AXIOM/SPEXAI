@@ -23,10 +23,9 @@ import os
 import numpy as np
 import torch
 
-from spexai.train.operator import edges_from_centers
-from spexai.train.train_adaptive import pchip_generate
-from spexai.train.train_operator import SpectrumData
-from spexai.train.broadening import direct_broaden, rebin_flux
+from spexai.operator import edges_from_centers
+from spexai.broadening import direct_broaden, rebin_flux
+from spexai.data import SpectrumData, pchip_generate
 from spexai.inference.operator_model import MODELS_DIR
 from spexai.inference.units import D_REF_M, FLUX_M2_TO_CM2, distance_factor
 

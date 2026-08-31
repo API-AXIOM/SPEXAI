@@ -20,10 +20,10 @@ design `~/.claude/plans/snazzy-finding-matsumoto.md`, the methodology report
 | **SPEX ground truth** | `spexai/inference/spex_truth.py` | `SpexTruthModel` — independent PCHIP-over-SPEX + exact broadening, mirrors `JointOperatorModel`'s API. |
 | **Abundances** | `spexai/inference/abundances.py` | `AbundanceModel` — global metallicity, free elements, tie-to-fraction-of-iron. |
 | **DEM** | `spexai/inference/tempdist.py` | `TempGrid`, Gaussian(logT/T), two-Gaussian, lognormal (scipy), non-parametric `BinnedDEM`; `predict_counts_dem` on both models. |
-| **Absorption** | `spexai/inference/absorption.py`, `scripts/build_tbabs_table.py`, `spexai/inference/data/tbabs_sigma.npz` | Screen on the native fine grid pre-rebin (observed frame); tbabs (cached from XSPEC) + wabs fallback; `Absorption.default()`. |
-| **Normalisation** | `spexai/inference/units.py`, `scripts/validate_spex_norm.py` | Physical `norm` = emission measure Y (1e64 m⁻³) + `luminosity_distance`; m²→cm² factor; validated vs SPEX. |
-| **Bias study** | `scripts/bias_study.py` | Staged SBC/pulls: point bias + coverage, then rank statistics; SPEX-truth inject with emulator-self control. |
-| **Perseus showcase** | `scripts/perseus_showcase.py` | Single-T & Gaussian-DEM injection-recovery at Perseus's physical distance; reports the emission measure. |
+| **Absorption** | `spexai/inference/absorption.py`, `scripts/data/build_tbabs_table.py`, `spexai/inference/data/tbabs_sigma.npz` | Screen on the native fine grid pre-rebin (observed frame); tbabs (cached from XSPEC) + wabs fallback; `Absorption.default()`. |
+| **Normalisation** | `spexai/inference/units.py`, `scripts/inference/validate_spex_norm.py` | Physical `norm` = emission measure Y (1e64 m⁻³) + `luminosity_distance`; m²→cm² factor; validated vs SPEX. |
+| **Bias study** | `scripts/inference/bias_study.py` | Staged SBC/pulls: point bias + coverage, then rank statistics; SPEX-truth inject with emulator-self control. |
+| **Perseus showcase** | `scripts/inference/perseus_showcase.py` | Single-T & Gaussian-DEM injection-recovery at Perseus's physical distance; reports the emission measure. |
 | **Inference glue** | `spexai/inference/{fitting,simulate,operator_model}.py` | `make_loglike`/`run_emcee`/`run_ultranest` gained `abundance_model=`, `dem=`, `absorption=`, `luminosity_distance` (fixed); simulate is absorption/distance-aware; fixed a `run_ultranest` `resume=None` crash. |
 | **Wiring** | `spexai/__init__.py`, `spexai/inference/__init__.py`, legacy modules | `import spexai` → operator stack; legacy CNN modules emit `DeprecationWarning`. |
 | **Docs/tests** | `docs/*`, `tutorials/*`, `tests/test_{metrics,spex_truth,dem,absorption,units}.py` | Report, tutorial, notebook, unit + real-data-gated tests. |
@@ -50,7 +50,7 @@ design `~/.claude/plans/snazzy-finding-matsumoto.md`, the methodology report
   native Apple-Silicon conda): emulator absolute flux matches SPEX `cie` at
   T=4 keV to ~2.5% across 3–8 keV (→5% at 8 keV from the missing elements). This
   confirms flux units (ph/s/m²/bin), Y_ref=1, D_ref=1e22 m, and the 1e-4
-  m²→cm² factor — no order-of-magnitude error. (`scripts/validate_spex_norm.py`.)
+  m²→cm² factor — no order-of-magnitude error. (`scripts/inference/validate_spex_norm.py`.)
 - Absorption: n_h=0 is an exact no-op; tbabs suppresses the soft band correctly.
 - Perseus single-T & DEM smokes recover all injected params within ~1σ; the
   single-T run reports a physical **Y ≈ 4×10⁷² m⁻³ at 75 Mpc** — consistent with
@@ -122,7 +122,7 @@ not executed with saved outputs.
 
 Goal: make one vectorised MCMC forward step cheap enough for a 30-element SBC
 campaign. Measured on the cluster GPU (22 GiB), full 30-element store,
-`nwalkers=96`, via `scripts/benchmark_inference.py`.
+`nwalkers=96`, via `scripts/inference/benchmark_inference.py`.
 
 ## Result: 2.19x over the production path, and the ladder is now closed
 
@@ -293,7 +293,7 @@ bake-off itself has NOT been run — that is the next action.
 
 ## Read next / resume from
 
-This section, then `scripts/bake_off.py --help`. The run procedure is at the
+This section, then `scripts/inference/bake_off.py --help`. The run procedure is at the
 bottom. Design decisions that were explicitly agreed with the user are marked
 **[agreed]** — do not silently revisit them.
 
@@ -305,10 +305,10 @@ bottom. Design decisions that were explicitly agreed with the user are marked
 | **Shared posterior** | `spexai/inference/posterior.py` | `BoxPrior` + `PoissonPosterior`: one likelihood for every sampler. `logp` (numpy, batched) for the gradient-free ones, `ptform` for nested sampling, `potential`/`potential_and_grad` in unconstrained space for NUTS/VI. |
 | **Probabilistic model** | `spexai/inference/ppl.py` | `SpectrumModel`: the same density as a Pyro program, priors declared as distributions. Written batch-first so `vectorize_particles=True` sends `num_particles` to the forward as one batched call. |
 | **Samplers** | `spexai/inference/samplers.py` | `run_emcee`, `run_zeus`, `run_ultranest`, `run_nuts` (Pyro), `run_svi` (Pyro, full-rank Gaussian). All return `SamplerResult` with ESS and `ess_per_eval`. |
-| **Driver** | `scripts/bake_off.py` | One sampler per invocation, own result file, `--summarise` builds the table. Scores wall-clock, evals, ESS/eval, recovery vs truth, agreement vs a reference chain, log Z. |
+| **Driver** | `scripts/inference/bake_off.py` | One sampler per invocation, own result file, `--summarise` builds the table. Scores wall-clock, evals, ESS/eval, recovery vs truth, agreement vs a reference chain, log Z. |
 | **DEM batching** | `spexai/inference/tempdist.py` | `weights_batch(params)`: `{name: (B,)}` → `(B, G)`, pure torch and differentiable, alongside the scalar scipy `weights`. Implemented for the Gaussian presets, `TwoGaussianDEM` and `BinnedDEM`. |
 | **Refactor** | `spexai/inference/fitting.py` | `run_emcee`/`run_ultranest` default to `vectorized=True` over the shared posterior; the scalar `make_loglike` is kept as a tested reference. `run_ultranest`'s row-by-row likelihood loop is gone. |
-| **Checks** | `scripts/check_deps.py`, `scripts/check_cufft_stability.py` | Dependency audit (exits non-zero); fast GPU reproduction of the cuFFT failure with an `--emulate_old` A/B. |
+| **Checks** | `scripts/data/check_deps.py`, `scripts/inference/check_cufft_stability.py` | Dependency audit (exits non-zero); fast GPU reproduction of the cuFFT failure with an `--emulate_old` A/B. |
 
 ## Key decisions [agreed]
 
@@ -407,13 +407,13 @@ batch, a structural handicap pinned by a test and reported in the table.
   manifest entry with a `status` flag and the only production element with no
   `benchmark_test.json`. The final model is not on the laptop (the store copy is
   byte-identical to the only local candidate); it must be rsync'd from the
-  cluster and re-collected with `scripts/collect_models.py`. Sc is *tied to Fe*,
+  cluster and re-collected with `scripts/data/collect_models.py`. Sc is *tied to Fe*,
   not fitted, so it lands as a systematic in `b_sys` — fine for comparing
   samplers, not fine for calibration.
 
 **Needs a GPU (nothing else does):**
 - The **bake-off** itself.
-- `python scripts/benchmark_ppl.py --device cuda --real --skip_overhead` — the
+- `python scripts/inference/benchmark_ppl.py --device cuda --real --skip_overhead` — the
   forward's B-scaling curve, which is what makes the NUTS row interpretable.
 - The **compile stall**, printed by any `--vectorized` run as
   `forward: first call Xs, warm Ys`.
@@ -434,22 +434,22 @@ worth it.
 # preprocessing that produced ~/work/data/spexai/processed was itself run
 # there, so the SPEX caches exist on both machines.
 rsync -av spexai/models/ REMOTE:$DEST/spexai/models/
-rsync -av inference_demo/hot_floor/results/truth_single.npz \
-    REMOTE:$DEST/inference_demo/hot_floor/results/
+rsync -av $SPEXAI_RESULTS/hot_floor/truth_single.npz \
+    REMOTE:$DEST/data/spexai_data/results/hot_floor/
 
 # on the cluster
 export MKL_THREADING_LAYER=GNU          # or the torch import dies
 export SPEXAI_RESPONSES=...             # dir holding rsl_Hp_L_2025.rmf
-python scripts/check_deps.py            # exits non-zero if anything is missing
-python -u scripts/check_cufft_stability.py --device cuda    # ~1-3 min
+python scripts/data/check_deps.py            # exits non-zero if anything is missing
+python -u scripts/inference/check_cufft_stability.py --device cuda    # ~1-3 min
 
 COMMON="--device cuda --compile --tf32 --fft32 --counts 1e6"
-nohup python -u scripts/bake_off.py --sampler emcee $COMMON > logs/bo_emcee.log 2>&1 &
+nohup python -u scripts/inference/bake_off.py --sampler emcee $COMMON > logs/bo_emcee.log 2>&1 &
 # then, one at a time (they share one GPU):
 #   --sampler zeus / ultranest
 #   --sampler nuts --echunk 2048
 #   --sampler svi --svi_particles 4 --echunk 2048
-python scripts/bake_off.py --summarise
+python scripts/inference/bake_off.py --summarise
 ```
 
 If SVI or NUTS OOMs, drop `--echunk` to 1024 then 512 **before** cutting
@@ -483,16 +483,16 @@ card. The levers, in the order they should be pulled:
 saturated at B=16–48 (wchunk 16→48 changed nothing), so there is no throughput
 left to win.
 
-`scripts/sbc_cost_model.py` does this arithmetic from the bake-off npz files:
+`scripts/inference/sbc_cost_model.py` does this arithmetic from the bake-off npz files:
 
-    python scripts/sbc_cost_model.py --results <bakeoff_dir> --n_sims 100 --gpus 1
+    python scripts/inference/sbc_cost_model.py --results <bakeoff_dir> --n_sims 100 --gpus 1
 
 It models `t_sim = burn_in + sampling * L/minESS`, because **burn-in does not
 shrink**. That floor dominates: at emcee's `discard_frac=0.4`, even a 0.06
 shrink factor only takes 5.5 h/sim down to ~2.4 h/sim. Nested sampling and VI
 run to a tolerance rather than a step count and are reported unshrunk.
 
-## `scripts/sbc_campaign.py` — the ported driver
+## `scripts/inference/sbc_campaign.py` — the ported driver
 
 Replaces `bias_study.py --stage sbc`, which now exits with a pointer. It runs
 on the bake-off's stack (`VectorForward` / `PoissonPosterior` /
@@ -556,7 +556,7 @@ Priors are independent by construction; correlated priors would not survive the
 
 ---
 
-# Tier B: parameter-space bias sweep (`scripts/bias_sweep.py`, 2026-08-19)
+# Tier B: parameter-space bias sweep (`scripts/inference/bias_sweep.py`, 2026-08-19)
 
 **Correction to the section above:** making SBC self-injected removed the
 campaign's actual purpose. The original `bias_study.py` injected SPEX truth in
@@ -656,7 +656,7 @@ yet GPU-run. **There is an unsynced cluster fix — see "Must sync" below.**
 ## MUST SYNC to the cluster before any further sampler run
 
 `spexai/inference/{vector_forward,ppl,priors,samplers}.py` and
-`scripts/bake_off.py`. Plus, on the cluster:
+`scripts/inference/bake_off.py`. Plus, on the cluster:
 `pip install nautilus-sampler pocomc nessai` (verified with `--dry-run` to
 leave torch at 2.13.0, so the tuned compile∘vmap path is untouched).
 
@@ -790,9 +790,9 @@ unimplemented in the base `Model`.
 **Commands** (one at a time — they share the GPU):
 ```bash
 COMMON="--device cuda --compile --tf32 --fft32 --counts 1e6"
-python -u scripts/bake_off.py --sampler nautilus $COMMON --n_live 2000 --n_eff 10000
-python -u scripts/bake_off.py --sampler pocomc  $COMMON --n_effective 512 --n_active 256
-python -u scripts/bake_off.py --sampler inessai $COMMON --n_live 2000 --target_ess 2000
+python -u scripts/inference/bake_off.py --sampler nautilus $COMMON --n_live 2000 --n_eff 10000
+python -u scripts/inference/bake_off.py --sampler pocomc  $COMMON --n_effective 512 --n_active 256
+python -u scripts/inference/bake_off.py --sampler inessai $COMMON --n_live 2000 --target_ess 2000
 ```
 **Log GPU memory for these three** — all call the likelihood with *varying*
 batch sizes, the pattern behind the earlier `CUFFT_INTERNAL_ERROR` from leaked
@@ -820,9 +820,9 @@ approximation B relies on, B covers the space. Status:
 | tier | what | status |
 |---|---|---|
 | A | joint composition check | **NOT BUILT** |
-| B | Fisher `b_sys` sweep (`scripts/bias_sweep.py`) | built, smoke-tested at 3 points only |
+| B | Fisher `b_sys` sweep (`scripts/inference/bias_sweep.py`) | built, smoke-tested at 3 points only |
 | C | MCMC pull/coverage at points chosen from B | **NOT BUILT** (needs `--stage point` extended) |
-| D | self-injected SBC control (`scripts/sbc_campaign.py`) | built, tested, not run at scale |
+| D | self-injected SBC control (`scripts/inference/sbc_campaign.py`) | built, tested, not run at scale |
 
 ### Tier A — joint composition check (not built)
 
@@ -842,11 +842,11 @@ and no sampling — compare `JointOperatorModel` against a streamed
 compare the joint counts-weighted residual against the per-element residuals
 combined under both assumptions. Cheapest tier; hours, not days. Reuse the
 element-outer streaming loop already written in
-`scripts/bias_sweep.py::stage_truth`.
+`scripts/inference/bias_sweep.py::stage_truth`.
 
 ### Tier C — MCMC pull/coverage with free abundances (not built)
 
-**Blocker to fix first:** `scripts/bias_study.py --stage point` varies only
+**Blocker to fix first:** `scripts/inference/bias_study.py --stage point` varies only
 `temp`, `velocity`, `log_norm`. **Abundances are pinned solar and `logz` is
 fixed** (`REALISTIC`/`EXTREME` dicts near the top of the file, with the comment
 "fixed here to keep the smoke small -- extend as needed"). So the abundance

@@ -7,7 +7,7 @@ inference tests, which skip when those artefacts are absent).
 """
 import torch
 
-from spexai.train.operator import OperatorConfig, SpectralOperator
+from spexai.operator import OperatorConfig, SpectralOperator
 
 ENERGY = torch.linspace(0.1, 12.0, 200)          # synthetic monotonic keV grid
 TEMPS = torch.tensor([0.7, 3.0, 9.0])            # cold / mid / hot

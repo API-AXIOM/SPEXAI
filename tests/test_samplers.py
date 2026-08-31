@@ -169,6 +169,61 @@ def test_nuts_evaluates_one_point_at_a_time(post):
     assert seen and set(seen) == {1}, f"expected all B=1, saw {set(seen)}"
 
 
+def test_hmc_agrees_with_emcee(post, reference):
+    res = samplers.run_hmc(post, nwalkers=16, n_samples=400, n_warmup=400,
+                           n_leapfrog=15, seed=7)
+    med_ok, sig_ok, dmed, dsig = _agrees(res, reference)
+    assert med_ok, f"median differs by {dmed} sigma"
+    assert sig_ok, f"width differs by {dsig}"
+    assert 0.0 < res.extra["accept_rate"] < 1.0
+
+
+def test_hmc_batches_the_forward(post):
+    # the regression guard this sampler exists to have: the mirror image of
+    # test_nuts_evaluates_one_point_at_a_time -- every leapfrog gradient must
+    # be one batched call over ALL chains, never B=1
+    nwalkers = 12
+    seen = []
+    fwd = post.forward
+    orig = fwd.counts_torch
+
+    def spy(th, grad=False):
+        seen.append(int(th.shape[0]))
+        return orig(th, grad=grad)
+
+    fwd.counts_torch = spy
+    try:
+        samplers.run_hmc(post, nwalkers=nwalkers, n_samples=10, n_warmup=10,
+                         n_leapfrog=5, seed=8)
+    finally:
+        fwd.counts_torch = orig
+    assert seen and set(seen) == {nwalkers}, (
+        f"expected every gradient batched at B={nwalkers}, saw {set(seen)}")
+
+
+def test_hmc_n_eval_matches_formula(post):
+    # n_eval must equal (n_warmup + n_samples) * (n_leapfrog + 1) * nwalkers --
+    # confirms the accounting claim in run_hmc's docstring directly rather
+    # than trusting it
+    n_warmup, n_samples, n_leapfrog = 5, 5, 4
+    for nwalkers in (8, 16):
+        post.n_eval = 0
+        samplers.run_hmc(post, nwalkers=nwalkers, n_samples=n_samples,
+                         n_warmup=n_warmup, n_leapfrog=n_leapfrog, seed=9)
+        expected = (n_warmup + n_samples) * (n_leapfrog + 1) * nwalkers
+        assert post.n_eval == expected, (nwalkers, post.n_eval, expected)
+
+
+def test_hmc_rejects_non_finite_proposals_without_crashing(post):
+    # a deliberately huge step size drives divergent trajectories; these must
+    # be rejected, not raise
+    res = samplers.run_hmc(post, nwalkers=8, n_samples=20, n_warmup=20,
+                           n_leapfrog=10, step_size_init=50.0, seed=10)
+    assert res.samples.shape[0] > 0
+    assert 0.0 <= res.extra["accept_rate"] <= 1.0
+    assert np.isfinite(res.samples).all()
+
+
 def test_emcee_rejects_too_few_walkers(post):
     with pytest.raises(ValueError, match="nwalkers >="):
         samplers.run_emcee(post, nwalkers=4, nsteps=10)

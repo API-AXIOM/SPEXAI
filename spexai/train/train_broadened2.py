@@ -34,12 +34,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from spexai.train.broadening import fft_broaden
-from spexai.train.operator import CondNet, OperatorConfig, SpectralOperator
+from spexai.broadening import fft_broaden
+from spexai.operator import CondNet, OperatorConfig, SpectralOperator
 from spexai.train.train_broadened import (REL_FLOOR, BroadenedTargets,
                                           build_parser as broadened_parser,
                                           norm_velocity, sample_velocity)
-from spexai.train.train_operator import FLOOR, SpectrumData, find_line_bins
+from spexai.train.train_operator import FLOOR, find_line_bins
+from spexai.data import SpectrumData
 
 C_KMS = 299792.458
 LN10 = math.log(10.0)
@@ -302,8 +303,8 @@ def train(args):
 
 def load_broadened2(path, data):
     """Rebuild a GaussianLineOperator from a train_broadened2 checkpoint."""
-    from spexai.train.broadening import uniform_log_edges
-    from spexai.train.operator import edges_from_centers
+    from spexai.broadening import uniform_log_edges
+    from spexai.operator import edges_from_centers
     b = torch.load(path, map_location="cpu", weights_only=False)
     cfg = OperatorConfig(**b["config"])
     edges = edges_from_centers(data.energy)

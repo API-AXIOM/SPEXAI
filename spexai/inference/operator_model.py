@@ -22,8 +22,8 @@ import os
 
 import torch
 
-from spexai.train.operator import OperatorConfig, SpectralOperator
-from spexai.train.broadening import (deposit_gaussian_lines, fft_broaden,
+from spexai.operator import OperatorConfig, SpectralOperator
+from spexai.broadening import (deposit_gaussian_lines, fft_broaden,
                                      rebin_flux, scatter_to_grid,
                                      uniform_log_edges)
 from spexai.inference.units import D_REF_M, FLUX_M2_TO_CM2, distance_factor
@@ -89,7 +89,7 @@ def enable_inference_acceleration(models, device):
         torch.device(device).type
     if dev != "cuda":
         return []
-    import spexai.train.broadening as _broadening
+    import spexai.broadening as _broadening
     torch.backends.cuda.matmul.allow_tf32 = True       # TF32 tensor cores (Ampere+)
     torch.backends.cudnn.allow_tf32 = True
     _broadening.USE_FLOAT32_FFT = True                  # float32 continuum FFT

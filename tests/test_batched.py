@@ -134,7 +134,7 @@ def test_per_walker_velocity_constant_equals_scalar(joint, edges):
 
 
 def test_per_walker_velocity_rejects_wrong_length(joint, edges):
-    from spexai.train.broadening import deposit_gaussian_lines
+    from spexai.broadening import deposit_gaussian_lines
     with pytest.raises(ValueError, match="velocity must be scalar"):
         deposit_gaussian_lines(torch.tensor([1.0, 2.0]), torch.ones(3, 2),
                                torch.as_tensor(edges), torch.tensor([1.0, 2.0]))
@@ -284,7 +284,7 @@ def test_fft_transform_length_is_stable_across_velocities(joint, edges):
     # not track the batch's maximum velocity. It used to, so a per-walker
     # sigma_v allocated a fresh cuFFT plan (and GPU workspace) almost every MCMC
     # step until the device ran out of memory partway through a run.
-    import spexai.train.broadening as br
+    import spexai.broadening as br
 
     seen = set()
     orig = torch.fft.rfft
@@ -308,7 +308,7 @@ def test_fft_padding_is_quantised_but_sufficient():
     # rounding up must never pad LESS than the kernel reach, or the broadening
     # wraps around and quietly corrupts the band edges
     import math
-    import spexai.train.broadening as br
+    import spexai.broadening as br
 
     du = 1e-5 * math.log(10.0)
     for v in (30.0, 180.0, 600.0, 1200.0):
@@ -335,5 +335,5 @@ def test_row_padding_does_not_change_the_continuum(joint, edges):
 
 
 def test_limit_cufft_plan_cache_is_a_noop_off_cuda():
-    from spexai.train.broadening import limit_cufft_plan_cache
+    from spexai.broadening import limit_cufft_plan_cache
     limit_cufft_plan_cache(8)      # must not raise on a CPU-only machine
