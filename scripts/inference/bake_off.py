@@ -236,7 +236,8 @@ def run_sampler(name, post, pars, names, args):
                                 n_leapfrog=args.hmc_leapfrog,
                                 step_size_init=args.hmc_step_size,
                                 target_accept=args.hmc_target_accept,
-                                seed=args.seed, center=center)
+                                seed=args.seed, center=center,
+                                walker_chunk=args.hmc_walker_chunk)
     if name == "svi":
         return samplers.run_svi(_model_for(post, names), steps=args.svi_steps,
                                 num_particles=args.svi_particles,
@@ -398,6 +399,12 @@ def main():
     ap.add_argument("--hmc_step_size", type=float, default=0.01,
                     help="dual-averaging starting step size")
     ap.add_argument("--hmc_target_accept", type=float, default=0.8)
+    ap.add_argument("--hmc_walker_chunk", type=int, default=None,
+                    help="chunk the batched gradient over this many walkers "
+                         "at a time (default: all nwalkers at once). "
+                         "counts_torch(grad=True) is unchunked, so peak "
+                         "memory scales linearly with nwalkers and can OOM; "
+                         "lower this before lowering --nwalkers")
     ap.add_argument("--svi_steps", type=int, default=2000)
     ap.add_argument("--svi_particles", type=int, default=64)
     ap.add_argument("--svi_lr", type=float, default=1e-2)
@@ -426,6 +433,11 @@ def main():
         args.nwalkers, args.nsteps, args.counts = 24, 20, 1e5
         args.live, args.nuts_samples, args.nuts_warmup = 50, 20, 20
         args.hmc_samples, args.hmc_warmup, args.hmc_leapfrog = 20, 20, 5
+        # counts_torch(grad=True) is unchunked over its batch dimension (see
+        # run_hmc's docstring), so the shared --nwalkers=24 above would OOM a
+        # gradient-based sampler that a forward-only one handles fine;
+        # --hmc_walker_chunk lets the user raise this back up deliberately
+        args.hmc_walker_chunk = args.hmc_walker_chunk or 2
         args.svi_steps, args.svi_particles = 50, 8
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True

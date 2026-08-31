@@ -178,6 +178,39 @@ def test_hmc_agrees_with_emcee(post, reference):
     assert 0.0 < res.extra["accept_rate"] < 1.0
 
 
+def test_hmc_walker_chunk_matches_unchunked(post):
+    # chunking a batch of independent walkers is EXACT, unlike run_svi's
+    # particle_chunk (which must reweight since particles are averaged into
+    # one shared guide gradient) -- same seed, same result bit-for-bit
+    kwargs = dict(nwalkers=12, n_samples=15, n_warmup=15, n_leapfrog=6, seed=11)
+    unchunked = samplers.run_hmc(post, **kwargs)
+    chunked = samplers.run_hmc(post, walker_chunk=4, **kwargs)
+    np.testing.assert_allclose(chunked.chain, unchunked.chain, rtol=1e-10)
+    assert chunked.extra["step_size"] == unchunked.extra["step_size"]
+
+
+def test_hmc_walker_chunk_bounds_the_batch_size(post):
+    # regression guard for the OOM fix: with walker_chunk set, no single
+    # counts_torch call should ever see more rows than the chunk
+    nwalkers, chunk = 12, 5
+    seen = []
+    fwd = post.forward
+    orig = fwd.counts_torch
+
+    def spy(th, grad=False):
+        seen.append(int(th.shape[0]))
+        return orig(th, grad=grad)
+
+    fwd.counts_torch = spy
+    try:
+        samplers.run_hmc(post, nwalkers=nwalkers, n_samples=5, n_warmup=5,
+                         n_leapfrog=3, walker_chunk=chunk, seed=12)
+    finally:
+        fwd.counts_torch = orig
+    assert seen and max(seen) <= chunk, (
+        f"expected every batch <= {chunk}, saw max {max(seen)}")
+
+
 def test_hmc_batches_the_forward(post):
     # the regression guard this sampler exists to have: the mirror image of
     # test_nuts_evaluates_one_point_at_a_time -- every leapfrog gradient must
