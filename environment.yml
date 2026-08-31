@@ -1,0 +1,32 @@
+# Conda environment for spexai.
+#   conda env create -f environment.yml    # creates the `spexai` env
+#   conda activate spexai
+#   pip install -e .                        # so `import spexai` resolves
+#
+# On the GPU cluster, install the CUDA build of pytorch instead of the
+# default (CPU/MPS) build below, e.g. add `pytorch-cuda=12.1` and the
+# `nvidia` channel, or install torch from the appropriate index with pip.
+name: spexai
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.12
+  # core: training, diagnostics, benchmarking
+  - pytorch
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - astropy
+  # dev
+  - pytest
+  # inference / fitting stack (pip-only packages)
+  - pip
+  - pip:
+      - emcee
+      - corner
+      - ultranest
+      - torchinterp1d

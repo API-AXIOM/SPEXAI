@@ -1,0 +1,299 @@
+"""Shared per-run diagnostics for the emulator trainers.
+
+Every training run produces, in <outdir>/figures/:
+  * <tag>_history.png - training loss, train-vs-validation MRE, and
+    validation yield@1% over the run
+  * <tag>_spectra_T<T>.png (three temperatures spanning the test range) -
+    SPEX truth vs emulator over the full band with a residual strip, plus
+    three randomly picked bright lines zoomed in with their residuals
+
+Also provides EMAWeights (Polyak averaging of the model parameters);
+checkpoints are saved with the EMA weights when enabled.
+"""
+
+import math
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+SURFACE = "#fcfcfb"
+INK = "#0b0b0b"
+INK2 = "#52514e"
+GRID = "#e8e7e3"
+EMU = "#2a78d6"     # emulator prediction
+RESID = "#c23b2a"   # residuals
+TRAIN = "#eda100"   # train-split curve (val uses EMU)
+
+
+class EMAWeights:
+    """Exponential moving average of the float entries of a state dict."""
+
+    def __init__(self, model, decay):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone()
+                       for k, v in model.state_dict().items()
+                       if v.dtype.is_floating_point}
+        self.backup = None
+
+    @torch.no_grad()
+    def update(self, model):
+        for k, v in model.state_dict().items():
+            if k in self.shadow:
+                self.shadow[k].mul_(self.decay).add_(v, alpha=1 - self.decay)
+
+    def swap_in(self, model):
+        """Load EMA weights into the model (remember the live ones)."""
+        self.backup = {k: v.detach().clone()
+                       for k, v in model.state_dict().items()
+                       if k in self.shadow}
+        model.load_state_dict(self.shadow, strict=False)
+
+    def swap_out(self, model):
+        model.load_state_dict(self.backup, strict=False)
+        self.backup = None
+
+
+def _style(fig):
+    for ax in fig.axes:
+        ax.set_facecolor(SURFACE)
+        ax.grid(True, which="major", color=GRID, lw=0.5)
+        for s in ax.spines.values():
+            s.set_visible(False)
+
+
+def plot_history(history, out, tag=""):
+    """Loss and train-vs-val metric curves; `history` is the list of eval
+    records written by the trainers."""
+    steps = [r["step"] for r in history]
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.4), facecolor=SURFACE)
+    axes[0].plot(steps, [r["loss"] for r in history], color=INK, lw=1.4)
+    axes[0].set(yscale="log", xlabel="step", ylabel="training loss")
+    if any("train_mre_mean" in r for r in history):
+        axes[1].plot(steps, [r.get("train_mre_mean", np.nan) for r in history],
+                     color=TRAIN, lw=1.4, label="train")
+    axes[1].plot(steps, [r["val_mre_mean"] for r in history],
+                 color=EMU, lw=1.4, label="validation")
+    axes[1].set(yscale="log", xlabel="step", ylabel="MRE")
+    axes[1].legend(frameon=False, fontsize=9)
+    axes[2].plot(steps, [r["val_yield_1pct"] for r in history],
+                 color=EMU, lw=1.4)
+    axes[2].set(xlabel="step", ylabel="val yield@1% (%)")
+    fig.suptitle(tag, x=0.01, ha="left", fontsize=11, color=INK)
+    _style(fig)
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+@torch.no_grad()
+def _predict_full(model, temp, energy, device, echunk=4096):
+    t = temp.view(1).to(device)
+    parts = [model(t, energy[lo:lo + echunk].to(device),
+                   bins=torch.arange(lo, min(lo + echunk, len(energy)),
+                                     device=device))
+             for lo in range(0, len(energy), echunk)]
+    return torch.cat(parts, dim=1).squeeze(0).cpu().numpy()
+
+
+def plot_spectra(model, data, outdir, tag, device="cpu", n_lines=3,
+                 zoom_bins=25, seed=0, temp_fracs=(0.1, 0.5, 0.9)):
+    """Truth-vs-emulator figures at three test temperatures: full band +
+    residual strip + `n_lines` random bright lines zoomed in."""
+    from spexai.train.train_operator import FLOOR, find_line_bins
+    model.eval()
+    os.makedirs(outdir, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    energy = data.energy
+    e_np = energy.numpy()
+    lb_all = torch.nonzero(find_line_bins(data) >= 0).squeeze(-1).numpy()
+    # pure-continuum elements (e.g. H) have no line bins; fall back to the
+    # brightest bins so the zoom panels still show continuum detail
+    zoom_lines = lb_all.size >= n_lines
+
+    idx = data.test_idx.numpy()
+    order = idx[np.argsort(data.temps.numpy()[idx])]
+    rows = [order[int(f * (len(order) - 1))] for f in temp_fracs]
+
+    for row in rows:
+        T = float(data.temps[row])
+        truth = data.logflux[row].numpy()
+        pred = _predict_full(model, data.temps[row], energy, device)
+        valid = truth > FLOOR
+        resid = 100.0 * (10.0 ** np.clip(pred - np.clip(truth, FLOOR, None),
+                                         -4, 4) - 1.0)
+
+        # three bright features for this spectrum, seeded: lines if the
+        # element has them, else the brightest continuum bins
+        pool = lb_all if zoom_lines else np.nonzero(truth > FLOOR)[0]
+        bright = pool[np.argsort(truth[pool])[-300:]]
+        lines = np.sort(rng.choice(bright, size=min(n_lines, len(bright)),
+                                   replace=False))
+
+        fig = plt.figure(figsize=(11, 9.5), facecolor=SURFACE)
+        gs = fig.add_gridspec(4, n_lines, height_ratios=[1.2, 0.45, 0.8, 0.5],
+                              hspace=0.6, wspace=0.3)
+        ax0 = fig.add_subplot(gs[0, :])
+        ax0.plot(e_np, np.clip(truth, FLOOR, None), color=INK, lw=0.6,
+                 label="SPEX")
+        ax0.plot(e_np, np.clip(pred, FLOOR, None), color=EMU, lw=0.6,
+                 ls="--", alpha=0.8, label="emulator")
+        ax0.set(xscale="log", ylabel="log10 flux density")
+        ax0.tick_params(labelbottom=False)
+        ax0.set_title(f"{tag}: T = {T:.3f} keV", loc="left", fontsize=11,
+                      color=INK)
+        ax0.legend(loc="upper right", fontsize=9, ncols=2, frameon=False)
+
+        axr = fig.add_subplot(gs[1, :], sharex=ax0)
+        axr.plot(e_np[valid], resid[valid], color=RESID, lw=0.4)
+        axr.axhline(0.0, color=INK2, lw=0.6, ls=":")
+        span = np.percentile(np.abs(resid[valid]), 99)
+        axr.set_ylim(-1.3 * span, 1.3 * span)
+        axr.set(xscale="log", xlabel="Energy (keV)", ylabel="resid (%)")
+
+        for k, j in enumerate(lines):
+            lo, hi = max(0, j - zoom_bins), min(len(e_np), j + zoom_bins)
+            axp = fig.add_subplot(gs[2, k])
+            axz = fig.add_subplot(gs[3, k], sharex=axp)
+            axp.plot(e_np[lo:hi], np.clip(truth[lo:hi], FLOOR, None),
+                     color=INK, lw=1.6)
+            axp.plot(e_np[lo:hi], np.clip(pred[lo:hi], FLOOR, None),
+                     color=EMU, lw=1.2, ls="--")
+            axp.set_title(f"{'line' if zoom_lines else 'detail'} at "
+                          f"{e_np[j]:.4f} keV", fontsize=9,
+                          color=INK2)
+            axp.tick_params(labelsize=8, labelbottom=False)
+            v = valid[lo:hi]
+            axz.plot(e_np[lo:hi][v], resid[lo:hi][v], color=RESID, lw=1.0)
+            axz.axhline(0.0, color=INK2, lw=0.6, ls=":")
+            axz.set(xlabel="Energy (keV)")
+            axz.tick_params(labelsize=8)
+            if k == 0:
+                axp.set_ylabel("log10 flux density", fontsize=9)
+                axz.set_ylabel("resid (%)", fontsize=9)
+
+        _style(fig)
+        out = os.path.join(outdir, f"{tag}_spectra_T{T:.2f}.png")
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"saved {out}", flush=True)
+
+
+@torch.no_grad()
+def edge_diagnostics(model, data, outdir, tag, device="cpu", radius=6,
+                     max_panels=8, window=40):
+    """Recombination-edge fidelity. Each edge is temperature-dependent (it
+    is present only where its recombining ion is abundant), so every edge
+    is shown at ITS OWN peak temperature and the fidelity metric is
+    measured there, not at one global temperature. Writes <tag>_edges.png
+    (per-edge zoom + residual) and returns the ratio of edge-region MRE
+    (at peak T) to the model's overall test MRE. No-op for edge-free
+    elements (H/He)."""
+    from spexai.train.train_operator import (FLOOR, LINE_THRESHOLD_DEX,
+                                             continuum_estimate, evaluate,
+                                             find_edge_bins)
+    edges = find_edge_bins(data)
+    if len(edges) == 0:
+        return None
+    energy, e_np = data.energy, data.energy.numpy()
+
+    # per-edge peak temperature: where its continuum step is strongest,
+    # over a temperature-ordered sample of the training spectra
+    tr = data.train_idx.numpy()
+    tr = tr[np.argsort(data.temps.numpy()[tr])]
+    samp = tr[np.linspace(0, len(tr) - 1, min(256, len(tr))).astype(int)]
+    lf = data.logflux[torch.from_numpy(samp)].numpy()
+    cont = continuum_estimate(lf)
+    dl = np.where((np.clip(lf, FLOOR, None) - cont > LINE_THRESHOLD_DEX)
+                  | (lf <= FLOOR), cont, lf)
+    peak_row, strength = [], []
+    for b in edges.tolist():
+        below = dl[:, max(0, b - window):b].mean(1)
+        above = dl[:, b:b + window].mean(1)
+        j = int(np.argmax(above - below))
+        peak_row.append(int(samp[j]))
+        strength.append(float((above - below)[j]))
+    peak_row, strength = np.array(peak_row), np.array(strength)
+
+    def predict_window(temp, lo, hi):
+        return model(temp.view(1).to(device), energy[lo:hi].to(device),
+                     bins=torch.arange(lo, hi, device=device)
+                     ).squeeze(0).cpu().numpy()
+
+    # metric: mean relative error in each edge neighbourhood AT its peak T,
+    # relative to the model's overall test MRE
+    eps_edge = []
+    for b, row in zip(edges.tolist(), peak_row):
+        lo, hi = max(0, b - radius), min(data.n_bins, b + radius + 1)
+        truth = data.logflux[row].numpy()[lo:hi]
+        pred = predict_window(data.temps[row], lo, hi)
+        v = truth > FLOOR
+        if v.any():
+            eps_edge.append(np.abs(
+                10.0 ** np.clip(pred[v] - truth[v], -4, 4) - 1.0).mean())
+    edge_mre = float(np.mean(eps_edge)) if eps_edge else float("nan")
+    overall = evaluate(model, data, data.test_idx, device)["mre_mean"]
+    ratio = edge_mre / max(overall, 1e-9)
+
+    # panels: strongest edges, each at its own peak temperature
+    pick = np.argsort(strength)[::-1][:max_panels]
+    pick = pick[np.argsort(edges.numpy()[pick])]     # left-to-right in energy
+    ncol = min(4, len(pick))
+    nrow = int(np.ceil(len(pick) / ncol))
+    fig = plt.figure(figsize=(3.0 * ncol, 2.7 * nrow), facecolor=SURFACE)
+    gs = fig.add_gridspec(nrow * 2, ncol, height_ratios=[0.8, 0.5] * nrow,
+                          hspace=0.55, wspace=0.32)
+    zb = 5 * radius
+    for k, idx in enumerate(pick):
+        b, row = int(edges[idx]), int(peak_row[idx])
+        Te = float(data.temps[row])
+        rr, cc = divmod(k, ncol)
+        axp = fig.add_subplot(gs[rr * 2, cc])
+        axz = fig.add_subplot(gs[rr * 2 + 1, cc], sharex=axp)
+        lo, hi = max(0, b - zb), min(len(e_np), b + zb)
+        truth = data.logflux[row].numpy()[lo:hi]
+        pred = predict_window(data.temps[row], lo, hi)
+        axp.plot(e_np[lo:hi], np.clip(truth, FLOOR, None), color=INK, lw=1.6,
+                 label="SPEX")
+        axp.plot(e_np[lo:hi], np.clip(pred, FLOOR, None), color=EMU, lw=1.2,
+                 ls="--", label="emulator")
+        axp.axvline(e_np[b], color=RESID, lw=0.7, ls=":")
+        axp.set_title(f"{e_np[b]:.3f} keV · peak T={Te:.2f} keV",
+                      fontsize=8.5, color=INK2)
+        axp.tick_params(labelsize=7.5, labelbottom=False)
+        v = truth > FLOOR
+        resid = 100.0 * (10.0 ** np.clip(pred[v] - truth[v], -4, 4) - 1.0)
+        axz.plot(e_np[lo:hi][v], resid, color=RESID, lw=1.0)
+        axz.axhline(0.0, color=INK2, lw=0.6, ls=":")
+        axz.tick_params(labelsize=7.5)
+        if cc == 0:
+            axp.set_ylabel("log10 f", fontsize=8)
+            axz.set_ylabel("resid %", fontsize=8)
+        if k == 0:
+            axp.legend(loc="upper left", fontsize=7, frameon=False)
+    fig.suptitle(f"{tag}: recombination edges (each at its peak T) · "
+                 f"edge/overall MRE = {ratio:.1f}×", x=0.01, ha="left",
+                 fontsize=11, color=INK)
+    _style(fig)
+    out = os.path.join(outdir, f"{tag}_edges.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"saved {out}  (edge/overall MRE at peak T = {ratio:.2f})",
+          flush=True)
+    return {"edge_mre": edge_mre, "overall_mre": overall, "ratio": ratio,
+            "n_edges": int(len(edges))}
+
+
+def run_diagnostics(model, data, history, outdir, tag, device="cpu",
+                    spectra=True):
+    """Standard end-of-run bundle: history curves + spectrum + edge figures."""
+    figdir = os.path.join(outdir, "figures")
+    os.makedirs(figdir, exist_ok=True)
+    if history:
+        plot_history(history, os.path.join(figdir, f"{tag}_history.png"), tag)
+        print(f"saved {figdir}/{tag}_history.png", flush=True)
+    if spectra:
+        plot_spectra(model, data, figdir, tag, device=device)
+        edge_diagnostics(model, data, figdir, tag, device=device)

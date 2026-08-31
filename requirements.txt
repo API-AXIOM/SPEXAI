@@ -1,0 +1,22 @@
+# spexai runtime dependencies (see also environment.yml for a conda spec).
+# Core: training, diagnostics, benchmarking.
+numpy
+scipy
+pandas
+scikit-learn
+matplotlib
+seaborn
+astropy
+torch
+
+# Inference / fitting stack (spexai/inference, scripts/run_inference_demo.py).
+emcee
+corner
+ultranest
+torchinterp1d
+
+# Dev / optional.
+pytest            # tests/
+black             # formatter (CLAUDE.md)
+flake8            # linter (CLAUDE.md)
+# schedulefree    # optional --optimizer schedulefree arm in train_adaptive

@@ -9,8 +9,11 @@ __author__ = 'Jip Matthijsse'
 __credits__ = 'SRON / Universiteit van Amsterdam'
 
 
-# import inference code at top-level for easier use
-from spexai.inference.model import *
-from spexai.inference.fit import *
-from spexai.inference.write_tensors import *
+# Current operator-based inference stack. The legacy CNN stack
+# (spexai.inference.model / fit / write_tensors) is deprecated and no longer
+# imported at package level; import those modules explicitly if you still need
+# them. Plotting (fit_plots) and evaluation (spexai.eval) are not imported here
+# to keep `import spexai` free of matplotlib/corner.
+from spexai.inference import (JointOperatorModel, Response, fitting,
+                              load_operator, simulate)
 

@@ -1,0 +1,25 @@
+docs/*.aux
+docs/*.fdb_latexmk
+docs/*.fls
+docs/*.log
+docs/*.out
+.DS_Store
+master_thesis_jip_matthijsse_a3vknpje.pdf
+__pycache__/
+spexai.egg-info/
+spexai/.ipynb_checkpoints/
+spexai/__pycache__/
+spexai/inference/__pycache__/
+spexai/train/__pycache__/
+tutorials/.ipynb_checkpoints/
+tutorials/log/
+
+
+# trained emulator weights — do NOT commit until ship time (consider git-lfs then)
+spexai/models/*.pt
+
+# outputs live outside the repo now (see docs/refactor_plan.md Phase 1)
+inference_demo/
+logs/
+sim_plots/
+docs/development_plots/

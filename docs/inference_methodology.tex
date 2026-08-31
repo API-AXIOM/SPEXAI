@@ -1,0 +1,914 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{natbib}
+\usepackage{graphicx}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newcommand{\nh}{N_{\mathrm{H}}}
+\newcommand{\kev}{\,\mathrm{keV}}
+\newcommand{\kms}{\,\mathrm{km\,s^{-1}}}
+\newcommand{\zsun}{Z_\odot}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Inference and evaluation with the SpexAI emulator:\\
+forward model, absorption, temperature distributions, and bias testing\\
+\large Methodology report (companion to the emulator technical report)}
+\author{D.~Huppenkothen \and Claude (Anthropic)}
+\date{2026 July}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report documents the inference side of \code{spexai}: how a full observed
+X-ray spectrum is assembled from the per-element neural operators, how Galactic
+absorption and velocity broadening are applied, how we fit single- and
+multi-temperature (differential emission measure, DEM) models with MCMC and
+nested sampling, and how we test the emulator for bias against an independent
+SPEX-derived ground truth. It also reports a targeted study of whether the
+emulator's residual emissivity error on the hot iron-peak metals---which miss
+the $0.1\%$ training target---biases the quantities XRISM actually measures for a
+Perseus-like cluster (Sec.~\ref{sec:hotfloor}). It is deliberately kept separate
+from the emulator \emph{development} report, which covers architecture and
+training. Design
+choices flagged here as approximations (PCHIP ground truth, native-resolution
+truth broadening, \code{wabs} vs.\ \code{tbabs} cross-sections) are called out
+explicitly so they can be revisited.
+\end{abstract}
+
+\section{Forward model}
+An observed spectrum is built as
+\begin{equation}
+C_c = t_{\rm exp}\,N \sum_e R_{ec}\, A_e
+      \left[\sum_Z a_Z\, f_{Z}\!\big((1{+}z)E_e; T, v\big)\right]
+      \, e^{-\nh\,\sigma(E_e)} ,
+\end{equation}
+where $f_Z$ is the emulated per-element flux, $a_Z$ the solar-relative
+abundance, $R$/$A$ the RMF/ARF, $z$ the source redshift, $v$ the velocity
+broadening, and $e^{-\nh\sigma}$ the Galactic absorption screen. The joint
+emitter is \code{JointOperatorModel}; folding is \code{Response.fold}. Because
+folding is linear, a temperature distribution is summed \emph{before} folding
+(Sec.~\ref{sec:dem}).
+
+\section{Velocity broadening}
+Broadening is a Doppler redistribution, a photon from $E_j$ landing at
+$E_j(1+v_{\rm los}/c)$ with $v_{\rm los}\sim\mathcal N(0,v^2)$. We use a
+\emph{hybrid} scheme: the smooth continuum is convolved by FFT in uniform
+log-energy (shift-invariant to first order in $v/c$, differentiable, batched
+over per-spectrum velocities), while line-head lines are deposited as exact
+bin-integrated Gaussians (\code{erf} differences) at their exact energies. The
+exact redistribution matrix \code{direct\_broadening\_matrix} is retained as the
+reference; the deployed FFT+analytic path agrees with it to well below the
+emulator's own error.
+
+\section{Why an operator, given that broadening needs a fine grid}
+It is reasonable to ask why we train a grid-portable operator if the broadened
+forward pass still routes the continuum through a fine log-uniform grid. The
+fine grid is a property of the \emph{FFT broadening method} (its resolution is
+set by the kernel width $\sigma/E=v/c$), not of the emulator: a fixed-grid model
+would need it too, and worse---upsampling already-binned fluxes smears lines.
+The operator's payoff in the broadened pipeline is therefore twofold: (i)
+\emph{analytic, grid-exact lines}, deposited directly onto the instrument grid
+and never passed through a lossy rebin, which is exactly the
+resolution-critical part; and (ii) \emph{smooth, batched temperature
+dependence}, which is what makes DEM integration over hundreds of temperatures
+cheap and differentiable---a per-SPEX-temperature table would require PCHIP
+interpolation at every likelihood call. Grid portability is fully realised for
+the line head and for the unbroadened path (\code{forward\_on\_grid}); the exact
+matrix route even broadens directly on the instrument grid with no fine grid,
+and is kept as the reference.
+
+\section{Galactic absorption}
+Photoelectric absorption multiplies the source flux by
+$T(E)=e^{-\nh\sigma(E)}$ in the \emph{observed} frame. The cross-section per
+hydrogen atom $\sigma(E)$ is taken from an established model, not invented:
+
+\begin{itemize}
+\item \textbf{\code{tbabs}} \citep*{wilms2000} is tabulated once from XSPEC
+(PyXspec, with \code{abund wilm}), inverted to $\sigma(E)$ and cached as a tensor
+(\code{scripts/build\_tbabs\_table.py}); runtime never calls XSPEC. conda-forge
+ships no XSPEC for macOS, but HEASoft is installable via the HEASARC conda
+channel, from which the table was generated
+($\sigma(1\kev)=1.74\times10^{-22}\,\mathrm{cm^2}$). \code{Absorption.default()}
+uses it when the cached table is present.
+\item \textbf{\code{wabs}} \citep*{morrison1983} is the dependency-free fallback,
+an analytic polynomial validated against its published coefficients
+($\sigma(1\kev)=2.422\times10^{-22}\,\mathrm{cm^2}$), used when the \code{tbabs}
+table is absent (e.g.\ a fresh checkout without HEASoft).
+\end{itemize}
+
+\paragraph{Insertion point (instrument-resolution independence).}
+Absorption acts on flux \emph{density}, so applying $T(E_{\rm centre})$ to an
+already-rebinned coarse spectrum would mis-integrate across a bin and smear the
+photoelectric edges, differently per instrument. Instead $T$ is applied on the
+native fine grid \emph{before} rebinning (continuum) and at the exact line
+energies (lines), evaluated at the observed energy $E_{\rm rest}/(1{+}z)$. The
+coarse RMF then only ever sees an already-absorbed, flux-conserved spectrum, so
+the result is instrument-resolution independent by construction and needs no
+operator retraining. The same screen multiplies the emulator and the SPEX
+truth, so the bias round-trip stays self-consistent regardless of the
+cross-section choice.
+
+\section{Absolute normalisation and distance}
+The ``norm'' fed to \code{predict\_counts} is the SPEX \code{cie} normalisation:
+the emission measure $Y \equiv n_H n_e V$ in units of $10^{64}\,\mathrm{m^{-3}}$.
+The per-element operators were trained on SPEX spectra at the SPEX reference
+$Y=1$ and reference luminosity distance $D_{\rm ref}=10^{22}\,\mathrm{m}$ (the
+SPEX default \code{distance} unit), so physical detector counts are
+\begin{equation}
+C_c = t_{\rm exp}\; Y \left(\frac{D_{\rm ref}}{D}\right)^{\!2}
+      \; u_{\rm A}\; \sum_e R_{ec} A_e\, f_e ,
+\end{equation}
+with $u_{\rm A}=10^{-4}$ converting SPEX's SI photon flux
+($\mathrm{ph\,s^{-1}\,m^{-2}\,bin^{-1}}$) to the per-$\mathrm{cm^2}$ convention of
+the OGIP ARF. These constants live in \code{spexai.inference.units}. $Y$ and $D$
+are perfectly degenerate in a single spectrum, so $D$ is supplied fixed (from the
+known redshift/distance) and $Y$ is fitted.
+
+\paragraph{Validation against SPEX.} We installed SPEX (SPEXACT 2.07, native
+Apple-Silicon conda build) and compared the emulator's \emph{absolute} flux to a
+SPEX \code{cie} spectrum at $T=4\kev$, $Y=1$, $D=D_{\rm ref}$
+(\code{scripts/validate\_spex\_norm.py}). The emulator reproduces SPEX to a
+median $\sim2.5\%$ across the $3$--$8\kev$ continuum (ratio $0.99$ at $2$--$5\kev$,
+falling to $0.95$ at $8\kev$). This confirms the flux units
+($\mathrm{ph\,s^{-1}\,m^{-2}\,bin^{-1}}$, hence $u_{\rm A}=10^{-4}$), $Y_{\rm
+ref}=1$ and $D_{\rm ref}=10^{22}\,\mathrm{m}$ -- there is no order-of-magnitude
+unit error. The mild high-energy deficit is the expected signature of the
+present model covering only 16 of 30 elements (SPEX's additional metals add
+continuum), and should shrink with the full 30-element model.
+
+\section{Independent SPEX ground truth}\label{sec:truth}
+To test the emulator for bias we need spectra \emph{not} produced by it.
+\code{SpexTruthModel} interpolates the preprocessed per-element SPEX training
+spectra with per-bin monotone cubic (PCHIP) in $\log_{10}T$, sums elements
+linearly by abundance, broadens with the exact redistribution matrix on the
+native SPEX grid, and folds through the response. This is a documented
+approximation to a live SPEX call: the cache carries no abundance dimension
+(abundances enter only through the linear CIE sum, which is exact), broadening
+is at the native SPEX resolution, and off-grid temperatures come from PCHIP
+rather than SPEX. Against the emulator it agrees to $\sim0.1$--$0.7\%$ in flux
+for iron, i.e.\ both approximate SPEX at the sub-percent level; the residual is
+what the bias study probes.
+
+\section{Temperature distributions and abundances}\label{sec:dem}
+A DEM is a weighted sum $\sum_g w_g\, f(T_g)$ over a temperature grid, evaluated
+by \code{predict\_counts\_dem} (folding once, after the sum). Shapes are drawn
+from standard libraries: Gaussian in $\log_{10}T$ or in $T$, a two-component
+mixture, and a log-normal, all thin wrappers over \code{scipy.stats}; the
+non-parametric \code{BinnedDEM} carries one free, normalised weight per coarse
+bin with no smoothness prior. Abundances use \code{AbundanceModel}: a global
+metallicity scaling all metals, with individual elements freed or tied to a
+fraction of iron (an $[X/\mathrm{Fe}]$ ratio), reproducing the thesis scheme
+(global $Z$ with free N/Fe, O/Fe) in a reusable object.
+
+\section{Bias testing}
+Two distinct questions are easily conflated here, and we separate them
+deliberately. \emph{Is the posterior sampler correct for the model being
+fitted?} is answered by simulation-based calibration (SBC): parameters are drawn
+from the prior, data are simulated \emph{from the fitted model itself}, and the
+rank of the truth among the posterior draws is recorded; a uniform rank
+histogram indicates calibration. \emph{Is the emulator unbiased with respect to
+SPEX?} is a different question, and SBC is the wrong instrument for it: a rank
+statistic carries no physical units, has no exposure axis, and cannot separate
+emulator error from sampler error, since all sources of misspecification produce
+the same non-uniformity. It is also the most expensive available probe, costing
+a full posterior per simulation.
+
+We therefore use SBC as the \emph{control}---it establishes that the sampler is
+calibrated, so that any residual offset in the studies below is attributable to
+the emulator---and measure emulator bias directly with the Fisher estimator of
+Sec.~\ref{sec:fisherbias}, which reports the offset in physical units and in
+units of the statistical error at a stated exposure. Ranks computed on SPEX-
+injected data remain useful as a cheap global screen over the whole prior
+volume, since they aggregate over regions a grid might miss, but they are a
+misspecification test rather than a calibration test and are labelled as such.
+
+Where posterior fits are used for bias---to confirm points the Fisher screen
+flags, and to validate the linearisation---observations are simulated from
+\code{SpexTruthModel}, fitted with the emulator (\code{run\_emcee};
+\code{run\_ultranest} for evidence/spot checks), and scored by the
+median$-$truth pull and central-interval coverage. An emulator-self round-trip
+is the control that separates emulator bias from sampler and statistical
+scatter. One caveat applies to all of these: \code{SpexTruthModel} interpolates
+the same cached SPEX rows the emulator was trained on, so on-grid it reproduces
+SPEX exactly while off-grid it is independent of the emulator's \emph{function}
+but not of its \emph{training data}. With a PCHIP interpolation error of
+${\sim}0.003\%$ against an emulator error of ${\sim}0.3\%$ this is a safe
+margin, but it measures interpolation fidelity rather than extrapolation.
+Parameter ranges (Table~\ref{tab:ranges}) are
+literature-grounded; note that real clusters sit near $Z\sim0.3\,\zsun$, well
+below the thesis's fiducial $\sim1\,\zsun$, so the calibration must span that
+regime. A \emph{Perseus} showcase (single-temperature core and a Gaussian DEM)
+uses published values ($z=0.0179$, $\nh\sim1.4\times10^{21}\,\mathrm{cm^{-2}}$,
+$kT\sim3.9\kev$, $Z_{\rm Fe}\sim0.55\,\zsun$, $\sigma_v\sim180\kms$) folded
+through XRISM/Resolve, as a concrete recovery demonstration.
+
+\begin{table}[t]
+\centering
+\caption{Parameter ranges. ``Realistic'' is the primary SBC volume; ``Extreme''
+is the stress-test extension. $kT$ is capped at the $0.2$--$10\kev$ training
+band.}
+\label{tab:ranges}
+\begin{tabular}{lccc}
+\toprule
+Parameter & Realistic & Extreme & Perseus \\
+\midrule
+$kT$ (keV)        & 1--8       & 0.3--10   & $\sim$3.5--4 \\
+$Z$ ($\zsun$)     & 0.2--0.7   & 0.1--1.5  & $\sim$0.5--0.6 \\
+$[\alpha/\mathrm{Fe}]$ & 1.0--1.5 & 0.5--2 & $\sim$1 \\
+$v$ (km/s)        & 0--300     & 0--600    & $\sim$150--200 \\
+$\nh$ (cm$^{-2}$) & $5{\times}10^{19}$--$3{\times}10^{21}$ & $\to10^{22}$ & $\sim$1.4$\times10^{21}$ \\
+$z$               & 0.01--0.3  & $\to$1    & 0.0179 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Systematic bias without fitting: the Fisher estimator}\label{sec:fisherbias}
+This section derives the estimator used both for the hot-element study
+(Sec.~\ref{sec:hotfloor}) and for the parameter-space sweep
+(Sec.~\ref{sec:biassweep}). It answers a specific question: \emph{if a real
+spectrum is fitted with the emulator rather than with SPEX, how wrong are the
+recovered parameters, and at what exposure does that matter?} The estimator
+obtains both the systematic offset and the statistical error from two
+\emph{noise-free} spectra, with no fitting and no simulated observations. Since
+that is counter-intuitive, we set it out in full.
+
+\subsection{Definitions}
+Throughout, $c$ indexes instrument channels inside the fit band, $i,j$ index the
+$n$ free parameters, and $\theta_0$ is the true parameter vector at which
+everything is evaluated.
+
+\begin{description}
+\item[$\theta$] the free parameter vector, $n$ components. For the literature
+strategy these are the eight free abundances (Si, S, Ar, Ca, Cr, Mn, Fe, Ni),
+the temperature descriptor ($kT$, or $T_{\rm mean}$ and $T_{\rm sigma}$ for a
+Gaussian DEM), the velocity dispersion $\sigma_v$, the absorbing column $\nh$,
+and $\log_{10}$ of the normalisation, so $n=12$ (13 for the DEM).
+\item[$d_c$] the \emph{noise-free} expected counts in channel $c$ predicted by
+the independent SPEX ground truth (\code{SpexTruthModel}, Sec.~\ref{sec:truth}),
+evaluated at $\theta_0$ and folded through the instrument response. This is the
+``correct answer'': what nature would produce, in the absence of counting
+noise. It involves no emulator.
+\item[$\mu_c \equiv \mu_c(\theta_0)$] the noise-free expected counts predicted
+by the \emph{emulator} at the same $\theta_0$, through the same response. If the
+emulator were exact, $\mu_c=d_c$ for every channel.
+\item[$J_{ic} \equiv \partial\mu_c/\partial\theta_i$] the Jacobian of the
+emulator: how much channel $c$ responds to a unit change in parameter $i$.
+Computed by central finite differences, $2n{+}1$ emulator evaluations in total.
+\item[$r_c \equiv d_c/\mu_c - 1$] the fractional emulator error in channel $c$.
+This is a \emph{deterministic} quantity---a property of the emulator, not of any
+observation---and it is the only place the truth enters.
+\item[$N_{\rm ref}$] a reference in-band count level ($10^5$ in the code) at
+which $\sigma_{\rm stat}$ is quoted; results are rescaled analytically to any
+other exposure via Eq.~\eqref{eq:scaling}.
+\end{description}
+
+\subsection{Two noise-free spectra, two different jobs}
+The calculation proceeds in two stages, which in the code
+(\code{scripts/bias\_sweep.py}) are separate because $d$ does not depend on the
+emulator and is therefore reusable across retrained models.
+
+\emph{Stage 1 (truth)} computes $d$: pure SPEX physics at $\theta_0$, summed
+over elements, broadened, absorbed and folded. \emph{Stage 2 (bias)} computes
+$\mu$ and $J$ from the emulator, and combines them with $d$ as below.
+
+It is worth being explicit about why neither stage needs noise, because the two
+spectra play different roles: $d$ supplies the \emph{systematic} (through $r$),
+while $\mu$ supplies the \emph{variance} (analytically, as shown next).
+
+\subsection{Where the statistical error comes from}
+For Poisson data the variance is not an independent quantity---it is fixed by
+the mean:
+\begin{equation}
+\mathrm{Var}(d_c) = \mathbb{E}[d_c] = \mu_c .
+\end{equation}
+A channel expecting $10^4$ counts has $\sigma=100$; one expecting $10^2$ has
+$\sigma=10$. A noise-free model spectrum therefore already encodes the complete
+noise structure of an observation that was never simulated. No random draw is
+required, and drawing one would only add scatter to be averaged away again.
+
+Concretely, the Poisson log-likelihood (dropping the $\theta$-independent
+$\log d_c!$) is
+\begin{equation}
+\log L(\theta) = \sum_c \big[\, d_c \log\mu_c(\theta) - \mu_c(\theta) \,\big],
+\end{equation}
+and the Fisher information is its expected curvature at $\theta_0$. Taking the
+expectation with $\mathbb{E}[d_c]=\mu_c$ makes the second-derivative term vanish
+and leaves
+\begin{equation}
+F_{ij} \;=\; \mathbb{E}\!\left[-\frac{\partial^2 \log L}
+{\partial\theta_i\,\partial\theta_j}\right]
+\;=\; \sum_c \frac{J_{ic}\,J_{jc}}{\mu_c}
+\;=\; \sum_c \frac{J_{ic}\,J_{jc}}{\mathrm{Var}(d_c)} .
+\label{eq:fisher}
+\end{equation}
+The final form is the interpretive one: $F$ is an
+\emph{inverse-variance-weighted inner product of the derivatives}, exactly the
+weighting a $\chi^2$ fit would use, with the Poisson variances supplied by the
+model itself. $J_{ic}$ says how strongly channel $c$ responds to parameter $i$;
+$1/\mu_c$ says how much that channel can be trusted. A parameter that moves many
+bright channels is well constrained; one that moves a few faint channels is not.
+In code this is the single line \code{F = (J / mu0) @ J.T}.
+
+The Cram\'er--Rao bound then gives the covariance of any unbiased estimator,
+\begin{equation}
+\mathrm{Cov}(\hat\theta) \;\ge\; F^{-1},
+\qquad
+\sigma_{{\rm stat},i} = \big[(F^{-1})_{ii}\big]^{1/2}.
+\end{equation}
+The conceptual point is that $F^{-1}$ is not the error of one particular noisy
+observation: it is the error \emph{averaged over all noise realisations}, an
+expectation rather than a measurement. That is precisely the quantity wanted
+here---whether a bias would be detectable in a typical observation, not whether
+it happened to be detectable in one draw---and it is more stable than estimating
+the same thing from a finite number of simulated fits.
+
+\subsection{Where the systematic comes from}
+Because the emulator error is small ($|r_c|\ll1$; see the residual
+characterisation in Sec.~\ref{sec:hotfloor}), the maximum-likelihood solution
+obtained by fitting $d$ with the emulator lies one Newton step from $\theta_0$.
+The score (gradient of $\log L$ at $\theta_0$, with data $d$) is
+\begin{equation}
+s_i = \frac{\partial \log L}{\partial\theta_i}\bigg|_{\theta_0}
+    = \sum_c \Big(\frac{d_c}{\mu_c}-1\Big) J_{ic}
+    = \sum_c r_c\, J_{ic},
+\label{eq:score}
+\end{equation}
+which projects the channel-space emulator error onto each parameter direction,
+and the Newton step is
+\begin{equation}
+b_{\rm sys} = F^{-1} s .
+\label{eq:bsys}
+\end{equation}
+$b_{\rm sys}$ is the \emph{parameter-space bias}: where the fit would converge
+minus where it should, in physical units (dex of abundance, keV of temperature,
+$\kms$ of velocity). This is the step that converts a spectrum-space accuracy
+statement---the mean relative error quoted per element in the development
+report---into the quantity the science actually publishes. A perfect emulator
+gives $r=0$, hence $s=0$ and $b_{\rm sys}=0$, which is the natural sanity check.
+
+Note that Eq.~\eqref{eq:fisher} evaluates the variance weight with the
+emulator's $\mu_c$ rather than the truth $d_c$. The two differ by $|r_c|$, a
+fraction of a percent, which is negligible inside a variance weight; this is the
+$d\simeq\mu$ approximation noted in the code.
+
+\subsection{The crossover, and why one exists}
+Suppose the exposure (or source flux) is scaled by a factor $k$, so that
+$\mu_c \to k\mu_c$ and hence $J_{ic} \to kJ_{ic}$. Then from
+Eqs.~\eqref{eq:fisher}--\eqref{eq:bsys}:
+\begin{align}
+F &\to kF, & \sigma_{\rm stat} &\to k^{-1/2}\sigma_{\rm stat}
+   &&\propto N^{-1/2}, \nonumber\\
+r &\to r, & s &\to ks, & b_{\rm sys} = F^{-1}s &\to b_{\rm sys}
+   &&\text{(unchanged).}
+\label{eq:scaling}
+\end{align}
+The fractional residual $r_c=d_c/\mu_c-1$ is a \emph{ratio}, so it is invariant
+under the rescaling; the factors of $k$ in $s$ and $F^{-1}$ then cancel exactly.
+
+This asymmetry is the entire basis of the test. The emulator's bias is a
+\emph{fixed offset in physical units} that no amount of observing time reduces,
+while the statistical error shrinks as $N^{-1/2}$. They cross at
+\begin{equation}
+N_\star = N_{\rm ref}\,\big(\sigma_{\rm stat}/|b_{\rm sys}|\big)^2 ,
+\end{equation}
+the in-band count level at which the two are equal. Below $N_\star$ the emulator
+error is invisible beneath the counting noise; above it, the analysis reports a
+systematically shifted value with confident-looking error bars. Reporting
+$N_\star$ rather than a goodness score is what makes the result actionable: it
+is directly comparable to the counts in a real observation.
+
+For shape parameters $b_{\rm sys}$ is additionally independent of the absolute
+count scale because the normalisation parameter absorbs it, so $N_\star$ is a
+fixed property of the triple (emulator, modelling strategy, temperature model).
+
+\subsection{Cost and domain of validity}
+Both $\sigma_{\rm stat}$ and $b_{\rm sys}$ are read off the \emph{same}
+finite-difference Jacobian, so the total cost is $2n{+}1$ emulator evaluations
+(25 for $n=12$) plus one truth spectrum---no posterior sampling anywhere. This
+is what makes a sweep over hundreds of parameter combinations affordable when a
+single MCMC posterior costs hours (Sec.~\ref{sec:biassweep}).
+
+The price is that Eq.~\eqref{eq:bsys} is first order in $r$. The linearisation
+was cross-checked against converged GPU MCMC fits at several count levels
+(Sec.~\ref{sec:hotfloor}): the recovered offsets agree in direction (10 of 11
+parameter signs) but can reach $1.5$--$3\times$ the linear prediction at
+$10^8$ counts, where the fit is far into the systematics-dominated regime.
+The estimator should therefore be read as a calibrated \emph{screen and
+ranking}---reliable for deciding which parameter combinations deserve
+attention, and conservative by a factor of a few in magnitude---rather than as a
+final number. Points it flags are then confirmed with full posteriors.
+
+\section{Practical impact of the hot-element emissivity floor}\label{sec:hotfloor}
+The per-element operators are trained toward a relative emissivity error of
+$0.1\%$, a threshold set for high signal-to-noise XRISM spectra rather than
+derived from a science requirement. Seven hot, line-rich iron-peak metals miss
+it (development report): Cr, Mn and Ni are marginal-to-failing and Ti, Co, Cu and
+Zn fail outright, on a line-head temperature-conditioning floor whose signature
+is a near-uniform $\sim0.3$--$0.4\%$ \emph{multiplicative} error on line-bin
+amplitudes. Because three of these (Cr, Mn, Ni) are freed in real XRISM cluster
+analyses while the other four are weak and tied to iron, we test directly whether
+the floor biases the published quantities, and above what exposure.
+
+\paragraph{Design.} We generate one realistic Perseus spectrum from the
+independent \code{SpexTruthModel} (all 28 currently available elements at a
+literature abundance pattern) and fit it back with the emulator under the
+\emph{literature modelling strategy} of the XRISM/Resolve Perseus-core enrichment
+analysis \citep{xrism_perseus}: free Si, S, Ar, Ca, Cr, Mn, Fe and Ni together
+with $kT$ (or a Gaussian DEM), $\sigma_v$, $\nh$ and the normalisation, with every
+other metal tied to the \emph{fitted} iron (a paramless
+\code{AbundanceModel.tie\_const}). Injected values follow that analysis
+($\mathrm{Fe}=0.71\,\zsun$, $[X/\mathrm{Fe}]$ near unity, $z=0.017284$,
+$\nh=1.36\times10^{21}\,\mathrm{cm^{-2}}$, $\sigma_v=180\kms$, $kT=3.9\kev$), over
+the $1.9$--$12\kev$ band with the Fe\,XXV complex ($6.567$--$6.620\kev$) masked and
+the XRISM/Resolve response ($\sim0.5\,\mathrm{eV}$ channels). Truth and emulator
+span the \emph{identical} element set, so their only difference is emulator error.
+Code: \code{inference\_demo/hot\_floor/} (\code{experiment.py} builds the store and
+a memory-frugal per-element streaming truth; \code{fisher\_bias.py} the estimator
+below; \code{plot\_bias.py}, \code{mcmc\_check.py} the figure and cross-check).
+
+\paragraph{Bias versus statistical error.} Since the emulator error is small, the
+maximum-likelihood offset in the infinite-count limit is one Newton step from the
+truth $\theta_0$,
+\begin{equation}
+b_{\rm sys}=F^{-1}s,\quad
+s_i=\sum_c\Big(\frac{d_c}{\mu_c}-1\Big)\frac{\partial\mu_c}{\partial\theta_i},\quad
+F_{ij}=\sum_c\frac{1}{\mu_c}
+       \frac{\partial\mu_c}{\partial\theta_i}\frac{\partial\mu_c}{\partial\theta_j},
+\end{equation}
+with $d$ the noise-free truth counts and $\mu=\mu(\theta_0)$ the emulator, both
+restricted to the fit band; $F$ is the Poisson Fisher matrix, so
+$\sigma_{\rm stat}=\mathrm{diag}(F^{-1})^{1/2}$ at the reference counts and
+$\propto N^{-1/2}$ thereafter. For shape parameters $b_{\rm sys}$ is independent
+of the overall count scale (the normalisation absorbs it), and the two quantities
+share a single finite-difference Jacobian ($2n{+}1$ forward evaluations). The
+crossover
+\begin{equation}
+N_\star = N_{\rm ref}\,\big(\sigma_{\rm stat}/|b_{\rm sys}|\big)^2
+\end{equation}
+is the in-band count level at which the emulator bias equals the Poisson error:
+below $N_\star$ the floor is invisible, above it it dominates.
+
+\paragraph{Residual character.} The unweighted in-band residual $d/\mu-1$ has
+RMS $\sim14\%$, but this lives entirely in the faint inter-line channels (tiny
+$\mu$); the \emph{counts-weighted} RMS, which drives the likelihood, is
+$0.077\%$---below the $0.1\%$ target---and the noise-free Poisson deviance per
+degree of freedom at $10^5$ in-band counts is $3\times10^{-6}$, i.e.\
+statistically invisible. This counts-weighted residual is nearly binning
+independent (it is the coherent amplitude floor, not a sub-resolution centroid
+artifact), confirming the small-residual premise of the linearisation.
+
+\paragraph{Results.} Table~\ref{tab:hotfloor} lists $N_\star$ per parameter for
+both temperature models; the fractional systematic biases are $\lesssim0.5\%$
+throughout (single-$T$: Fe and the science elements Cr/Mn/Ni at
+$0.18$--$0.92\%$). A Perseus \emph{region} carries $\sim4\times10^4$ in-band
+counts and a deep stacked core $\sim10^6$; every $N_\star$ exceeds these by
+factors of $\sim2\times10^1$ to $\sim10^5$. Equivalently, at a realistic region
+the largest emulator-induced bias (Fe and $\nh$) is $\sim4$--$5\%$ of the
+$1\sigma$ statistical error, and the hot science elements Cr, Mn and Ni are
+$0.1$--$1\%$ of it. The mechanism is exactly the multiplicative character of the
+floor: the abundance and normalisation parameters absorb it, and the
+worst-emulated metals (Ti, Co, Cu, Zn), being weak and tied to iron, leak
+essentially nothing into the free parameters. The Gaussian-DEM fit gives the same
+picture (smallest $N_\star=$ Fe at $1.9\times10^7$), so multi-temperature mixing
+does not expose the floor. We therefore find that the $0.1\%$ floor miss does
+\emph{not} bias XRISM Perseus science at any realistic exposure.
+
+\begin{table}[t]
+\centering
+\caption{Crossover counts $N_\star$ for the literature-strategy Perseus fit, for
+both a single-temperature and a Gaussian-DEM model. $N_\star$ is the in-band
+count level at which the emulator systematic bias equals the $1\sigma$ Poisson
+error; fractional biases $|b_{\rm sys}|/\mathrm{truth}$ are $\lesssim0.5\%$ for
+every parameter in both cases. Realistic anchors: $\sim4\times10^4$ counts per
+XRISM region, $\sim10^6$ for a deep stacked core -- every $N_\star$ is orders of
+magnitude larger.}
+\label{tab:hotfloor}
+\begin{tabular}{llcc}
+\toprule
+Parameter & Group & $N_\star$ single-$T$ & $N_\star$ DEM \\
+\midrule
+Cr & science-critical & $3.6\times10^{9}$ & $8.6\times10^{9}$ \\
+Mn & science-critical & $6.2\times10^{8}$ & $2.6\times10^{9}$ \\
+Ni & science-critical & $1.5\times10^{8}$ & $1.1\times10^{8}$ \\
+Fe & iron            & $2.6\times10^{7}$ & $1.9\times10^{7}$ \\
+Si, S, Ar, Ca & $\alpha$ & $1.2$--$6.3\times10^{8}$ & $0.6$--$17\times10^{8}$ \\
+$kT$ / $T_{\rm mean}$ & thermal & $3.5\times10^{9}$ & $2.4\times10^{8}$ \\
+$T_\sigma$ (DEM) & thermal & --- & $3.4\times10^{7}$ \\
+$\sigma_v$ & nuisance & $4.5\times10^{7}$ & $3.0\times10^{7}$ \\
+$\nh$     & nuisance & $1.8\times10^{7}$ & $1.1\times10^{8}$ \\
+$Y$ (norm) & nuisance & $3.6\times10^{7}$ & $4.3\times10^{7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.72\textwidth]{../inference_demo/hot_floor/results/bias_vs_counts.png}
+\caption{Systematic emulator bias relative to the Poisson statistical error,
+$|b_{\rm sys}|/\sigma_{\rm stat}$, versus in-band counts for each fitted
+parameter (left: single-$T$; right: Gaussian DEM). Each line has slope $1/2$ and crosses unity
+(``bias $=$ noise'', dotted) at $N_\star$; vertical guides mark a realistic XRISM
+region and a deep stacked core. All parameters sit far below unity at realistic
+exposures.}
+\label{fig:hotfloor}
+\end{figure}
+
+\paragraph{Caveats and status.} The result is broadening dependent: the
+counts-weighted residual rises from $0.077\%$ at $\sigma_v=180\kms$ to $5.4\%$ at
+$\sigma_v=0$, so cold, quiet sources are the harder case and are being mapped with
+a dedicated low-broadening stress run. The biases above are the linearised
+(infinite-count) limit; a direct \code{emcee} counts scan near $N_\star$---where
+the systematic offset reaches $\sim1\sigma$ and becomes directly detectable---is
+carried out on the cluster (\code{mcmc\_check.py}; the Poisson likelihood cost is
+independent of the simulated counts) and is reported next. Both single-$T$ and
+Gaussian-DEM Fisher results are reported above and agree; the DEM emulator
+temperature grid is held within the training range ($\geq0.7\kev$) to avoid
+PCHIP extrapolation of the SPEX truth.
+
+\paragraph{MCMC cross-check.} The linearised bias was validated against a direct
+\code{emcee} fit at three in-band count levels ($4\times10^4$, $10^6$, $10^8$),
+with a walker-batched GPU forward (\code{gpu\_forward.py}, \code{emcee}
+\code{vectorized}). The run uses the production acceleration (TF32 tensor-core
+matmul $+$ float32 continuum FFT, ${\sim}3\times$ faster with a ${\sim}10^{-3}$
+accuracy cost, below the emulator's own error). All chains are stationary and
+unimodal ($\tau\!\approx\!35$--$44$, ESS ${\sim}800$), and the
+posterior-predictive residuals are consistent with $\mathcal N(0,1)$ with no
+structure at the line complexes. Fig.~\ref{fig:crosscheck} overlays the recovered
+offsets $(\mathrm{median}-\mathrm{truth})/\sigma$ on the analytic prediction
+$|b_{\rm sys}|/\sigma_{\rm stat}(N)$. At the realistic count levels the predicted
+bias is $0.01$--$0.25\sigma$ while the observed offsets are pure statistical
+scatter (${\sim}1\sigma$, coverage-consistent): the emulator floor is invisible,
+exactly as $N_\star$ predicts. At $10^8$ counts---orders of magnitude beyond any
+real observation---the bias emerges, in the \emph{predicted direction}: the sign
+of the recovered offset matches $b_{\rm sys}$ for $10$ of the $11$ parameters. Its
+\emph{magnitude} runs a factor ${\sim}1.5$--$3$ above the first-order
+$b_{\rm sys}$. A dedicated float64 run (TF32/FFT acceleration off) reproduces the
+accelerated offsets to ${\lesssim}0.3\sigma$ (Fig.~\ref{fig:crosscheck}, open
+squares), so the excess is \emph{not} an acceleration artefact---it is the
+first-order linearisation underestimating the true maximum-likelihood bias
+(compounded by single-realisation scatter). The implied true $N_\star$ are then a
+factor of a few below Table~\ref{tab:hotfloor}, but still ${\gtrsim}10^7$ in-band
+counts, and the science-critical Cr/Mn/Ni retain small offsets even at $10^8$
+(Cr $-0.2\sigma$, Mn/Ni ${\sim}-1.5\sigma$): the conclusion is unchanged, and the
+production acceleration is confirmed science-safe (${\lesssim}0.3\sigma$ at
+$10^8$). A multi-seed scan would pin the linearisation factor precisely.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.68\textwidth]{../inference_demo/hot_floor/results/crosscheck_overlay.png}
+\caption{MCMC cross-check: recovered posterior offsets
+$|\mathrm{median}-\mathrm{truth}|/\sigma$ (points) at three in-band count levels,
+overlaid on the analytic linearised-bias prediction (lines) from
+Table~\ref{tab:hotfloor}. At realistic counts (vertical guides) the offsets are
+statistical scatter far above the negligible predicted bias; at $10^8$ counts the
+bias emerges in the predicted direction (with magnitude a factor of a few above
+the first-order lines). Open squares are the float64 reference run at $10^8$; they
+coincide with the accelerated points, confirming the acceleration is negligible.
+The science-critical Cr/Mn/Ni and Fe are emphasised.}
+\label{fig:crosscheck}
+\end{figure}
+
+\paragraph{Outlook: NewAthena.} The $0.1\%$ floor is comfortably safe for XRISM,
+whose bright-cluster spectra ($\sim4\times10^4$ counts per region, $\sim10^6$ in a
+deep stack) lie one to two orders of magnitude below every $N_\star$. NewAthena's
+X-IFU, however, collects ${\sim}6\times$ (at $7\kev$) to ${\sim}45\times$ (at
+$1\kev$) the XRISM/Resolve effective area \citep{barret2025}, i.e.\ ${\sim}10\times$
+the in-band counts for the same source and exposure, so a deep observation of a
+bright cluster core reaches ${\sim}10^6$--$10^7$ in-band counts
+\citep{cucchetti2018}. That is precisely the regime where the floor first bites:
+at ${\sim}10^7$ counts the continuum- and normalisation-sensitive parameters (Fe,
+$\nh$, $kT$, $Y$) would carry a ${\sim}0.5$--$1\sigma$ emulator bias, while the
+hot-element abundances themselves (Cr/Mn/Ni) require ${\sim}10^8$ and are affected
+only in the most extreme stacked spectra. X-IFU's sharper resolution
+(${\sim}3$--$4\,\mathrm{eV}$ vs.\ XRISM's ${\sim}4.5\,\mathrm{eV}$) marginally
+increases line-head exposure, though the dominant broadening is the cluster's own
+${\sim}180\kms$ turbulence, common to both instruments. The floor is therefore a
+\emph{trackable systematic} for NewAthena's flagship high-count cluster science---
+motivating a line-head retraining of the hot Fe-peak elements before flight---even
+though it is negligible for XRISM. These are order-of-magnitude scalings from the
+effective-area ratio; a dedicated X-IFU/\code{SIXTE} simulation would pin $N_\star$
+in X-IFU counts.
+
+\section{Bias across parameter space}\label{sec:biassweep}
+The study of Sec.~\ref{sec:hotfloor} evaluates $b_{\rm sys}$ and $N_\star$ at a
+\emph{single} point in parameter space---Perseus---plus a small number of
+single-axis variants. That is the right design for the question it asks (does
+the hot-element floor damage XRISM Perseus science?), but it does not establish
+that the emulator is unbiased for cluster science generally. The estimator of
+Sec.~\ref{sec:fisherbias} is cheap enough to answer the general question
+directly, by evaluating it over a sample of the parameter space rather than at
+one point.
+
+\paragraph{Design.} We draw a Latin hypercube over the cluster science range:
+$kT$ (or $T_{\rm mean}$) $1.5$--$8\kev$, $T_{\rm sigma}$ $0.15$--$3.0\kev$ for
+the DEM flavour, each of the eight free abundances independently over
+$0.2$--$2\,\zsun$, $\sigma_v$ $30$--$600\kms$, and $\nh$ $0$--$5\times10^{21}\,
+\mathrm{cm^{-2}}$. A Latin hypercube rather than a grid: with 12--13 axes a grid
+is combinatorially impossible, while the hypercube gives every axis full
+marginal coverage at any sample size, so a partially completed run is still
+interpretable. The range is deliberately the volume real cluster fits occupy
+rather than the full training box---filling the map with temperatures no cluster
+exhibits would swamp the science-relevant signal.
+
+\paragraph{Why the abundance axes matter.} Abundance enters both the truth and
+the emulator \emph{linearly} (CIE emissivities sum per element), so varying it
+cannot by itself create per-element emulator error. It nonetheless moves
+$b_{\rm sys}$, because it changes which elements dominate which channels and
+therefore reweights the existing per-element errors in the score,
+Eq.~\eqref{eq:score}. This is an effect that per-element accuracy metrics
+cannot express: it lives in the parameter covariance $F^{-1}$, not in any
+single element's residual. It is the main reason the sweep varies abundances
+rather than holding them at the fiducial pattern.
+
+\paragraph{Implementation.} \code{scripts/bias\_sweep.py}, in two resumable
+stages matching the split of Sec.~\ref{sec:fisherbias}: \code{--stage truth}
+computes $d$ at every sample point, and \code{--stage bias} computes $\mu$, $J$
+and hence $b_{\rm sys}$ and $\sigma_{\rm stat}$. The stages are separate because
+$d$ is a property of SPEX alone: when an element is retrained or the store is
+rebuilt, only the second stage is repeated. The truth stage loops
+\emph{elements outermost}, loading each element's cache once and evaluating it
+at every sample point, which keeps peak memory at a single element
+(${\sim}0.4$\,GB) and avoids re-reading the caches once per point.
+
+\paragraph{Interpretation.} Results are reported per parameter as the
+distribution of $|b_{\rm sys}|/\sigma_{\rm stat}(N)$ over the sampled volume at
+a chosen exposure $N$, together with the median $N_\star$ and the fraction of
+sampled points exceeding $1\sigma$. Following Sec.~\ref{sec:fisherbias} these
+are a screen: points flagged above $1\sigma$ are candidates for confirmation
+with full posterior fits, where the true offset may be larger by a factor of a
+few.
+
+\section{Sampling the velocity dispersion}\label{sec:sigmav}
+The line-of-sight velocity dispersion $\sigma_v$ is a free, sampled parameter.
+It was previously pinned in the walker-batched runs for an implementation
+reason rather than a physical one: the analytic line deposit
+(\code{deposit\_gaussian\_lines}) accepted only a scalar velocity, while the
+continuum FFT already broadened per spectrum. The two branches differ in
+bookkeeping, not in physics. With one $\sigma_v$ every walker shares a line's
+$\pm n\sigma$ window, so the scatter indices are common to the batch; with a
+per-walker $\sigma_v$ those windows become ragged across the batch, and the
+deposit is instead accumulated into a flattened buffer with walker-offset
+indices. The \code{erf}-difference weights, and hence each line's exactness on
+any target binning, are unchanged.
+
+The prior is uniform on
+\begin{equation}
+\sigma_v \in [30,\,600]\kms ,
+\end{equation}
+grounded in the measured Perseus values and then widened. \emph{Hitomi} found
+$\sigma_v = 164\pm10\kms$ at $30$--$60\,$kpc from the nucleus
+\citep{hitomi2016}, and mapping the core gave ${\sim}100\kms$ over most of the
+field, rising to ${\sim}200\kms$ toward the central AGN and the north-western
+ghost bubble, with a ${\sim}100\kms$ line-of-sight gradient from sloshing
+\citep{hitomi2018}. \emph{XRISM}/Resolve subsequently measured ${\sim}300\kms$
+in the eastern region and a $\pm200$--$300\kms$ dipole attributed to a recent
+merger, out to ${\sim}500\,$kpc \citep{xrism_perseus_kinematics}. Perseus itself
+therefore spans ${\sim}100$--$300\kms$; the prior is widened on both sides so
+the boundary is never informative. The floor is kept strictly positive because
+as $\sigma_v\to0$ the line profile collapses below the instrumental response
+width and the parameter ceases to be identifiable --- $30\kms$ is already well
+below Resolve's own resolution, which corresponds to ${\sim}100\kms$ at Fe-K.
+The bias study deliberately retains a wider $[10,1000]\kms$ ``extreme'' range so
+that calibration is also probed outside anything the sample actually shows.
+
+\section{Cost of the forward step}\label{sec:forwardcost}
+One vectorised MCMC step is one batched forward over the walker ensemble, so its
+cost sets the feasibility of any large sampling or simulation-based-calibration
+campaign. Measured on an A10-class GPU with the full 30-element store at 96
+walkers, evaluating the per-element trunks together (grouped \code{vmap} over
+same-shape elements) and then compiling that batched call gives
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+configuration & ms/walker & vs.\ fp64 & vs.\ prod. & max.\ rel.\ err. \\
+\midrule
+serial, float64, no acceleration        & 411.7 & $1.00\times$ & $0.60\times$ & (reference) \\
+serial + TF32 + compile + float32 FFT   & 246.2 & $1.67\times$ & $1.00\times$ & $9.7\times10^{-4}$ \\
+batched (grouped \code{vmap})           & 208.6 & $1.97\times$ & $1.18\times$ & $6.2\times10^{-4}$ \\
+\quad + \code{torch.compile}            & 112.7 & $3.65\times$ & $2.19\times$ & $6.2\times10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The second row is the current production configuration, so the batched and
+compiled forward is $2.19\times$ faster than what is deployed, and
+$3.65\times$ faster than the unaccelerated reference. Grouping the element
+trunks is worth only $1.18\times$ on its own; compiling the resulting grouped
+GEMMs is what pays. That compile step is a genuine gain rather than a duplicate
+of the per-element compilation applied elsewhere: the batched wrapper
+deliberately calls the unbound \code{forward\_norm} so as to bypass any compiled
+instance attribute, so before this the batched trunk was never compiled at all.
+
+Accuracy is not traded for any of this. Against the float64 reference, on bins
+carrying at least $0.1\%$ of the peak flux, the deployed accelerations cost
+$9.7\times10^{-4}$ at worst and the batched path $6.2\times10^{-4}$, with $99$th
+percentiles of $2.8$ and $2.4\times10^{-4}$; the compile step changes the result
+by less than one part in $10^{3}$ of the error itself. All of this sits well
+below the emulator's own ${\sim}3\times10^{-3}$ test error.
+
+The forward is strongly dominated by the trunk. A stage breakdown at batch $16$
+gives trunk $95\%$, continuum broadening and rebinning $2\%$, and line
+deposition plus abundance weighting $2\%$; an operator-level profile attributes
+$63.6\%$ of GPU time to \code{bmm} (executing as the TF32 tensor-core
+\code{cutlass\_80\_tensorop\_s1688gemm} kernel) and ${\sim}18\%$ to the
+bandwidth-bound activation kernels. The trunk is therefore GEMM-bound and
+already on tensor cores.
+
+That leaves little room, and we record two optimisations that were implemented,
+measured and \emph{rejected}, because both failures are informative.
+\begin{itemize}
+\item \textbf{bfloat16 autocast on the trunk} is fast --- $1.69\times$, to
+$66.9\,$ms/walker --- but costs a maximum relative error of $2.4\%$ on a bin at
+$97.5\%$ of the spectral peak, with a $99$th percentile of $8.7\times10^{-3}$,
+roughly three times the emulator's own ${\sim}3\times10^{-3}$ test error. A
+systematic of that size in the forward model is not acceptable in a study whose
+purpose is to calibrate the posterior.
+\item \textbf{Coarsening the trunk energy grid} fails because its premise is
+false. The trunk is not a smooth continuum: measured on the native
+$P=24212$ grid, the one-bin curvature $|d^2\log_{10}\rho|$ peaks at $0.0016$ for
+He but at $1.75$, $2.45$ and $4.91$ for O, Si and Fe respectively. Only H and He
+are genuinely smooth; every metal carries line structure in the trunk, including
+elements that also have a line head. Evaluating every second point and
+interpolating back costs Fe an order of magnitude in density error and $43.5\%$
+in broadened flux, with the worst bin at $70\%$ of the peak --- and the
+broadening does not wash this out, because narrow lines are being lost rather
+than noise being added. The same objection applies to any scheme that
+interpolates the trunk over a precomputed temperature grid.
+\end{itemize}
+Increasing the walker sub-batch changes nothing (the GPU is already saturated at
+$16$), and CUDA graph capture is not indicated: the profile shows the CPU
+blocked on a full command buffer, i.e.\ running ahead of the GPU rather than
+failing to feed it. We therefore treat the forward as converged at
+$1.88\times$, and note that at ${\sim}5.9\,$h per chain the productive direction
+for a calibration campaign is fewer forward evaluations, not faster ones.
+
+\section{Sampler comparison}\label{sec:bakeoff}
+Because the forward dominates the cost of every algorithm
+(Sec.~\ref{sec:forwardcost}), the choice of sampler decides whether a
+calibration campaign is affordable at all. We therefore fit the \emph{same}
+simulated Perseus spectrum ($10^{6}$ in-band counts, 12 free parameters, the
+literature modelling strategy of Sec.~\ref{sec:hotfloor}) with each sampler over
+an identical \code{PoissonPosterior}, so that what is compared is the algorithm
+and nothing else. Code: \code{scripts/bake\_off.py}.
+
+\paragraph{Results.} Table~\ref{tab:bakeoff} gives the state of the comparison.
+\emph{These are partial. The flow-accelerated samplers (\code{nautilus},
+\code{pocoMC}, \code{i-nessai}) are implemented and verified against analytic
+problems but not yet run at scale; NUTS was diagnosed rather than completed;
+and the variational row is being repeated with a defensible particle count.
+The three ensemble rows are final.}
+
+\begin{table}[t]
+\centering
+\caption{Sampler comparison on one $10^{6}$-count Perseus spectrum, 12 free
+parameters, on an A10-class GPU. ``Evals'' counts walkers pushed through the
+emulator. Agreement is against the \code{emcee} chain.}
+\label{tab:bakeoff}
+\begin{tabular}{lrrrrrl}
+\toprule
+sampler & wall (h) & evals & min ESS & ESS/eval & ms/eval & agreement \\
+\midrule
+\code{emcee}     &  1.65 &  51\,020 &  144 & $2.8\times10^{-3}$ & 117 & (reference) \\
+\code{zeus}      &  5.38 &  70\,800 &  194 & $2.7\times10^{-3}$ & 274 & $0.21\sigma$, width $1.04$--$1.24$ \\
+\code{UltraNest} & 10.83 & 218\,711 & 3507 & $1.6\times10^{-2}$ & 178 & $0.14\sigma$, width $0.94$--$1.11$ \\
+\code{SVI}       &  1.25 &   8\,006 & 4000\rlap{$^\dagger$} & --\rlap{$^\dagger$} & 564 & $2.57\sigma$, width $0.43$--$2.96$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{ESS per evaluation is not the whole story.} Two rows of
+Table~\ref{tab:bakeoff} must not be read as they stand. $^\dagger$A variational
+posterior is independent by construction, so its ``ESS'' is simply the number of
+draws requested and its ESS/eval is an artefact of two settings rather than a
+measurement; the variational row is judged on recovery and agreement only.
+Separately, the importance-based samplers report a Kish effective size over
+their weights, which \emph{is} comparable as an ESS but corresponds to a much
+larger raw sample array. More fundamentally, ESS/eval and wall-clock measure
+different things here: the ensemble samplers amortise a whole batch of walkers
+into each forward, so their per-evaluation cost is the batched
+$112$--$131\,$ms/walker of Sec.~\ref{sec:forwardcost}, whereas a single-point
+sampler pays ${\sim}4\times$ that for a $B{=}1$ forward. A method can therefore
+need far fewer evaluations and still lose badly on wall-clock; that is a fact
+about batching, not about mixing.
+
+\paragraph{UltraNest is the most efficient, but not the cheapest.} Nested
+sampling delivers $5.7\times$ more effective samples per evaluation than
+\code{emcee} and $3.7\times$ more per wall-clock second, and it is the only
+sampler here that returns $\log Z$. Its cost is nonetheless irreducible: it runs
+to an evidence tolerance rather than a step count, so it cannot be asked for
+fewer draws. It produced ESS $3507$ where simulation-based calibration needs
+only ${\sim}100$, at $10.8\,$h. For a campaign of many fits \code{emcee}
+remains the economical choice ($1.65\,$h per posterior) with UltraNest as the
+reference; the information gain from prior to posterior here is ${\sim}44$ nats,
+which sets the nested-sampling iteration count.
+
+\paragraph{Slice sampling is defeated by the hardware, not the algorithm.}
+\code{zeus} needs only ${\sim}5.5$ evaluations per walker per iteration -- its
+mixing is as advertised -- but its vectorised implementation hands the sampler a
+\emph{shrinking} active subset as walkers accept, so the tail of every iteration
+runs at $B{=}8,4,2$ where the GPU is idle. Its effective cost is
+$274\,$ms/eval against \code{emcee}'s $117$. Combined with posteriors $4$--$24\%$
+wider, it is dominated on every axis.
+
+\paragraph{Gradient-based sampling is defeated by the batch size, not by
+mixing.} Pyro's NUTS ran at $958\,$s per iteration, saturating its tree-depth
+ceiling at $1023$ leapfrog steps, each a gradient at $B{=}1$ costing $937\,$ms
+-- implying a single-point forward of ${\sim}526\,$ms, $4\times$ the batched
+$131\,$ms/walker. The comparison that matters is not wall-clock but the
+break-even: a NUTS gradient costs $7.1\times$ an amortised ensemble evaluation,
+so NUTS must reach $\mathrm{ESS/eval}>2.0\times10^{-2}$ to win, and since a
+well-adapted NUTS yields roughly one independent draw per iteration its
+ESS/eval is ${\sim}1/(\text{leapfrog steps})$. \emph{Break-even is therefore
+around $50$ steps}, and at $31$ steps NUTS would beat every other sampler here.
+Running at $1023$ it is a factor ${\sim}21$ from viability, which is a statement
+about adaptation, not about the algorithm. Two defaults are implicated: Pyro
+adapts a \emph{diagonal} mass matrix, which cannot represent correlation at all
+and so cannot follow this posterior's abundance/normalisation degeneracy (the
+marginal scales are not the difficulty -- their condition number in the
+unconstrained space is only ${\sim}79$, worth ${\sim}9$ steps); and the default
+initialisation draws from the prior box, whereas every other sampler here starts
+at the truth. Both are now options. Should they prove insufficient, the
+indicated direction is an \emph{ensemble} gradient method (ChEES-HMC, MEADS)
+that evaluates many chains per forward, since the batched potential and its
+gradient are already available; at $B{=}64$ a gradient costs $233\,$ms per
+chain rather than $936$.
+
+\paragraph{Variational inference is fast and wrong, and the two are related.}
+SVI was the quickest ($1.25\,$h) and eleven of its twelve parameters look
+healthy (pulls of mean $+0.18$, standard deviation $1.10$, indistinguishable
+from \code{emcee}'s $-0.17$, $1.00$). The exception is decisive: $\nh$ is
+recovered $8\sigma$ from the truth \emph{in its own units}, which decomposes
+into a $2.6\sigma$ offset combined with a posterior $0.43\times$ too narrow. It
+is the dangerous kind of failure: confidently wrong error bars on one parameter,
+with nothing anomalous elsewhere.
+
+The speed was, however, borrowed from the accuracy. A variational run costs
+exactly $(\text{steps})\times(\text{particles})$ forward evaluations, and this
+one used only four ELBO particles -- a memory-driven choice, not an
+accuracy-driven one -- for $8\,000$ evaluations, a sixth of \code{emcee}'s. Four
+samples is a very noisy estimate of the ELBO gradient, and restoring a
+defensible particle count costs the speed advantage outright: staying cheaper
+than \code{emcee} allows at most ${\sim}25$ particles over $2000$ steps.
+
+We do not yet attribute the failure. The natural suspicion is an inadequate
+variational family, but the evidence points the other way: minimising the
+reverse Kullback--Leibler divergence is mode-seeking and systematically
+\emph{under}-estimates variance, whereas several of these posteriors came out up
+to $2.96\times$ \emph{too wide}, which is the signature of an unconverged
+optimiser rather than of a family mismatch. A full-rank Gaussian can in any case
+represent a linear degeneracy exactly, and at $10^{6}$ counts with ${\sim}44$
+nats of information the posterior should be close to Gaussian -- an assumption
+the Fisher treatment of Sec.~\ref{sec:fisherbias} already relies on and
+validates. The informative next experiment is therefore not a more expressive
+guide but a better-initialised one: $F^{-1}$ from Sec.~\ref{sec:fisherbias}
+\emph{is} the posterior covariance, so initialising the guide's location at the
+truth and its scale at $\mathrm{chol}(F^{-1})$ starts the optimisation with the
+correct correlation structure instead of requiring it to be discovered by
+stochastic gradient descent. Only if that still fails is a normalizing-flow
+guide indicated -- and it carries $2\,786$ parameters against the full-rank
+Gaussian's $168$, so it would need proportionally more steps and make the cost
+problem worse.
+
+\paragraph{Recovery is consistent across samplers, and consistent with noise.}
+All three sampling methods agree on the same parameter offsets --
+$\mathrm{Ar}$ at ${\sim}-2\sigma$, $\mathrm{Ca}$ at ${\sim}+1.4\sigma$ -- and
+agree with each other to $0.21\sigma$ (zeus) and $0.14\sigma$ (UltraNest). Those
+offsets are therefore a property of the simulated data, not of the samplers. They
+are also fully consistent with counting noise: across the 12 parameters the
+\code{emcee} pulls have mean $-0.23$ and standard deviation $0.98$ against
+expectations of $0\pm0.29$ and $1$, giving $\chi^{2}=11.1$ for 12 degrees of
+freedom ($p=0.52$). The Fisher estimator of Sec.~\ref{sec:fisherbias} predicts a
+maximum emulator-induced bias of $0.23\sigma$ at this exposure, twenty times
+smaller than the largest observed pull. A single fit therefore cannot measure
+emulator bias, which is precisely the argument for the sweep of
+Sec.~\ref{sec:biassweep} and for calibration over many realisations rather than
+one showcase.
+
+
+\begin{thebibliography}{9}
+\bibitem[Morrison \& McCammon(1983)]{morrison1983} Morrison, R.\ \& McCammon, D.\
+1983, ApJ, 270, 119.
+\bibitem[Wilms et al.(2000)]{wilms2000} Wilms, J., Allen, A.\ \& McCray, R.\
+2000, ApJ, 542, 914.
+\bibitem[XRISM Collaboration(2026)]{xrism_perseus} XRISM Collaboration 2026,
+Chemical enrichment of the Perseus cluster core seen by XRISM/Resolve,
+arXiv:2606.17141.
+\bibitem[Hitomi Collaboration(2016)]{hitomi2016} Hitomi Collaboration 2016,
+Nature, 535, 117 (The quiescent intracluster medium in the core of the Perseus
+cluster).
+\bibitem[Hitomi Collaboration(2018)]{hitomi2018} Hitomi Collaboration 2018,
+PASJ, 70, 9 (Atmospheric gas dynamics in the Perseus cluster observed with
+Hitomi).
+\bibitem[Zhang et al.(2025)]{xrism_perseus_kinematics} Zhang, C., et al.\ 2025,
+Mapping the Perseus galaxy cluster with XRISM: gas kinematic features and their
+implications for turbulence, arXiv:2510.12782.
+\bibitem[Cucchetti et al.(2018)]{cucchetti2018} Cucchetti, E., Pointecouteau, E.,
+Peille, P., et al.\ 2018, A\&A, 620, A173 (Athena X-IFU synthetic observations of
+galaxy clusters to probe the chemical enrichment of the Universe).
+\bibitem[Barret et al.(2025)]{barret2025} Barret, D., et al.\ 2025, The X-ray
+Integral Field Unit at the end of the Athena reformulation phase, arXiv:2502.10866.
+\end{thebibliography}
+
+\end{document}

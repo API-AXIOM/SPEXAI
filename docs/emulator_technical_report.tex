@@ -1,0 +1,1266 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{natbib}
+\bibliographystyle{plainnat}
+
+\newcommand{\mre}{\mathrm{MRE}}
+\newcommand{\kev}{\,\mathrm{keV}}
+\newcommand{\kms}{\,\mathrm{km\,s^{-1}}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Neural emulation of SPEX single-element CIE spectra:\\
+architecture, training strategy, and evaluation\\
+\large Technical report on design decisions, including discarded approaches}
+\author{D.~Huppenkothen \and Claude (Anthropic)\thanks{Drafted with
+Claude~Fable~5; all results produced by the \code{spexai} codebase,
+branch \code{neural\_operator}.}}
+\date{2026 July 13}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We document the design of a neural emulator for velocity-broadened,
+single-element collisional ionisation equilibrium (CIE) X-ray spectra
+computed with SPEX \citep{kaastra96}, developed on the iron ($Z=26$)
+model as testbed. The final configuration -- a coordinate-based
+``operator'' network with Fourier-feature energy encoding, FiLM
+temperature conditioning, a dedicated line-amplitude head, error-prioritized
+example sampling, Polyak weight averaging, and a long training schedule --
+reaches a mean relative flux error of $0.13\%$ on held-out SPEX spectra
+(99.2\% of test spectra below 1\%), at 21.5\,ms per spectrum. We lay out
+each architecture and training decision in the order it was made, with
+the quantitative evidence behind it, and we give equal space to the
+approaches that were tried and discarded: a Sobolev derivative-matching
+loss, PCA+GP emulation, a monolithic $(T,v)$ emulator of broadened
+spectra, enlarging the line head, synthetic-data augmentation on dense
+grids, and unweighted per-channel instrument metrics. We further
+describe validation at the level of real instrument responses
+(XRISM/Resolve, Chandra ACIS and HETG), the physics argument for
+per-element velocity broadening, an active-learning scheme for placing
+new SPEX evaluations, and a feasibility analysis for full 30-element
+inference within a 200\,ms budget.
+\end{abstract}
+
+\section{Problem setting and scope}
+\label{sec:setting}
+
+The SPEX CIE model represents an optically thin plasma as a sum of
+per-element spectra: the observed model spectrum is a linear combination
+$\sum_i A_i f_i(E; T)$ of single-element spectra $f_i$ weighted by
+abundances $A_i$, subsequently velocity-broadened, redshifted, and
+folded through an instrument response. Fitting such models with
+microcalorimeter-resolution data is limited by the cost of evaluating
+$f_i$; we therefore emulate each element's spectrum with a neural
+network. This report covers the single-element ($Z=26$, iron) testbed:
+data, architecture, training, broadening, and evaluation, in the order
+decisions were made. Scaling to all 30 elements uses an automated sweep
+(\code{scripts/run\_all\_elements.py}) with the recipe fixed by the
+experiments below; the sweep and a failure mode it exposed on low-$Z$
+elements are in Section~\ref{sec:multielement}.
+
+\paragraph{Data.} $14{,}246$ SPEX spectra on an adaptive energy grid of
+$24{,}212$ bins over $0.1$--$12\kev$, with temperatures
+$T = 0.50$--$19.94\kev$; split $81/9/10$ into train/validation/test
+($11{,}539$ / $1{,}282$ / $1{,}425$ spectra) with a fixed seed. Targets
+are $\log_{10}$ flux densities; bins with $\log_{10} f < -10$ (``the
+floor'') are treated as empty. Validation and test sets contain only
+original SPEX spectra in every experiment, including all augmentation
+studies.
+
+\paragraph{Headline metric.} For spectrum $s$, predicted log-density
+$p_{sb}$ and truth $t_{sb}$,
+\begin{equation}
+\varepsilon_{sb} = \bigl|10^{\,d_{sb}} - 1\bigr|,\qquad
+d_{sb} = \operatorname{clip}\bigl(p_{sb} - \max(t_{sb},\,-10),\,-4,\,4\bigr),
+\label{eq:eps}
+\end{equation}
+which equals the relative error in linear flux, and
+\begin{equation}
+\mre_s = \frac{1}{|V_s|}\sum_{b\in V_s}\varepsilon_{sb},\qquad
+V_s = \{\,b : t_{sb} > -10\,\}.
+\label{eq:mre}
+\end{equation}
+We report the mean and median of $\mre_s$ over the test set and
+\emph{yields}, the percentage of spectra with $\mre_s$ below $1\%$
+(and $0.1\%$). Empty bins are scored separately as \emph{floor
+violations} (fraction of empty bins predicted above the floor, and the
+worst excess in dex). Line bins ($5.9\%$ of the grid; flux exceeding
+twice a running-median continuum) and continuum bins are also scored
+separately.
+
+\section{Architecture}
+\label{sec:arch}
+
+The emulator is a coordinate-based network in the style of neural
+operators \citep{lu21deeponet,li21fno} and follows
+\citet{ricketts26}: the spectrum is a continuous function
+$\log_{10} f(x;\theta)$ of the normalised log-energy coordinate $x$,
+conditioned on normalised parameters $\theta$ (here $\log_{10} T$).
+Components, each validated by ablation (Section~\ref{sec:ablation}):
+
+\begin{enumerate}
+\item \textbf{Fourier-feature encoding of energy}
+      \citep{tancik20}: $x \mapsto [x, \cos 2\pi f_k x, \sin 2\pi f_k x]$
+      with $K$ log-spaced frequencies $f_k \in [0.25, f_{\max}]$. A
+      coarse-to-fine curriculum weight per channel activates high
+      frequencies progressively during the first
+      $30\%$ of training, preventing early high-frequency overfitting.
+\item \textbf{FiLM conditioning} \citep{perez18}: a small MLP maps
+      $\theta$ to per-layer scale/shift $(\gamma,\beta)$ modulating the
+      trunk, rather than concatenating $\theta$ to the input.
+\item \textbf{Trend head}: a linear-in-$x$ term $a(\theta)\,x +
+      b(\theta)$ factoring out the global spectral slope.
+\item \textbf{Line head}: the line-bin set is precomputed from the
+      training data (union over a temperature-ordered sample; $3{,}980$
+      lines for Fe, deterministic given the cache). Each line has a
+      learned embedding; a shared MLP maps [embedding, conditioning]
+      to a $\log_{10}$ line flux, which is flux-added
+      ($\operatorname{logaddexp}$) to the trunk output, so the trunk
+      models only continuum and pseudo-continuum. The head stores line
+      energies and native bin widths, so integrated line fluxes can be
+      re-deposited exactly onto arbitrary instrument grids
+      (\code{deposit()}), a property used heavily in
+      Sections~\ref{sec:broadening} and \ref{sec:instruments}.
+\item \textbf{Per-bin target normalisation}: the network predicts the
+      $z$-scored residual of $\log_{10} f$ per training bin; the static
+      line forest lives in the normalisation constants and the trunk
+      models $\mathcal{O}(1)$ deviations.
+\end{enumerate}
+
+The training loss is a Huber loss on $\varepsilon_{sb}$
+(Eq.~\ref{eq:eps}) over $P$ randomly sampled grid points per spectrum,
+plus a one-sided floor penalty $10^{\operatorname{relu}(p_{sb}+10)}-1$
+on empty bins (the model is pushed onto the floor but never penalised
+for matching it), plus an early $\log$-space MSE stabiliser ramped to
+zero over the first $20\%$ of steps. Optimiser: AdamW
+\citep{loshchilov19} with gradient clipping at unit norm and a cosine
+schedule with linear warmup \citep{loshchilov17}.
+
+\subsection{Ablation study (what established the components)}
+\label{sec:ablation}
+
+An eight-variant ablation at fixed budget (20k steps, $\sim$1M
+parameters) established, in order of effect size: Fourier features are
+essential (without them, line MRE is 76\%); FiLM is the second-largest
+factor (yield@1\% drops from 88.8 to 60.8 without it); a dedicated
+line head gives the best line-bin accuracy of the operator family.
+A multi-resolution grid encoding \citep[Instant-NGP style;][]{muller22}
+performed like the mid-pack variants but evaluated slower, and was not
+pursued.
+
+\paragraph{Discarded: Sobolev (derivative-matching) loss.} A loss term
+matching finite-difference slopes between sampled points, natural for
+smooth reflection spectra, \emph{hurts} here: removing it improved MRE
+from $0.91\%$ to $0.52\%$. The CIE spectrum is a forest of
+single-bin spikes; penalising slope mismatch on subsampled points
+biases the model against exactly the structure it must fit. All
+subsequent configurations omit it.
+
+\paragraph{Retained as a deployment option: fixed-grid MLP.} The
+original formulation (an MLP from $T$ directly to all $24{,}212$ bins)
+is competitive in accuracy ($0.53\%$) and $30\times$ faster
+($0.2$\,ms/spectrum) at $15\times$ the parameters. Because CIE line
+energies never move, the standard argument against fixed grids does not
+apply; this becomes the distillation target for high-throughput
+inference (Section~\ref{sec:inference}).
+
+\section{Hyperparameter search}
+\label{sec:hpo}
+
+A two-stage random search \citep{bergstra12} over 24 configurations
+(learning rate, batch, points per spectrum, trunk width$\times$depth,
+activation, $K$ and $f_{\max}$, line-embedding size, trend head,
+per-bin normalisation, stabiliser weight, curriculum length): stage one
+at 3k steps, top four re-trained at 20k. Winner \code{t04}: GELU
+$384\times5$ trunk, $K=512$, $f_{\max}=4000$, learning rate $3\times
+10^{-3}$, batch 128, 2048 points/spectrum, line\_dim 16, trend and
+bin-norm on (1.65M parameters): $0.31\%$ test MRE, $94.7\%$ yield@1\%.
+Validation ranking generalised cleanly to the test set.
+
+Two findings shaped later work. First, \emph{training length dominated
+every hyperparameter} ($0.82\%\to0.31\%$ from 3k$\to$20k steps).
+Second, the largest configuration (\code{t16}, 3.6M parameters) was
+competitive at 3k steps but \emph{diverged} at 20k at the shared
+learning rate of $3\times10^{-3}$: the search had coupled model size to
+an unstable learning rate, and the apparent conclusion ``larger models
+do not help'' was an artefact (revisited in Section~\ref{sec:tier2}).
+
+\section{Classical baselines (and a discarded one)}
+\label{sec:baselines}
+
+Per-bin interpolation across training temperatures is the natural
+classical competitor with one physical parameter. Monotone cubic
+interpolation \citep[PCHIP;][]{fritsch80} and linear interpolation in
+$(\log T,\log f)$ achieve $0.003\%$ MRE on the full training grid --
+two orders of magnitude better than any neural variant -- and $0.067\%$
+with only 300 training spectra. The emulator's justification is
+therefore never raw single-element accuracy but speed, differentiability,
+memory (4\,MB vs 1.1\,GB), and extension to joint multi-parameter
+spaces where dense tabulation is impossible.
+
+\paragraph{Discarded: PCA + Gaussian process emulation.} The
+Speculator-style approach \citep{alsing20} -- PCA on $\log f$, GP
+regression on component amplitudes -- saturates at its truncation error
+($0.2\%$ with 64 components) and degrades catastrophically at small
+$n_{\rm train}$ (9--17\% MRE). Rejected as both baseline and generator
+for data augmentation; PCHIP was used instead throughout.
+
+\section{Velocity broadening}
+\label{sec:broadening}
+
+\subsection{Physics: why per-element broadening is correct}
+
+Turbulent/bulk velocity broadening acts as a convolution with a kernel
+$K_v$ in $\ln E$; convolution is linear, so for a shared kernel,
+broadening per element and summing is \emph{exactly} equivalent to
+broadening the summed spectrum. Moreover the physically correct total
+line width is per-ion,
+\begin{equation}
+\sigma_i^2 = \sigma_{\rm turb}^2 + \frac{k T}{A_i m_p},
+\end{equation}
+with the thermal term scaling as $1/\sqrt{A_i}$
+\citep{rybicki79} -- the decomposition used in microcalorimeter
+analyses \citep{hitomi16,hitomi18} -- so a per-element architecture is
+\emph{more} physical than broadening the total: each element can carry
+its own thermal width at zero cost. Caveats where the convolution
+picture itself breaks (multiphase kinematics, resonant scattering) are
+orthogonal to the per-element choice.
+
+\subsection{Benchmark of broadening implementations}
+
+Against exact erf-integral broadening of true spectra: FFT convolution
+on a uniform $\ln E$ grid is accurate to $0.03$--$0.06\%$ over
+$100$--$1000\kms$ at 10--30\,ms (CPU); the \emph{hybrid} pipeline
+(emulate unbroadened $\to$ FFT-broaden the trunk $\to$ add analytic
+Gaussian lines with exact per-line fluxes) reaches $0.13$--$0.18\%$;
+the legacy sparse-matrix implementation degrades from $0.3\%$ to
+$2.8\%$ at $1000\kms$ with $20\%$ of line flux misplaced.
+\textbf{Recommendation: replace the sparse method with FFT/hybrid.}
+
+\paragraph{Discarded: monolithic $(T,v)$ emulator of broadened spectra
+(option~2, v1).} A two-parameter version of the winning architecture,
+trained on FFT-broadened targets with the line head removed (rationale:
+broadening removes delta spikes), reached only $2.6\%$ validation MRE
+(yield@1\% $=0$) and $1.1$--$1.8\%$ end-to-end -- $8\times$ worse than
+the hybrid. The post-mortem identified the causes: (i) velocity is a
+\emph{known operator}, not a latent parameter -- asking global FiLM
+modulation to express a local convolution discards the strongest
+available inductive bias; (ii) at $v_{\min}=50\kms$ lines are still
+$\sim$2 native bins wide, so removing the line head deleted the
+component handling the sharpest structure while keeping trunk
+hyperparameters tuned assuming its presence; (iii) uniform point
+sampling on the $83{,}728$-bin uniform grid starves line cores of
+supervision; (iv) checkpoint selection never saw the hardest velocities
+(evaluation at $\{100,250,600\}\kms$ only); (v) zeroing sub-$10^{-9}$
+wings in the targets while penalising above-floor predictions injects
+label noise at every line wing. A revised version
+(\code{train\_broadened2}) addresses all five: a \emph{Gaussian line
+head} with analytic width $\sigma_u = v/c$ and $T$-only amplitudes
+(broadening conserves line flux; the factorisation is structural),
+line-aware point sampling with offsets $\sim\mathcal{N}(0,\sigma(v'))$
+at random velocities, validation at $\{50,100,250,600,1000\}\kms$, and
+wing masking with a one-sided cap. These fixes more than halved the
+error -- v2 reaches $0.46$--$0.77\%$ end-to-end MRE
+(Table~\ref{tab:broad2}) versus v1's $1.1$--$1.8\%$, a
+$\sim$2.4$\times$ improvement at every velocity, confirming that each
+diagnosed cause was real. But v2 remains $4$--$6\times$ worse than the
+hybrid ($0.11$--$0.13\%$) and is the slowest method of all (it evaluates
+the trunk on the full uniform grid plus the line deposits), so the
+revised option~2 is competent but not competitive.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+method & $100\kms$ & $300\kms$ & $1000\kms$ & note\\
+\midrule
+FFT (true input) & 0.03\% & 0.03\% & 0.06\% & accuracy ceiling\\
+\textbf{hybrid} & \textbf{0.13\%} & \textbf{0.11\%} & \textbf{0.12\%} &
+emulate $+$ analytic broaden\\
+emulator\_Tv2 (v2) & 0.49\% & 0.46\% & 0.77\% & monolithic, fixed\\
+sparse (true input) & 0.45\% & 0.30\% & 2.8\% & legacy production\\
+emulator\_Tv (v1) & 1.17\% & 1.06\% & 1.77\% & monolithic, original\\
+\bottomrule
+\end{tabular}
+\caption{End-to-end broadening MRE vs exact erf broadening. FFT and
+sparse take the true spectrum as input (isolating the broadening
+operation); the three emulator methods are end-to-end. The revised
+monolithic $(T,v)$ emulator (v2) more than halves v1's error but stays
+$4$--$6\times$ above the hybrid.}
+\label{tab:broad2}
+\end{table}
+
+The conclusion is therefore structural, not a training-quality
+artifact: even a well-executed monolithic $(T,v)$ emulator cannot beat
+the hybrid, because the hybrid performs the convolution \emph{exactly}
+(FFT plus analytic line deposit) while the monolith must \emph{learn}
+the broadened continuum shape. Broadening belongs \emph{outside} the
+network; the hybrid on the best unbroadened backbone is the deployment
+choice, and option~2 is settled as the losing branch -- retained here
+because v2 is the controlled demonstration that the $8\times$ v1 gap was
+structural.
+
+\section{Training-data experiments: active learning and augmentation}
+\label{sec:adaptive}
+
+Motivated by simulator cost for future elements, we tested dynamically
+generating extra training spectra with the best classical interpolator
+(PCHIP), with placement informed by model error -- an active-learning /
+adaptive-sampling problem \citep{liu18,wu23,crombecq11,nygaard23,
+rogers19}. Design: three arms on a 300-point training grid (evenly
+subsampled in $\log T$), all validated and tested exclusively on
+original SPEX spectra.
+
+\begin{itemize}
+\item \textbf{baseline}: uniform sampling of the grid;
+\item \textbf{reweight}: examples sampled $\propto$ a running
+      (exponentially averaged) per-spectrum training error, mixed 50/50
+      with uniform -- prioritized sampling in the spirit of
+      \citet{schaul16};
+\item \textbf{adaptive}: reweight $+$ gated generation: every 500 steps,
+      new temperatures are drawn with density $\propto$ (local error)$^2$
+      \citep[RAD;][]{wu23} from grid intervals whose leave-one-out
+      interpolation error \citep[cf.\ CV-Voronoi;][]{liu18} is below
+      $1\%$; PCHIP spectra generated there enter batches at $25\%$
+      with half loss weight (a low-fidelity teacher in the sense of
+      \citealt{kennedy00}).
+\end{itemize}
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+arm & test MRE & yield@1\% & synthetic & floor viol.\\
+\midrule
+baseline & 0.45\% & 91.3\% & 0 & 0.28\%\\
+reweight & 0.32\% & 95.8\% & 0 & 0.21\%\\
+adaptive & 0.30\% & 96.3\% & 1152 & 0.49\%\\
+\midrule
+\emph{t04\_long, full 11.5k grid} & \emph{0.31\%} & \emph{94.7\%} &
+-- & \emph{0.19\%}\\
+\bottomrule
+\end{tabular}
+\caption{Adaptive-data study ($n_{\rm train}=300$). The adaptive arm
+matches the full-grid model with $2.6\%$ of the simulator budget.}
+\label{tab:adaptive}
+\end{table}
+
+Findings (Table~\ref{tab:adaptive}): most of the gain is
+\emph{attention, not data} -- prioritized sampling alone closes 85\% of
+the gap at zero cost; the synthetic data adds a small further increment
+at the price of doubled floor violations (interpolation smears flux
+into empty bins); and 300 SPEX evaluations plus augmentation match the
+full-grid model -- a $\sim38\times$ simulator-budget reduction, the
+practically important result for new elements. The trust gate rejected
+23 intervals (clustered at $T=0.53$--$0.76\kev$, leave-one-out errors
+2--4\%): an explicit shortlist of where only \emph{real} SPEX runs
+help, closing the loop with simulator-in-the-loop acquisition schemes
+\citep{nygaard23,rogers19}.
+
+\paragraph{Discarded: augmentation on dense grids.} On the full grid,
+interpolation error ($0.003\%$) lies two orders of magnitude below
+emulator error ($0.3\%$): every synthetic spectrum is, at the network's
+error resolution, a duplicate of its neighbours. This was argued from
+the error budget and confirmed by the Tier-1 result below (the model is
+capacity-limited, not data-limited: train and validation MRE are
+identical). Augmentation is therefore reserved for sparse-grid regimes
+($n_{\rm train}\lesssim$ a few hundred here).
+
+\section{Training strategy: Tier 1 (optimisation) and Tier 2 (capacity)}
+\label{sec:tier2}
+
+\subsection{Tier 1}
+Three changes, no architecture change, full training grid:
+(i) $5\times$ longer schedule (100k steps $\approx$ 1100 epochs) with a
+floor on the cosine at $2\%$ of peak learning rate; (ii) Polyak/EMA
+weight averaging \citep{polyak92,izmailov18} with decay $0.999$ --
+validation and checkpoints use the averaged weights, which also
+stabilises the noisy yield-based checkpoint selection; (iii) the
+prioritized sampling from Section~\ref{sec:adaptive}. Result:
+$0.31\%\to\mathbf{0.16\%}$ MRE, yield@1\% $94.7\to99.0$, yield@0.1\%
+$0\to43.8$, floor violations halved. Training and validation MRE were
+identical at convergence (0.15\%): no overfitting after 1100 epochs,
+implying a capacity limit, and the best checkpoint was the final step,
+implying the budget still binds.
+
+\paragraph{Caveat found only by instrument-level tests.} Prioritization
+traded away accuracy on the faint high-energy tails of cool ($T\lesssim
+2\kev$) spectra -- invisible to Eq.~\ref{eq:mre} (those bins are
+floor-masked or negligible in the full-band average) but exposed as a
+2--5\% regression in the Chandra grating bands
+(Section~\ref{sec:instruments}). Mitigated in Tier~2 by lowering the
+prioritized fraction from $0.5$ to $0.4$.
+
+\subsection{Tier 2}
+Two capacity hypotheses at equal budget, both with the Tier-1 recipe
+and a warmup--stable--decay (WSD) schedule \citep[flat learning rate,
+linear decay over the final 15\%; extending a run re-pays only the
+decay leg;][]{hu24} :
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+ & params & MRE & line/cont & yield@1\% & yield@0.1\% & ms/spec\\
+\midrule
+tier1 (t04 arch) & 1.65M & 0.16\% & 0.21/0.15 & 99.0 & 43.8 & 12.4\\
+\textbf{big\_trunk} & 3.3M & \textbf{0.13\%} & 0.19/0.12 & \textbf{99.2}
+& \textbf{52.6} & 21.5\\
+line\_heavy & 1.9M & 0.21\% & 0.23/0.21 & 98.1 & 25.8 & 12.9\\
+\bottomrule
+\end{tabular}
+\caption{Tier-2 capacity experiments (100k steps, full grid).}
+\label{tab:tier2}
+\end{table}
+
+\code{big\_trunk} ($512\times6$, $K=1024$, learning rate $10^{-3}$)
+wins across the board (Table~\ref{tab:tier2}), formally overturning the
+HPO's size conclusion: it was always the learning rate. Scaling is
+$\sim25\%$ MRE reduction per parameter doubling with both runs still
+budget-clipped, so the next cheap move is the same configuration at
+200k steps.
+
+\paragraph{Discarded: enlarging the line head (\code{line\_heavy}).}
+Wider line embeddings (48), a wider shared MLP (256), and
+Fourier-embedded $T$-conditioning of line amplitudes -- targeting the
+dominant line-MRE component -- performed \emph{worse than Tier 1}
+($0.21\%$ overall; line MRE $0.23\%$ vs $0.21\%$). The line-error
+bottleneck is thus not amplitude-head capacity; the likely residual is
+the trunk under-resolving inter-line pseudo-continuum. (Minor caveat:
+this arm ran at the default learning rate $3\times10^{-3}$; given it
+regressed rather than plateaued, we did not spend a further run on the
+learning-rate confound.)
+
+\subsection{Multi-element generalisation: floor-dominated spectra}
+\label{sec:multielement}
+Fixing the recipe on iron and sweeping the low-$Z$ elements ($Z=2$--$6$)
+with the automated per-element sizing exposed a failure mode absent from
+iron. Two sharply separated tiers emerged (Table~\ref{tab:multielement}):
+helium and carbon reach $\le0.04\%$ MRE at $100\%$ yield on both
+thresholds, while lithium, beryllium, and boron land at $1.3$--$9.9\%$
+MRE with essentially no spectra under $0.1\%$.
+
+The split is explained entirely by \emph{signal sparsity}, not atomic
+number. On the shared $24{,}212$-bin grid the fraction of bins ever above
+the $-10$ floor is $\sim97\%$ for He/C (broad continua) but under $1.2\%$
+for Li/Be/B -- beryllium carries flux in only $\sim6$ bins per spectrum,
+the rest at floor. This is not intrinsic difficulty: classical linear
+interpolation in $T$ reaches $\sim10^{-6}$ MRE on all five elements (the
+trust gate reports $100\%$ of intervals interpolable), so the targets are
+trivially learnable and the poor emulator numbers are a training
+pathology.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+ & $Z$ & signal bins/spec & signal frac. & emul.\ MRE & interp.\ MRE\\
+\midrule
+He & 2 & $23{,}703$ & $97.9\%$   & $3.2\times10^{-4}$ & $8.8\times10^{-7}$\\
+C  & 6 & $23{,}444$ & $96.8\%$   & $4.0\times10^{-4}$ & $8.6\times10^{-7}$\\
+B  & 5 & $292$      & $1.2\%$    & $9.9\times10^{-2}$ & $1.1\times10^{-6}$\\
+Li & 3 & $15$       & $0.06\%$   & $1.3\times10^{-2}$ & $9.1\times10^{-7}$\\
+Be & 4 & $6$        & $0.03\%$   & $5.9\times10^{-2}$ & $9.9\times10^{-7}$\\
+\bottomrule
+\end{tabular}
+\caption{Low-$Z$ sweep before the signal-aware fix: emulator accuracy
+tracks signal density, while classical interpolation is uniformly
+excellent. Signal bins are per-spectrum bins above the floor (mean over
+the test set); MRE is the fraction of Eq.~\ref{eq:mre}.}
+\label{tab:multielement}
+\end{table}
+
+Two compounding causes. (i)~Uniform point sampling: each step draws
+\code{points}$=2048$ of the $24{,}212$ bins uniformly, so for beryllium
+the expected number of non-floor bins seen per step is
+$2048\times0.0003\approx0.5$ -- the model is supervised on the very bins
+it is scored on in only half of all steps. (ii)~Even when a line bin is
+drawn, the flat per-point mean in the training loss lets the $\sim2000$
+trivial floor bins dominate the gradient. Compounding both, the automated
+size classifier keyed on line-bin \emph{count} and routed Li/Be to a
+``smooth'' preset that switched the line head \emph{off} -- disabling the
+line machinery for precisely the spectra that are almost nothing but
+lines.
+
+\paragraph{Fix: signal-aware sampling.} We replace edge-only sampling
+with a \emph{signal pool} (union of detected line and
+recombination-edge bins) and (a)~force its members into every batch, and
+(b)~up-weight them per point so they hold a target share
+\code{signal\_frac} of the loss regardless of how few they are. This is
+one self-tuning knob that decouples a signal bin's loss \emph{influence}
+from its sampled \emph{count}, so the same setting holds across
+beryllium's $\sim6$ and boron's $\sim292$ signal bins. The size
+classifier is corrected to route on signal \emph{density}: a
+floor-dominated spectrum with any lines goes to a new \code{sparse\_lines}
+preset (line head on, \code{signal\_frac}~$=0.25$ and learning rate
+$10^{-3}$, both set by validation below), which line-bin count
+alone cannot distinguish from a genuinely smooth continuum (He). The
+broad-continuum elements are unaffected -- their signal pool spans the
+band, so the weighting is a near-identity.
+
+\paragraph{Validation on beryllium.} Re-running the worst element
+($Z=4$, six signal bins per spectrum) with the corrected classifier and
+the \code{sparse\_lines} recipe (line head on, \code{signal\_frac}~$=0.25$,
+learning rate $10^{-3}$ -- the inherited $3\times10^{-3}$ reproduced the
+old bouncing divergence) transformed it. Held-out test MRE
+$5.9\%\to\mathbf{0.013\%}$, yield@1\% $0\to\mathbf{100\%}$, yield@0.1\%
+$0\to\mathbf{99.2\%}$, with the line-bin MRE collapsing from $4.2\%$ to
+$\sim0$ and floor violations to zero. The run was stable to step $86$k
+(the original diverged by $28$k, and its apparent $5.9\%$ was a lucky
+checkpoint dip before collapse to MRE $\approx1$). This confirms the
+failure was sampling starvation and optimiser instability, not
+capacity: six signal bins suffice for $99\%$ of spectra under $0.1\%$
+once they are actually supervised. The emulator now sits $\sim140\times$
+above the interpolation baseline (from $\sim6\times10^{4}\times$), the
+same regime as the well-behaved elements. Confirmation that the fix
+transfers to lithium ($Z=3$) and boron ($Z=5$), and that the changed
+default \code{signal\_frac} does not regress iron, is pending.
+
+\paragraph{Training throughput.} On one A100, per-step wall time scales
+with the preset: $\sim35$\,ms/step for \code{smooth} ($0.2$M params),
+$\sim100$\,ms/step for \code{sparse\_lines} ($0.6$M), and
+$\sim210$\,ms/step for \code{standard} ($1.6$M). With early stopping most
+elements converge in $40$--$95$k steps, so a single full-grid element
+trains end to end in roughly $0.7$--$4$ GPU-hours (smooth continua at the
+low end, line-rich \code{standard} elements at the high end).
+
+\paragraph{Early-stopping fragility on noisy runs.} Per-element step
+count is governed by a smoothed validation-MRE plateau detector, which is
+sensitive to the large eval-to-eval noise of the high-learning-rate
+\code{standard} runs (val MRE swings of $\pm100$--$300\%$ between evals).
+Two failure tails appear. On sodium and aluminium a single upward spike
+(Na hit MRE $0.14$ at step $40$k) made the smoothed signal read as
+plateaued and triggered the stop at $42$--$48$k; the models then kept
+improving $30$--$40\%$ per eval through the forced decay and finished
+$\sim60$k still descending, leaving them $3$--$5\times$ worse than their
+neighbours ($0.30$--$0.37\%$ MRE, $0\%$ yield@0.1\%, and for Al a
+$0.62\%$ floor-violation rate -- all hallmarks of an unconverged fit, the
+line and continuum shapes being correct). Conversely fluorine's noise
+\emph{prevented} the trigger, running it to the $100$k cap. Both tails are
+mitigated by widening the smoothing window (\code{mre\_smooth} $3\to5$) and
+the patience (\code{early\_stop\_patience} $5\to8$) so no single eval can
+move the decision; the affected elements are being re-run under the new
+defaults. Checkpoint-on-lowest-val-MRE ensures the shipped model is the
+best seen within a run, so noise never degrades it below the trajectory
+-- but a premature stop still forfeits the accuracy the remaining budget
+would have bought, which is exactly what cost Na and Al.
+
+\subsection{The failing band is a temperature-conditioning limit, not an
+energy-axis one}
+\label{sec:tembed}
+Extending the sweep to $Z=2$--$26$ left a persistent band of elements
+(Na, Al, S, Ar, Ca, Cr) plateauing at $0.2$--$0.7\%$ MRE with $0\%$
+yield@0.1\%, resistant to further training. Fine-tuning these checkpoints
+(learning rates $10^{-4}$ down to $10^{-5}$, matched hyperparameters) only
+\emph{degraded} them, which -- together with $\mathrm{train\ MRE}\approx
+\mathrm{val\ MRE}$ throughout -- ruled out both overfitting and simple
+undertraining and pointed at a representational ceiling.
+
+\paragraph{Diagnosis by residual spectroscopy.} We localised the ceiling
+with two model-agnostic diagnostics on the held-out set
+(\code{scripts/residual\_fft.py}). First, the power spectrum of the
+log-flux residual, taken over the \emph{normalised} log-energy coordinate
+$x$ that the Fourier trunk sees, tests the standing hypothesis that the
+floor was high-frequency trunk ``jitter''. It is not: across all $23$
+elements the residual power is strongly \emph{low}-frequency (a red
+spectrum falling from $f\!\sim\!1$ toward $f_{\max}$), and the fraction of
+continuum-residual power above $f_{\max}/2$ is $\le0.6\%$ everywhere,
+\emph{including} the failing elements -- so the excess is a smooth,
+large-amplitude misfit, not ringing, and lowering $f_{\max}$ cannot help.
+Second, stratifying the residual by temperature shows the misfit is
+concentrated in the temperature band where each element's dominant line
+complex switches on -- i.e.\ where $\mathrm{d}(\text{emissivity})/
+\mathrm{d}T$ is sharpest -- and that this band \emph{marches upward with
+$Z$}: sodium is worst below $1$\,keV, calcium at $1$--$5$\,keV (Ca\,K
+$\sim3.9$\,keV), chromium above $5$\,keV (Cr\,K $\sim5.6$--$6.7$\,keV).
+Iron shows the same ordering, only milder. The common cause is thus not
+the energy axis at all but the trunk's \emph{temperature} conditioning: a
+plain MLP on the scalar $T$ underfits these sharp ionisation transitions,
+exactly the pathology the line head already mitigates with an optional
+Fourier embedding of $T$ (\code{line\_t\_freqs}) that the trunk lacked.
+
+\paragraph{Fix: a Fourier temperature embedding on the trunk.} We add the
+same device to the trunk conditioning networks (FiLM generator and trend
+head): the scalar $T$ is replaced by its Fourier features before the
+conditioning MLP (\code{--film\_t\_freqs}, off by default, $+8$k
+parameters at $16$ frequencies; identical to the previous model when
+off). A controlled weekend sweep
+(\code{scripts/run\_weekend\_sweep.py}) trained baseline versus
+$+$embedding from scratch at three points on the cold$\to$hot trend
+(Table~\ref{tab:tembed}), with a parallel set of learning-rate, sampling,
+curriculum, and anneal variations as a convergence control. The embedding
+is decisive and it generalises: it lifts each element's \emph{own} hard
+band -- sodium's sub-$1$\,keV yield@0.1\% $0\to24\%$ and calcium's
+$1$--$5$\,keV band $0\to43\%$ -- while every convergence knob (learning
+rates $3\times10^{-3}$/$5\times10^{-4}$, prioritised-mix $0.8$, short
+curriculum, long anneal) left sodium at $\le15\%$ overall, confirming the
+limit was conditioning \emph{capacity}, not optimisation. Sodium and
+calcium were still improving at the $100$k cap (yield@0.1\% crossed
+$50\%$ only at $68$k and $88$k respectively), so these are lower bounds; a
+$200$k confirmation and a higher-frequency variant for the still-sub-yield
+chromium ($\text{MRE}\ 0.65\%\to0.30\%$, no yield yet) run in
+\code{scripts/run\_followon\_sweep.py}.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{llcccc}
+\toprule
+element & hard band & \multicolumn{2}{c}{yield@0.1\%} &
+\multicolumn{2}{c}{overall MRE}\\
+ & & base & $+$embed & base & $+$embed\\
+\midrule
+Na ($Z=11$) & cold ($<1$\,keV)   & $8.8\%$ & $\mathbf{76.1\%}$ & $0.0020$ & $\mathbf{0.0009}$\\
+Ca ($Z=20$) & mid ($1$--$5$\,keV) & $0\%$   & $\mathbf{49.3\%}$ & $0.0039$ & $\mathbf{0.0012}$\\
+Cr ($Z=24$) & hot ($>5$\,keV)     & $0\%$   & $0\%$             & $0.0065$ & $\mathbf{0.0030}$\\
+\bottomrule
+\end{tabular}
+\caption{Trunk Fourier temperature embedding (\code{--film\_t\_freqs 16},
+from scratch, $100$k steps, learning rate $10^{-3}$) versus the identical
+baseline, on held-out test spectra. The embedding halves overall MRE on
+every element and lifts each element's own hard temperature band; Na/Ca
+were still converging at $100$k (see text). No learning-rate or sampling
+variant of the baseline exceeded $15\%$ yield on Na. Diagnostics and the
+per-temperature-band breakdown:
+\code{docs/development\_plots/residual\_fft/} and
+\code{runs\_sweep/sweep\_summary.md}.}
+\label{tab:tembed}
+\end{table}
+
+\paragraph{Causal confirmation.} Re-running the §\ref{sec:tembed}
+residual diagnostic on the trained baseline versus $+$embedding
+checkpoints, restricted to each element's hard band
+(\code{scripts/compare\_fix.py}), shows the specific signature the
+diagnosis blamed is \emph{removed}, not merely masked: the low-frequency
+continuum-residual power collapses by $\sim10^{10}\times$ for sodium
+(cold), $46\times$ for calcium (mid) and $49\times$ for chromium (hot),
+with matching drops in the RMS residual. This closes the causal loop --
+the fix targets the diagnosed cause. Before/after figures:
+\code{docs/development\_plots/fix\_confirmation/}.
+
+\paragraph{Status.} The $200$k confirmation and the higher-frequency
+chromium arm (\code{scripts/run\_followon\_sweep.py}) have since completed,
+together with a pre-Friday timing and probe queue
+(\code{scripts/run\_prefriday\_sweep.py}, \code{scripts/compile\_timing.py}).
+Their outcomes fixed the remaining production choices, frozen in
+§\ref{sec:production}. Results:
+\code{runs\_followon/sweep\_summary.md} and
+\code{runs\_prefriday/sweep\_summary.md}.
+
+\subsection{Production training configuration (the frozen recipe)}
+\label{sec:production}
+
+Four open decisions were resolved by the follow-on and pre-Friday sweeps
+before freezing the recipe in \code{scripts/run\_all\_elements.py}:
+\begin{itemize}
+\item \textbf{Budget.} Calcium (mid) was still climbing at $174$k steps and
+iron reached only $28.6\%$ yield@$0.1\%$ at $100$k, so the failing/mid band
+is budget-limited; the production step cap is raised to $300$k.
+\item \textbf{Trunk-embedding frequencies.} The higher-frequency chromium
+arm lifted the hot-band yield@$0.1\%$ from $0.0$ to $8.7\%$. Because the
+temperature Fourier features are log-spaced over a \emph{fixed} band
+$[0.25,64]$, raising \code{--film\_t\_freqs} from $16$ to $32$ only samples
+that band more densely -- no higher-frequency content and hence no ringing
+risk -- at $\sim$12k extra conditioning parameters and no measurable
+step-time cost. Thirty-two is therefore adopted uniformly for the
+\code{standard} preset (it is a superset of $16$).
+\item \textbf{Line-head temperature embedding.} Adding
+\code{--line\_t\_freqs 16} to iron \emph{degraded} it ($28.6\to18.5\%$
+yield@$0.1\%$), so it is not used.
+\item \textbf{\code{torch.compile}.} A $20$k-step A/B showed no throughput
+gain ($182.3$ vs $182.6$\,ms/step) and would add a per-element compilation
+stall, so compilation is disabled.
+\end{itemize}
+The embedding benefit was independently confirmed on silicon (mid), which
+reached $81.7\%$ yield@$0.1\%$ (MRE $8\times10^{-4}$).
+
+\begin{table}[t]
+\centering
+\caption{Frozen production recipe (\code{scripts/run\_all\_elements.py}).
+The \code{standard} preset carries the architecture fixes; the run-scope
+block sets the schedule. Elements route to \code{standard} automatically
+from spectral complexity (all metals in the set); hydrogen routes to the
+smooth-continuum preset and needs neither fix.}
+\label{tab:production}
+\begin{tabular}{ll}
+\hline
+Knob & Value \\
+\hline
+Trunk hidden / layers / \code{n\_freqs} & $384$ / $5$ / $512$ \\
+Line head & auto (on where $\ge32$ line bins) \\
+Trunk T-embedding \code{--film\_t\_freqs} & $32$ (band $[0.25,64]$) \\
+Learning rate & $10^{-3}$ \\
+Schedule & WSD, decay over last $35\%$ \\
+LR floor \code{--lr\_min\_frac} & $0.005$ ($5\times10^{-6}$) \\
+Step cap \code{--steps} & $300{,}000$ \\
+Early stop & yield-gated: patience $10$ evals, gate $65\%$ \\
+Sampling \code{--pr\_mix} & $0.4$ (error-prioritised) \\
+\code{torch.compile} & off \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Elements and ordering.} The run covers the $18$ elements that
+were failing, mid-band, never trained, or predate the embedding (iron
+re-do): hydrogen and the metals Na, Mg, Al, Si, S, Ar, K, Ca, Ti, V, Cr,
+Mn, Fe, Co, Ni, Cu, Zn, i.e.
+$Z\in\{1,11$--$14,16,18$--$20,22$--$30\}$ (excluding P, Cl and Sc). They are
+trained hardest / most-important first -- iron, calcium, chromium and sodium
+ahead of the easier mid and light elements, hydrogen last -- so that an
+overrun still delivers the scientifically critical failing-band emitters.
+Cobalt, nickel and copper ($Z=27$--$29$) were not cache-verified for their
+preset routing at freeze time and are expected to take \code{standard} like
+their neighbours.
+
+\paragraph{Budget and safety.} At the measured $\approx 183$\,ms/step the
+cap implies $\approx 10$\,h per element and $\approx 10$ days for the set on
+one GPU; elements that clear the $65\%$ gate early-stop and anneal sooner.
+Training longer than needed is safe here: only the lowest-validation-MRE
+checkpoint is shipped, and because the SPEX targets are effectively
+noise-free with train~$\approx$~validation error, the models are
+convergence- rather than overfitting-limited. Chromium (a suspected
+conditioning-capacity ceiling) and iron's cold band may not fully clear even
+at $300$k. After training, the shipped model store (\code{spexai/models/})
+is rebuilt via \code{scripts/collect\_models.py} and the joint inference
+model re-validated, its failing-band members having predated the embedding.
+
+\subsection{Production run outcome and the residual line-head limit}
+\label{sec:production_outcome}
+
+The run completed (2026-08); $11$ of the $18$ elements reach usable
+test-set yield@$0.1\%$ (Table~\ref{tab:production_outcome}). The cold and
+mid band the campaign targeted is fully resolved ($78$--$89\%$); the
+residual failures are a coherent group -- the hot, \emph{line-rich}
+transition and post-transition metals (Ti, Mn, Co, Cu, Zn at $<1\%$; Cr,
+Ni marginal). All failing elements received the correct \code{standard}
+recipe and ran the full $300$k with early stopping (correctly) not
+triggered, and their LOO baselines ($\sim$$8\times10^{-7}$) confirm the
+targets are learnable; the shortfall is in the model, not the data or
+schedule.
+
+\begin{table}[t]
+\centering
+\caption{Production outcome by test-set yield@$0.1\%$. The failing group is
+the hot, line-rich heavy metals.}
+\label{tab:production_outcome}
+\begin{tabular}{ll}
+\hline
+Tier (yield@$0.1\%$) & Elements \\
+\hline
+Excellent ($78$--$89\%$) & Si, Mg, Al, Na, S, Ar \\
+Acceptable ($43$--$59\%$) & Ca, H, K, Fe, V \\
+Marginal ($10$--$21\%$) & Ni, Cr \\
+Failing ($<1\%$) & Mn, Cu, Ti, Co, Zn \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Diagnosis: line head, not continuum.} The stratified residual
+power spectrum (\code{scripts/residual\_fft.py}, plots in
+\code{docs/development\_plots/residual\_fft\_prod\_fail/}) reframes the
+failure. For the line-rich failures the \emph{continuum is fine} -- Ti's
+continuum RMS residual ($3.75\times10^{-4}$) is \emph{lower} than
+well-performing silicon's ($4.77\times10^{-4}$) -- yet its yield is zero.
+With line bins at $18$--$22\%$ of the grid and line MRE $0.35$--$0.52\%$
+(versus $0.12\%$ for silicon), the per-spectrum $0.1\%$ threshold is lost on
+the \emph{line head}, not the trunk continuum the temperature embedding
+fixed. Chromium is the one exception: a genuine gross low-frequency
+continuum blowup (RMS $1.4\times10^{-2}$) on top of the line error. The
+line-head limit is therefore a distinct axis from the \code{film\_t\_freqs}
+/ \code{film\_t\_fmax} trunk levers, and it is delicate: adding
+\code{--line\_t\_freqs 16} \emph{degraded} iron (\S\ref{sec:production}).
+
+\paragraph{Next steps.} Two independent tracks, both since executed. (i) The
+$11$ good/acceptable elements were shipped: \code{scripts/collect\_models.py}
+merges them into \code{spexai/models/} alongside the earlier low-$Z$ models
+($21$ elements total), and the joint inference model was re-validated,
+unblocking the multi-instrument science test. (ii) The line-head investigation
+(\S\ref{sec:linehead_floor}) \emph{refuted} the capacity/deposition hypothesis;
+chromium's continuum blowup remains a separate trunk-capacity item.
+
+\subsection{The residual line-head limit is a temperature-conditioning floor,
+not capacity}
+\label{sec:linehead_floor}
+
+The diagnosis above (\S\ref{sec:production_outcome}) predicted that enlarging the
+line head, or conditioning it more richly on temperature, would recover the
+failing metals. A controlled sweep on titanium ($Z=22$, the cleanest line-only
+failure) refutes it. Holding the frozen production recipe fixed and varying
+\emph{only} the line head -- embedding width \code{line\_dim} $\in\{16,64\}$, MLP
+width \code{line\_hidden} $\in\{128,256\}$, and a Fourier temperature embedding
+\code{line\_t\_freqs} $\in\{0,8\}$ -- moves the line MRE by less than $4\%$ (it
+stays at $0.33$--$0.35\%$) and leaves yield@$0.1\%$ at $0.0\%$ for all five
+variants, including the largest ($1.96$M parameters, $+0.29$M over the base).
+Three controls rule out the obvious confounds:
+\begin{itemize}
+\item \emph{Not under-convergence.} The validation curves flatten by
+$\sim$$70$k steps and yield@$0.1\%$ is pinned at $0$ at every evaluation, and the
+$100$k line MRE ($0.0034$) already equals the production $300$k value
+($0.0035$).
+\item \emph{Not a data floor.} A plain linear/pchip interpolation of the SPEX
+grid reproduces the same held-out line bins to line MRE $\sim$$10^{-6}$ with
+$100\%$ of them inside $0.1\%$: the target is trivially fittable and the emulator
+is $\sim$$3000\times$ worse on lines it should nail.
+\item \emph{Not amplitude capacity.} The error is flat in line strength (below).
+\end{itemize}
+
+\paragraph{Where the error lives.} On the native grid a line bin's only degree of
+freedom is its amplitude -- Gaussian width and position are the downstream
+broadening step -- so the native-grid line residual isolates the amplitude head.
+Stratifying it (\code{scripts/diagnose\_line\_residual.py},
+Fig.~\ref{fig:linehead_residual}) reveals a coherent, three-part structure that
+generalises from titanium to zinc ($Z=30$):
+\begin{enumerate}
+\item a \emph{uniform} $\sim$$0.3$--$0.4\%$ fractional floor, flat in line
+strength (rank correlation $\approx0$, its sign flipping between elements:
+$-0.13$ for Ti, $+0.24$ for Zn) and flat in energy. Sitting $3$--$4\times$ above
+$0.1\%$ on essentially every line, this floor is what pins the yield at zero;
+\item a genuinely accurate continuum (mid-band per-bin error dips \emph{below}
+$0.1\%$), confirming the limit is line-specific and not the trunk;
+\item a strong cold-temperature excess (per-spectrum line MRE versus $T$ has rank
+correlation $-0.61$ for Ti, $-0.78$ for Zn; U-shaped, worst at the coldest $T$),
+plus a localised $\sim$$1\%$ hotspot at the K-shell complex that tracks the
+element's K-line energy ($5$--$7\kev$ for Ti, $9$--$12\kev$ for Zn). Local line
+density adds only a weak secondary penalty.
+\end{enumerate}
+The minimum-error temperature tracks each element's peak line-emissivity
+temperature (Ti $\sim$$5\kev$, Zn $\sim$$10\kev$), with error rising at both the
+cold extreme (sharp ionisation changes, weak lines) and the hot extreme. This is
+the signature of a \emph{temperature-conditioning} limit -- the head fits best
+where lines are most prominent in the training distribution and worst where the
+amplitude-versus-$T$ mapping is steepest -- not a per-line capacity or deposition
+limit.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/line_residual_Z22.png}
+\caption{Per-line amplitude residual for titanium ($Z=22$, production line head;
+zinc is qualitatively identical). Clockwise from top left: per-bin relative error
+versus energy (line bins red, continuum grey -- the continuum dips below the
+$0.1\%$ dotted line mid-band); per-line error versus line strength (flat -- the
+error is carried neither by the weak nor the strong lines); per-spectrum line MRE
+versus temperature (U-shaped, worst at the coldest $T$); and per-line error
+versus local line density (a weak secondary trend). The dominant feature is a
+uniform $\sim$$0.3\%$ floor immune to line strength, with a cold-temperature
+excess on top.}
+\label{fig:linehead_residual}
+\end{figure}
+
+\paragraph{Implication.} The capacity axes the sweep varied are the wrong ones.
+The two levers it did \emph{not} touch, and that the temperature signature now
+motivates, are the line head's shared \emph{conditioning} capacity
+(\code{cond\_hidden}/\code{cond\_layers}, which carries the temperature response
+every line consumes) and the line-bin loss weighting / cold-temperature
+oversampling. If neither lowers the uniform floor, the honest reading is that
+$0.1\%$ per-spectrum yield is not an achievable bar for the line-dense hot metals
+with a single shared-conditioning head, and a different line representation would
+be required.
+
+\section{Instrument-level validation}
+\label{sec:instruments}
+
+Native-grid metrics cannot answer whether the emulator is accurate
+\emph{at the resolution an instrument sees}. We evaluate on
+(i) resolution-matched grids (bin width $=$ FWHM/2 from published
+resolutions) and (ii) the actual detector channel grids, folding both
+truth and prediction through the real redistribution matrices: XRISM
+Resolve \code{rsl\_Hp\_L\_2025.rmf} \citep[$60000^2$, 93M non-zeros;][]
+{ishisaki25}, Chandra ACIS \code{aciss\_aimpt\_cy28.rmf}
+\citep{garmire03}, and HETG HEG/MEG grating RMFs \citep{canizares05},
+parsed from the OGIP format \citep{george07}. The instrument metric is
+Eq.~\ref{eq:mre} applied to integrated flux per channel with validity
+mask $F^{\rm true}>0$, band-restricted (Resolve: $1.8$--$12\kev$, the
+closed-gate-valve limit). ARF weighting is deliberately excluded
+(effective area does not mix channels).
+
+Findings: (i) \emph{median} channel errors (0.03--0.08\%) are better
+than native MRE -- rebinning averages independent per-bin errors;
+(ii) \code{big\_trunk} is the best model on ACIS and both gratings and
+repairs the Tier-1 grating regression; (iii) at Resolve's 0.5\,eV
+channels, sub-bin line placement -- exact-bin deposit vs.\ flux split
+across a channel edge -- is a real error mode invisible on the native
+grid; (iv) unweighted per-channel \emph{means} are ill-conditioned:
+rebinning gives every channel a scrap of flux, so near-empty channels
+(unbounded relative error on $\sim$zero truth) and the 4/16 coolest
+test spectra (negligible in-band flux) dominate, with means swinging by
+$30\times$ between models whose medians agree.
+
+\paragraph{Discarded: unweighted per-channel means as a headline
+number.} For publication, the flux-weighted error
+\begin{equation}
+\mre^{\rm flux}_s
+= \frac{\sum_c F^{\rm true}_{sc}\,\varepsilon_{sc}}{\sum_c F^{\rm true}_{sc}}
+= \frac{\sum_c |F^{\rm pred}_{sc}-F^{\rm true}_{sc}|}{\sum_c F^{\rm true}_{sc}}
+\end{equation}
+(the misplaced-flux fraction) is immune to empty-channel pathology by
+construction; implementation is a planned change. Restricting the
+$1.8\kev$ Resolve cutoff changed results by $<2\%$ relative -- the
+pathology lives inside the science band, not below it.
+
+\section{Inference feasibility for the 30-element model}
+\label{sec:inference}
+
+Requirement: forward passes through 30 element models, abundance
+combination, broadening, and response folding in $<200$\,ms. Measured
+ingredients: $8.3$\,ms/spectrum amortised (batch 256, A100, full native
+grid) for the operator model; Resolve RMF folding is memory-bandwidth
+bound (93M non-zeros $\approx0.75$\,GB of traffic): 37\,ms measured on
+a laptop CPU, $\sim$0.5--1\,ms projected on A100 HBM -- reconciling the
+historical observation that the RMF fold dominated CPU pipelines with
+its negligible cost GPU-resident. The naive 30-element loop
+($\sim$250\,ms compute-bound) is brought within budget by (i)
+evaluating the smooth trunk only at instrument-required resolution
+(lines deposited analytically; 3--20$\times$), (ii) bf16 and grouped
+batched matmuls over the 30 weight sets (2--4$\times$), (iii) folding
+once after summation (linearity), with per-element thermal widths as a
+single batched FFT. Projected: 30--80\,ms per likelihood
+evaluation. For sampling workloads, distillation into fixed-grid heads
+(0.2\,ms/spectrum; Section~\ref{sec:ablation}) using the operator
+models as teachers reduces the full stack to $\sim$10\,ms; the RMF can
+additionally be truncated at $10^{-5}$ of row peak (54\% of non-zeros,
+0.007\% flux loss).
+
+\section{Related work (2023--2026) and candidate improvements}
+\label{sec:related}
+
+A survey of recent ML-venue literature identifies candidates in three
+categories: improvements on deployed strategies, competing
+alternatives, and additions for performance per unit compute.
+
+\paragraph{Improvements on deployed strategies.}
+(i) Our error-prioritized sampling is a \emph{biased} gradient
+estimator -- the mechanism behind the Tier-1 grating regression.
+InfoBatch \citep{qin24} performs soft loss-based pruning \emph{with
+gradient rescaling of survivors}, provably unbiased, saving 25--40\%
+of training cost; it is a small change to our sampler that removes the
+bias and the \code{pr\_mix} heuristic simultaneously.
+(ii) Maximum Update Parametrization \citep{yang21mup} transfers
+learning rates across widths, formally solving the size--learning-rate
+coupling that misled our HPO (Section~\ref{sec:hpo}); it is used for
+spectral emulators by \citet{rozanski25scaling}, who also report
+compute-optimal scaling exponents for this problem class.
+(iii) Schedule-Free AdamW \citep{defazio24} replaces our hand-assembled
+WSD-plus-EMA combination (no pre-committed budget; averaged-iterate
+inference built in), and Muon \citep{jordan24} applies orthogonalized
+updates to weight matrices; recent MLP-regression benchmarks find
+Schedule-Free, Muon, and AdamW+EMA (our recipe) the three consistent
+winners, making the other two cheap drop-in trials.
+(iv) FINER's variable-periodic activations \citep{liu24finer} and
+Fourier-reparameterized training \citep{shi24} address spectral bias
+adaptively, targeting the fixed-$f_{\max}$ ceiling of our encoding;
+EVOS \citep{zhang24evos} formalises coordinate-point selection during
+INR training (cf.\ our line-aware sampling).
+
+\paragraph{Competing alternatives.}
+TransformerPayne \citep{rozanski25} demonstrates, for stellar spectral
+emulation specifically, that attention over the wavelength axis breaks
+the $\sim$1\% plateau of MLP emulators with better accuracy \emph{and}
+data efficiency, by capturing long-range correlations (co-varying lines
+of the same ion) that our independent per-line embeddings ignore -- the
+best-motivated architecture competitor, modulo heavier inference.
+\citet{yang25grids} argue that for dense, regularly sampled signals,
+explicit grids plus interpolation beat implicit networks per unit
+compute -- consistent with our interpolation baselines -- which
+legitimises a grid/low-rank component plus small neural residual as the
+Tier-3 architecture, and strengthens the fixed-grid distillation route.
+Kolmogorov--Arnold networks \citep{liu24kan} report favourable scaling
+on smooth scientific fitting problems, but wall-clock efficiency claims
+replicate poorly and nothing suggests an advantage on line-forest
+targets (low priority). Attention/state-space operators
+\citep[e.g.][]{wu24transolver} become relevant at the joint
+multi-element stage, not for 1-D single-element emulation.
+
+\paragraph{Proposed tests.}
+These candidates are \emph{not} suited to a single factorial ablation:
+Schedule-Free \emph{replaces} WSD+EMA (mutually exclusive alternatives,
+not additive switches), muP is testable only as a width sweep, and
+InfoBatch interacts with the sampler. The plan is instead:
+(1) A/B with 2--3 seeds at t04 scale for InfoBatch-style rescaling
+(success criterion: grating regression absent at full prioritization
+strength, equal MRE at lower cost);
+(2) a three-arm optimizer bake-off (WSD+EMA / Schedule-Free / Muon) at
+short budget, winner confirmed once at 100k steps;
+(3) a three-width muP sweep with the learning rate tuned only at the
+smallest width;
+(4) a FINER $\times$ curriculum $2\times2$ (FINER may subsume the
+coarse-to-fine schedule). Winners are composed greedily and confirmed
+in a single big\_trunk-scale run, with the test set touched only at
+that final step.
+
+\section{Summary of discarded approaches}
+\label{sec:discarded}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{p{4.6cm}p{4.6cm}p{5.2cm}}
+\toprule
+Approach & Evidence against & Replacement\\
+\midrule
+Sobolev derivative loss & MRE $0.91\%\to0.52\%$ on removal & plain
+relative-error Huber\\
+PCA(64)+GP baseline/generator & saturates at 0.2\%; 9--17\% at small
+$n$ & per-bin PCHIP\\
+Sparse-matrix broadening & 2.8\% MRE, 20\% flux misplaced at
+$1000\kms$ & FFT / hybrid\\
+Monolithic $(T,v)$ emulator (v1, v2) & v1 $8\times$, v2 (fixed)
+$4$--$6\times$ worse than hybrid & hybrid (broaden outside the net)\\
+Line-head enlargement & 0.21\% vs 0.16\% (worse incl.\ line MRE) &
+trunk scaling (big\_trunk)\\
+Uniform batch sampling & 0.45\% vs 0.32\% (reweight) at $n=300$ &
+error-prioritized sampling\\
+Augmentation on dense grids & interp.\ error $100\times$ below model
+error; train$=$val MRE & augmentation only for sparse grids\\
+HPO's ``big models diverge'' & t16 stable and winning at
+lr $10^{-3}$ & decouple size from learning rate\\
+20k-step cosine budgets & best checkpoint $=$ final step, twice &
+100k+ steps; WSD schedule\\
+Unweighted per-channel means & $30\times$ swings between models with
+equal medians & flux-weighted MRE (planned)\\
+$(T,v)$-emulator line-head removal & core errors $\pm$2--5\% at all
+$v$ & analytic Gaussian line head\\
+High-frequency ``trunk jitter'' as the failing-band cause &
+residual power is low-frequency; $\le0.6\%$ above $f_{\max}/2$ for all
+$23$ elements (Section~\ref{sec:tembed}) & temperature-conditioning
+diagnosis $\to$ trunk $T$-embedding\\
+Warm-start/fine-tune to fix the band & every attempt degraded the
+checkpoint ($0.34\%\to0.48$--$0.52\%$); a warm start resets
+LR/curriculum/optimizer/EMA & from-scratch runs (fine-tune only for true
+continuation)\\
+\bottomrule
+\end{tabular}
+\caption{Approaches tried and discarded, with the deciding evidence.}
+\label{tab:discarded}
+\end{table}
+
+\section*{Reproducibility}
+
+Code: \code{spexai} branch \code{neural\_operator}. Trainers:
+\code{spexai/train/train\_operator.py} (variants/ablation),
+\code{train\_adaptive.py} (prioritized sampling, gated augmentation,
+Tier 1/2 recipes), \code{train\_broadened2.py} (revised $(T,v)$
+emulator). Benchmarks: \code{scripts/benchmark\_operator.py} (native
+grid), \code{benchmark\_broadening.py}, \code{benchmark\_instruments.py}
+(resolution-matched $+$ RMF-folded), \code{baseline\_interpolation.py}.
+Sweep driver: \code{scripts/run\_all\_elements.py}. The recipe-screening
+program of Section~\ref{sec:related} is implemented in
+\code{scripts/run\_recipe\_program.py} (14 arms; new options
+\code{--optimizer adamw|schedulefree|muon}, \code{--mup},
+\code{--pr\_correct}, \code{--activation finer} in \code{train\_adaptive.py}
+and \code{spexai/train/optim.py}); confirmation on fresh off-grid PCHIP
+probes rather than the test set is \code{scripts/benchmark\_offgrid.py}. Every training run
+writes train-vs-validation curves and three-temperature
+spectrum/residual/line-zoom figures automatically
+(\code{spexai/train/diagnostics.py}). The winning configuration
+(\code{big\_trunk}): GELU $512\times6$ trunk, $K=1024$ Fourier
+frequencies ($f_{\max}=4000$), FiLM, trend head, per-bin normalisation,
+line head (dim 16, hidden 128), batch 128, 2048 points/spectrum, AdamW
+at $10^{-3}$ with WSD schedule, EMA decay 0.999, prioritized sampling
+with mix 0.4, 100k steps.
+
+Diagnostics for the failing-band campaign:
+\code{scripts/residual\_fft.py} (residual power spectrum, per-temperature
+stratification), \code{scripts/compare\_fix.py} (before/after
+confirmation), \code{scripts/diagnose\_element.py} (error vs
+temperature); controlled sweeps in \code{scripts/run\_weekend\_sweep.py}
+and \code{scripts/run\_followon\_sweep.py}; the trunk temperature
+embedding is \code{--film\_t\_freqs} in \code{spexai/train/operator.py},
+covered by \code{tests/test\_operator\_arch.py}.
+
+\paragraph{Where the outputs live.} Data and results are under
+\code{\textasciitilde/work/data/spexai/} (workstation) or
+\code{\textasciitilde/data/spexai\_data/} (cluster); figures and code
+under the repository root. Table~\ref{tab:outputs} is the index.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{p{5.4cm}p{8.4cm}}
+\toprule
+Output & Location\\
+\midrule
+Per-element base checkpoints & \code{runs/element<Z>/tier1/reweight\_full.pt};
+table \code{runs/elements\_summary.md}\\
+Weekend $T$-embedding sweep & \code{runs\_sweep/<arm>/} (\code{sweep.pt},
+\code{sweep\_history.json}, \code{result.json}, \code{figures/}); ranked
+\code{runs\_sweep/sweep\_summary.md}\\
+Follow-on sweep ($200$k) & \code{runs\_followon/<arm>/} $+$
+\code{sweep\_summary.md}\\
+Discarded warm-start attempts & \code{runs\_finetune/element11/}\\
+Residual-FFT diagnostics & \code{docs/development\_plots/residual\_fft/}
+(\code{Z<zz>\_residual\_fft.png}, \code{Z<zz>\_by\_temperature.png},
+\code{comparison.png})\\
+Fix confirmation (before/after) &
+\code{docs/development\_plots/fix\_confirmation/}\\
+Error-vs-temperature fingerprints &
+\code{docs/development\_plots/element\{11,26\}\_*\_error\_vs\_temperature.png}\\
+Inference / simulation demos &
+\code{docs/development\_plots/\{inference\_demo,simulated\_obs\}\_*.png}\\
+Shipped model store & \code{spexai/models/Z<zz>\_<sym>.pt} $+$
+\code{manifest.json}\\
+\bottomrule
+\end{tabular}
+\caption{Index of trained checkpoints, sweep results, and diagnostic
+figures.}
+\label{tab:outputs}
+\end{table}
+
+\paragraph{Environment.} \code{environment.yml} / \code{requirements.txt}
+build the conda env \code{spexai} (Python 3.12, torch $\ge2.13$). On the
+macOS workstation, export \code{KMP\_DUPLICATE\_LIB\_OK=TRUE} and
+\code{MKL\_THREADING\_LAYER=GNU} before running (duplicate-\code{libomp}
+and MKL-vs-\code{libgomp} guards; neither is needed on the Linux
+cluster). The diagnostics are CPU-safe and are run with \code{--device
+cpu}; training runs on the GPU.
+
+\begin{thebibliography}{99}
+
+\bibitem[Alsing et al.(2020)]{alsing20}
+Alsing, J., et al.\ 2020, ApJS, 249, 5 (Speculator)
+
+\bibitem[Bergstra \& Bengio(2012)]{bergstra12}
+Bergstra, J., \& Bengio, Y.\ 2012, JMLR, 13, 281
+
+\bibitem[Canizares et al.(2005)]{canizares05}
+Canizares, C.~R., et al.\ 2005, PASP, 117, 1144 (Chandra HETG)
+
+\bibitem[Crombecq et al.(2011)]{crombecq11}
+Crombecq, K., et al.\ 2011, SIAM J.~Sci.~Comput., 33, 1948
+(LOLA-Voronoi)
+
+\bibitem[Fritsch \& Carlson(1980)]{fritsch80}
+Fritsch, F.~N., \& Carlson, R.~E.\ 1980, SIAM J.~Numer.~Anal., 17, 238
+
+\bibitem[Garmire et al.(2003)]{garmire03}
+Garmire, G.~P., et al.\ 2003, Proc.~SPIE, 4851, 28 (Chandra ACIS)
+
+\bibitem[George et al.(2007)]{george07}
+George, I.~M., et al.\ 2007, OGIP Memo CAL/GEN/92-002, ``The
+Calibration Requirements for Spectral Analysis''
+
+\bibitem[Hitomi Collaboration(2016)]{hitomi16}
+Hitomi Collaboration 2016, Nature, 535, 117
+
+\bibitem[Hitomi Collaboration(2018)]{hitomi18}
+Hitomi Collaboration 2018, PASJ, 70, 9
+
+\bibitem[Hu et al.(2024)]{hu24}
+Hu, S., et al.\ 2024, arXiv:2404.06395 (MiniCPM; WSD schedule)
+
+\bibitem[Ishisaki et al.(2025)]{ishisaki25}
+Ishisaki, Y., et al.\ 2025, J.~Astron.~Telesc.~Instrum.~Syst., 11,
+042023 (XRISM Resolve)
+
+\bibitem[Izmailov et al.(2018)]{izmailov18}
+Izmailov, P., et al.\ 2018, UAI (stochastic weight averaging)
+
+\bibitem[Kaastra et al.(1996)]{kaastra96}
+Kaastra, J.~S., Mewe, R., \& Nieuwenhuijzen, H.\ 1996, in UV and X-ray
+Spectroscopy of Astrophysical and Laboratory Plasmas, 411 (SPEX)
+
+\bibitem[Kennedy \& O'Hagan(2000)]{kennedy00}
+Kennedy, M.~C., \& O'Hagan, A.\ 2000, Biometrika, 87, 1
+
+\bibitem[Li et al.(2021)]{li21fno}
+Li, Z., et al.\ 2021, ICLR (Fourier neural operator)
+
+\bibitem[Liu et al.(2018)]{liu18}
+Liu, H., Ong, Y.-S., \& Cai, J.\ 2018, Struct.~Multidisc.~Optim., 57,
+393 (adaptive-sampling survey)
+
+\bibitem[Loshchilov \& Hutter(2017)]{loshchilov17}
+Loshchilov, I., \& Hutter, F.\ 2017, ICLR (SGDR)
+
+\bibitem[Loshchilov \& Hutter(2019)]{loshchilov19}
+Loshchilov, I., \& Hutter, F.\ 2019, ICLR (AdamW)
+
+\bibitem[Lu et al.(2021)]{lu21deeponet}
+Lu, L., Jin, P., \& Karniadakis, G.~E.\ 2021, Nature Mach.~Intell., 3,
+218 (DeepONet)
+
+\bibitem[M{\"u}ller et al.(2022)]{muller22}
+M{\"u}ller, T., et al.\ 2022, ACM Trans.~Graph., 41, 102 (Instant-NGP)
+
+\bibitem[Nygaard et al.(2023)]{nygaard23}
+Nygaard, A., et al.\ 2023, JCAP, 05, 025 (CONNECT)
+
+\bibitem[Perez et al.(2018)]{perez18}
+Perez, E., et al.\ 2018, AAAI (FiLM)
+
+\bibitem[Polyak \& Juditsky(1992)]{polyak92}
+Polyak, B.~T., \& Juditsky, A.~B.\ 1992, SIAM J.~Control Optim., 30,
+838
+
+\bibitem[Ricketts et al.(2026)]{ricketts26}
+Ricketts, B., Hadzi Veljkovic, D., et al.\ 2026, in preparation
+% TODO: complete reference when published
+
+\bibitem[Rogers \& Peiris(2019)]{rogers19}
+Rogers, K.~K., \& Peiris, H.~V.\ 2019, JCAP, 02, 031
+
+\bibitem[Qin et al.(2024)]{qin24}
+Qin, Z., et al.\ 2024, ICLR (oral), arXiv:2303.04947 (InfoBatch)
+
+\bibitem[Defazio et al.(2024)]{defazio24}
+Defazio, A., et al.\ 2024, NeurIPS, arXiv:2405.15682
+(Schedule-Free learning)
+
+\bibitem[Jordan et al.(2024)]{jordan24}
+Jordan, K., et al.\ 2024, ``Muon: an optimizer for hidden layers in
+neural networks'', \url{https://kellerjordan.github.io/posts/muon/}
+
+\bibitem[Yang \& Hu(2021)]{yang21mup}
+Yang, G., \& Hu, E.~J.\ 2021, ICML; see also Yang et al.\ 2022,
+arXiv:2203.03466 (Maximum Update Parametrization / $\mu$Transfer)
+
+\bibitem[Liu et al.(2024a)]{liu24finer}
+Liu, Z., et al.\ 2024, CVPR (FINER: variable-periodic activations)
+
+\bibitem[Shi et al.(2024)]{shi24}
+Shi, K., et al.\ 2024, CVPR, arXiv:2401.07402
+(Fourier-reparameterized training)
+
+\bibitem[Zhang et al.(2024)]{zhang24evos}
+Zhang, W., et al.\ 2024, arXiv:2412.10153 (EVOS: evolutionary
+coordinate selection for INR training)
+
+\bibitem[Liu et al.(2024b)]{liu24kan}
+Liu, Z., et al.\ 2024, arXiv:2404.19756 (Kolmogorov--Arnold networks)
+
+\bibitem[R{\'o}{\.z}a{\'n}ski et al.(2025)]{rozanski25}
+R{\'o}{\.z}a{\'n}ski, T., Ting, Y.-S., et al.\ 2025, ApJ,
+arXiv:2407.05751 (TransformerPayne)
+
+\bibitem[R{\'o}{\.z}a{\'n}ski \& Ting(2025)]{rozanski25scaling}
+R{\'o}{\.z}a{\'n}ski, T., \& Ting, Y.-S.\ 2025, Open J.~Astrophys.,
+arXiv:2503.18617 (scaling laws for spectral emulation)
+
+\bibitem[Yang et al.(2025)]{yang25grids}
+2025, arXiv:2506.11139 (``Grids often outperform implicit neural
+representations'')
+% TODO: verify author list
+
+\bibitem[Wu et al.(2024)]{wu24transolver}
+Wu, H., et al.\ 2024, ICML (Transolver)
+
+\bibitem[Rybicki \& Lightman(1979)]{rybicki79}
+Rybicki, G.~B., \& Lightman, A.~P.\ 1979, Radiative Processes in
+Astrophysics (Wiley)
+
+\bibitem[Schaul et al.(2016)]{schaul16}
+Schaul, T., et al.\ 2016, ICLR (prioritized experience replay)
+
+\bibitem[Tancik et al.(2020)]{tancik20}
+Tancik, M., et al.\ 2020, NeurIPS (Fourier features)
+
+\bibitem[Wu et al.(2023)]{wu23}
+Wu, C., et al.\ 2023, Comput.~Methods Appl.~Mech.~Eng., 403, 115671
+(RAD/RAR-D adaptive sampling)
+
+\end{thebibliography}
+
+\end{document}
