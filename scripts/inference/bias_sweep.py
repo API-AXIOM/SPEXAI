@@ -62,8 +62,8 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, HOT_SCIENCE, HOT_WEAK, find_xrism_response,
-    band_mask, gaussian_dem, N_REF, Par, Forward)
-from fisher_bias import linear_bias_fisher                        # noqa: E402
+    band_mask, EXCLUDE_NONE, gaussian_dem, N_REF, Par, Forward)
+from fisher_bias import linear_bias_fisher, COND_F_WARN           # noqa: E402
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import SYMBOL                    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -183,8 +183,13 @@ def stage_truth(args, points, outp):
                 total = np.zeros((len(points), c.size))
             total[i] += c
         done.add(z_el)
+        # record the response: an ARF changes neither the channel count nor
+        # the element set, but rescales the truth channel by channel, so a
+        # truth built against a different response is silently wrong and no
+        # other field in this file can reveal it.
         np.savez(outp, counts=total, elements_done=sorted(done),
-                 points=json.dumps(points), mode=args.mode)
+                 points=json.dumps(points), mode=args.mode,
+                 rmf=os.path.basename(rmf), arf=os.path.basename(arf))
         print(f"Z={z_el:>2}: load {load_s:.1f}s, {len(points)} points in "
               f"{time.time() - t0:.1f}s ({len(done)}/{len(emu_elements)} done)",
               flush=True)
@@ -233,7 +238,7 @@ def stage_bias(args, points, truth_path, outp):
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     absorption = Absorption.default()
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_NONE)
     emu = JointOperatorModel(models_dir=args.store, device=args.device)
     dem = gaussian_dem()[0] if args.mode == "dem" else None
     fwd = Forward(emu, response, absorption, keep, args.mode, dem=dem)
@@ -259,20 +264,28 @@ def stage_bias(args, points, truth_path, outp):
             fwd.dem = gaussian_dem(mean=pt["T_mean"], sigma=pt["T_sigma"])[0]
         pars = build_pars(fwd, pt, log_norm_truth, args.mode)
         t0 = time.time()
-        b_sys, sigma_ref = linear_bias_fisher(fwd, pars, d, verbose=False)
+        b_sys, sigma_ref, cond_F = linear_bias_fisher(fwd, pars, d,
+                                                      verbose=False)
         rec = {"point": i, "params": pt, "names": [p.name for p in pars],
                "truth": [p.truth for p in pars], "b_sys": b_sys.tolist(),
                "sigma_ref": sigma_ref.tolist(), "n_ref": N_REF,
-               "log_norm_truth": log_norm_truth,
+               "log_norm_truth": log_norm_truth, "cond_F": cond_F,
+               "rmf": os.path.basename(rmf), "arf": os.path.basename(arf),
                "runtime_s": time.time() - t0}
         with open(outp, "a") as f:
             f.write(json.dumps(rec) + "\n")
             f.flush()
             os.fsync(f.fileno())
         worst = int(np.argmax(np.abs(b_sys) / sigma_ref))
+        # cond(F) is printed per point because this loop runs unattended over
+        # hundreds of points: a near-singular F yields a finite, plausible N*
+        # from two meaningless numbers, and nothing else in the output would
+        # reveal it. See linear_bias_fisher's docstring for the n_h case.
+        warn = "  !! NEAR-SINGULAR F" if cond_F > COND_F_WARN else ""
         print(f"[{i + 1}/{len(points)}] {rec['runtime_s']:.1f}s  worst "
               f"{rec['names'][worst]} b/sig@Nref="
-              f"{b_sys[worst] / sigma_ref[worst]:+.3f}", flush=True)
+              f"{b_sys[worst] / sigma_ref[worst]:+.3f}  "
+              f"cond(F)={cond_F:.1e}{warn}", flush=True)
 
 
 # --- reporting --------------------------------------------------------------

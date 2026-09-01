@@ -65,9 +65,41 @@ FREE_Z: List[int] = sorted([26] + list(XFE_RATIO))     # Si,S,Ar,Ca,Cr,Mn,Fe,Ni
 HOT_SCIENCE = [24, 25, 28]                 # Cr, Mn, Ni -- weak *and* fitted
 HOT_WEAK = [22, 27, 29, 30]                # Ti, Co, Cu, Zn -- tied to Fe, unfit
 
-# Fit band and the excluded Fe XXV region (keV), matching the paper.
 BAND = (1.9, 12.0)
-EXCLUDE = (6.567, 6.620)
+
+# The Fe XXV region excluded by the XRISM/Resolve Perseus analysis (keV,
+# OBSERVED frame -- band_mask keys off channel centres and applies no redshift
+# correction). At Perseus's z=0.017284 this is 6.681-6.734 keV rest, which
+# covers the He-alpha resonance line w (6.7004) and intercombination x
+# (6.6824) while keeping y (6.6675) and the forbidden line z (6.6366). Masking
+# w while keeping z is a RESONANCE SCATTERING cut: w is optically thick in the
+# Perseus core, so its flux is redistributed and an optically-thin CIE model
+# cannot reproduce it.
+#
+# CHOOSE THIS DELIBERATELY -- it used to be a module default that every
+# experiment inherited silently, which is how a source-specific astrophysical
+# decision ended up inside general emulator-characterisation measurements.
+# Two regimes:
+#
+#   EXCLUDE_PERSEUS_LITERATURE -- only when the goal is to REPRODUCE the
+#       published Perseus analysis (the showcase). The mask is part of that
+#       analysis's strategy.
+#
+#   EXCLUDE_NONE -- everywhere the goal is to MEASURE EMULATOR ERROR against a
+#       self-consistent CIE injection. Resonance scattering is absent from both
+#       the SPEX truth and the emulator, so the mask corrects nothing there; it
+#       only deletes the Fe-K channels where the emulator's line-head floor is
+#       worst, which biases the result optimistic. Note the direction: dropping
+#       the mask raises |b_sys| and lowers sigma_ref, so it LOWERS N* -- the
+#       unmasked number is the conservative bound.
+#
+# WARNING: this window is observed-frame and is only meaningful because every
+# experiment currently pins z to PERSEUS["z"]. If redshift is ever varied, a
+# fixed observed-frame window is incoherent (at z=0.1 it masks arbitrary
+# continuum while Fe XXV sits elsewhere) and must be made rest-frame and
+# shifted per point, or dropped.
+EXCLUDE_PERSEUS_LITERATURE = (6.567, 6.620)
+EXCLUDE_NONE = None
 
 N_REF = 1e5                    # reference in-band counts for Fisher/deviance
 
@@ -145,11 +177,16 @@ def check_truth_response(tz, rmf, arf):
             f"$SPEXAI_RESOLVE_RMF / $SPEXAI_RESOLVE_ARF to match it.")
 
 
-def band_mask(response, band=BAND, exclude=EXCLUDE) -> np.ndarray:
+def band_mask(response, band=BAND, *, exclude) -> np.ndarray:
     """Boolean channel mask: within ``band`` and outside ``exclude`` (keV).
 
-    Perseus-literature defaults over the package's general
-    ``spexai.inference.response.band_mask``."""
+    ``exclude`` is KEYWORD-ONLY AND REQUIRED, deliberately. It previously
+    defaulted to the Perseus resonance-scattering cut, so all ten call sites
+    inherited a source-specific astrophysical choice without anyone deciding
+    it -- including the experiments whose whole purpose is to measure emulator
+    error, where that cut removes precisely the Fe-K channels the emulator is
+    worst at. Pass ``EXCLUDE_PERSEUS_LITERATURE`` or ``EXCLUDE_NONE``
+    explicitly; see their definitions above for which applies."""
     return _band_mask(response, band, exclude)
 
 

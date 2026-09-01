@@ -33,13 +33,19 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 from campaign import (                                      # noqa: E402
     FREE_Z, HOT_SCIENCE, HOT_WEAK, N_REF, Par, Forward, build_params,
-    injected_abundances, find_xrism_response, band_mask, TruthConfig,
+    injected_abundances, find_xrism_response, band_mask, EXCLUDE_NONE, TruthConfig,
     stream_truth_counts, gaussian_dem, resolve_perseus)
 from spexai.config import STORE, RESULTS                      # noqa: E402
 from spexai.inference.abundances import SYMBOL                # noqa: E402
 from spexai.inference.response import Response               # noqa: E402
 from spexai.inference.absorption import Absorption           # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
+
+
+# cond(F) above this is reported as near-singular: the Fisher solve is then
+# dominated by round-off in the smallest eigendirection, so per-parameter
+# b_sys/sigma_ref are not trustworthy even where their ratio looks sane.
+COND_F_WARN = 1e10
 
 
 def poisson_deviance(mu: np.ndarray, d: np.ndarray) -> float:
@@ -77,10 +83,22 @@ def linear_bias_fisher(fwd, pars, d, verbose=True):
     b_sys = F^{-1} s (one Newton step of the expected-log-likelihood MLE), with
     score s_i = sum_c (d_c/mu0_c - 1) J_ic and Fisher F_ij = sum_c J_ic J_jc/mu0_c
     (d ~ mu0). Valid because the emulator error (d/mu0 - 1) is small. Returns
-    (b_sys (n,), sigma_ref (n,)) at N_REF in-band counts.
+    (b_sys (n,), sigma_ref (n,), cond_F) at N_REF in-band counts.
+
+    ``cond_F`` is the 2-norm condition number of F and must be checked, not
+    ignored. A near-singular F makes b_sys and sigma_ref individually
+    meaningless while leaving their *ratio* -- and hence N* -- finite and
+    plausible-looking, so a degenerate parameter direction produces a
+    publishable-looking number with nothing to flag it. This is not
+    hypothetical: with a flat (unit) effective area the n_h direction went
+    near-singular, because absorption is constrained almost entirely in the
+    soft band, and the published table carried b_sys = -3.8e19 with
+    sigma_ref = 5.1e20 as a finite N* = 1.8e7. Anything above ~1e10 is
+    approaching float64's limit and should be treated as unconstrained.
     """
     mu0, J = jacobian(fwd, pars, verbose=verbose)
     F = (J / mu0) @ J.T                                 # (n,n)
+    cond_F = float(np.linalg.cond(F))
     cov = np.linalg.inv(F)
     sigma_ref = np.sqrt(np.diag(cov))                   # ~ 1/sqrt(N)
     resid = d / mu0 - 1.0                               # emulator error, in-band
@@ -90,7 +108,10 @@ def linear_bias_fisher(fwd, pars, d, verbose=True):
         rms = np.sqrt(np.mean(resid ** 2))
         print(f"  in-band emulator residual RMS = {rms:.3e} "
               f"(max |{np.abs(resid).max():.3e}|)", flush=True)
-    return b_sys, sigma_ref
+        flag = "  <-- NEAR-SINGULAR, b_sys/sigma_ref unreliable" \
+            if cond_F > COND_F_WARN else ""
+        print(f"  cond(F) = {cond_F:.3e}{flag}", flush=True)
+    return b_sys, sigma_ref, cond_F
 
 
 def _rebin(a: np.ndarray, g: int) -> np.ndarray:
@@ -157,7 +178,7 @@ def main():
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     absorption = Absorption.default()
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_NONE)
     emu = JointOperatorModel(models_dir=STORE, device="cpu")
     print(f"emulator elements: {emu.elements}")
     dem, dem_p = (gaussian_dem(mean=perseus["dem_mean"], sigma=perseus["dem_sigma"])
@@ -191,7 +212,7 @@ def main():
         _diagnose_residual(fwd, pars, d, mu0)
         return
 
-    b_sys, sigma_ref = linear_bias_fisher(fwd, pars, d)
+    b_sys, sigma_ref, cond_F = linear_bias_fisher(fwd, pars, d)
 
     counts = np.array(args.counts)
     print(f"\n{args.mode.upper()} | b_sys, sigma_stat, and crossover N* "
@@ -213,7 +234,12 @@ def main():
     outp = os.path.join(args.out, f"bias_{args.mode}{suffix}.npz")
     np.savez(outp, names=[p.name for p in pars], truth=[p.truth for p in pars],
              b_sys=b_sys, sigma_ref=sigma_ref, counts=counts, n_ref=N_REF,
-             kT=perseus["kT"], sigma_v=perseus["vel"])
+             kT=perseus["kT"], sigma_v=perseus["vel"], cond_F=cond_F,
+             # response provenance: an ARF changes neither n_keep nor the
+             # element set but rescales the fit channel by channel, so a
+             # result that does not record it cannot be told apart from a
+             # flat-effective-area run. See check_truth_response().
+             rmf=os.path.basename(rmf), arf=os.path.basename(arf))
     print(f"\nsaved {outp}")
 
 

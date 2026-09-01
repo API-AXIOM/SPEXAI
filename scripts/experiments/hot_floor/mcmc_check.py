@@ -27,7 +27,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 from campaign import (                                       # noqa: E402
-    find_xrism_response, band_mask, TruthConfig, stream_truth_counts,
+    find_xrism_response, band_mask, EXCLUDE_NONE, TruthConfig, stream_truth_counts,
     gaussian_dem, resolve_perseus, injected_abundances, Forward,
     build_params, N_REF)
 from spexai.config import STORE, RESULTS                      # noqa: E402
@@ -226,7 +226,7 @@ def main():
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     absorption = Absorption.default()
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_NONE)
     # accelerate=False: this cross-check drives the accel knobs itself
     # (--tf32/--compile/--fft32, and the vectorized EnsembleForward compile) so
     # ACCEL="" gives a genuine float64 reference; the model must not auto-enable.

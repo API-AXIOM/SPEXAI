@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, injected_abundances, find_xrism_response,
-    band_mask, check_truth_response, build_params)
+    band_mask, EXCLUDE_PERSEUS_LITERATURE, check_truth_response, build_params)
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import SYMBOL                    # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
@@ -81,7 +81,7 @@ def build_problem(args):
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     absorption = Absorption.default()
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_PERSEUS_LITERATURE)
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
     print(f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}\n"

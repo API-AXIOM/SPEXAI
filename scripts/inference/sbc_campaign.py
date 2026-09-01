@@ -53,7 +53,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from campaign import (                                            # noqa: E402
-    PERSEUS, FREE_Z, injected_abundances, find_xrism_response, band_mask)
+    PERSEUS, FREE_Z, injected_abundances, find_xrism_response, band_mask, EXCLUDE_PERSEUS_LITERATURE)
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -95,7 +95,7 @@ def build_forward(args):
     """Emulator, response and forward -- built once, reused by every sim."""
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_PERSEUS_LITERATURE)
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
     # SBC draws its own truths through this same forward, so the ARF cancels

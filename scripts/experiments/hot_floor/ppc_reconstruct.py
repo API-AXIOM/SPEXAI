@@ -18,7 +18,7 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
-from campaign import find_xrism_response, band_mask, PERSEUS               # noqa: E402
+from campaign import find_xrism_response, band_mask, EXCLUDE_NONE, PERSEUS               # noqa: E402
 from spexai.config import STORE                                            # noqa: E402
 from gpu_forward import EnsembleForward                                    # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel             # noqa: E402
@@ -38,7 +38,7 @@ def main():
 
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_NONE)
     absn = Absorption.default()
     # accelerate=False: deterministic (seed=0) reference reconstruction, kept
     # on the unaccelerated float64 path for exact reproducibility.

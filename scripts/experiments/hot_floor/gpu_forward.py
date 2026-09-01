@@ -31,7 +31,7 @@ import torch
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 from campaign import (                                                    # noqa: E402
-    PERSEUS, FREE_Z, find_xrism_response, band_mask, build_params, Forward)
+    PERSEUS, FREE_Z, find_xrism_response, band_mask, EXCLUDE_NONE, build_params, Forward)
 from spexai.config import STORE                                           # noqa: E402
 from spexai.inference.abundances import SYMBOL                            # noqa: E402
 from spexai.inference.operator_model import (                             # noqa: E402
@@ -224,7 +224,7 @@ def _validate():
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     absorption = Absorption.default()
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_NONE)
     emu = JointOperatorModel(models_dir=STORE, device="cpu")
     ser = Forward(emu, response, absorption, keep, "single")       # has sigma_v
 

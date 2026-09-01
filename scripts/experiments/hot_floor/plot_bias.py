@@ -7,6 +7,7 @@ straight slope-1/2 line in log-log space, crossing 1 (bias = noise) at the
 crossover N*. Below the line the emulator floor is irrelevant; above it, the
 emulator biases that parameter beyond the statistical error.
 """
+import argparse
 import os
 import sys
 
@@ -15,8 +16,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-RESULTS = os.path.join(HERE, "results")
+# Results live in the shared data tree written by fisher_bias.py, NOT beside
+# this script -- the local ./results path predates the scripts/ refactor and
+# was the reason the figures referenced from docs/ did not exist.
+from spexai.config import RESULTS as _RESULTS_BASE
+RESULTS = os.path.join(_RESULTS_BASE, "hot_floor")
 
 # parameter -> (group, colour); groups match the science framing.
 SCIENCE = {"Cr", "Mn", "Ni"}
@@ -30,12 +34,19 @@ XRISM_REGION = 4e4        # per-region minimum from arXiv:2606.17141
 XRISM_DEEP = 1e6          # deep stacked core (order of magnitude)
 
 
-def load(mode):
-    p = os.path.join(RESULTS, f"bias_{mode}.npz")
+def load(mode, tag=""):
+    suffix = f"_{tag}" if tag else ""
+    p = os.path.join(RESULTS, f"bias_{mode}{suffix}.npz")
     if not os.path.exists(p):
         return None
     z = np.load(p, allow_pickle=True)
-    return {k: z[k] for k in z.files}
+    d = {k: z[k] for k in z.files}
+    # response provenance: refuse to plot a run built with a flat effective
+    # area as if it were instrument-folded (see check_truth_response).
+    if "arf" not in d:
+        print(f"WARNING: {os.path.basename(p)} records no ARF -- it predates "
+              f"the response fix and its N* values are not valid.")
+    return d
 
 
 def panel(ax, data, mode, counts):
@@ -63,21 +74,27 @@ def panel(ax, data, mode, counts):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", default="",
+                    help="suffix of the bias_{mode}<_tag>.npz to plot")
+    args = ap.parse_args()
     counts = np.logspace(3.5, 8.5, 200)
-    modes = [m for m in ("single", "dem") if load(m) is not None]
+    modes = [m for m in ("single", "dem") if load(m, args.tag) is not None]
     if not modes:
-        sys.exit("no results/bias_*.npz found -- run fisher_bias.py first")
+        sys.exit(f"no {RESULTS}/bias_*{'_' + args.tag if args.tag else ''}.npz "
+                 f"found -- run fisher_bias.py first")
     fig, axes = plt.subplots(1, len(modes), figsize=(6.2 * len(modes), 5.0),
                              squeeze=False)
     for ax, m in zip(axes[0], modes):
-        panel(ax, load(m), m, counts)
+        panel(ax, load(m, args.tag), m, counts)
     axes[0][0].set_ylabel(r"|systematic bias| / statistical error")
     # one shared legend
     h, l = axes[0][0].get_legend_handles_labels()
     fig.legend(h, l, loc="upper center", ncol=len(l), fontsize=8,
                frameon=False, bbox_to_anchor=(0.5, 1.02))
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    out = os.path.join(RESULTS, "bias_vs_counts.png")
+    out = os.path.join(RESULTS,
+                       f"bias_vs_counts{'_' + args.tag if args.tag else ''}.png")
     fig.savefig(out, dpi=140, bbox_inches="tight")
     print(f"wrote {out}")
 

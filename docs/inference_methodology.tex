@@ -384,6 +384,43 @@ For shape parameters $b_{\rm sys}$ is additionally independent of the absolute
 count scale because the normalisation parameter absorbs it, so $N_\star$ is a
 fixed property of the triple (emulator, modelling strategy, temperature model).
 
+\subsection{How to read $N_\star$}\label{sec:readnstar}
+Because $N_\star$ is reported per parameter and spans many orders of magnitude,
+it is worth stating explicitly how to convert it into the quantity an observer
+actually cares about. Inverting the definition, the emulator bias at any
+exposure is
+\begin{equation}
+\frac{|b_{\rm sys}|}{\sigma_{\rm stat}(N)} = \sqrt{N/N_\star},
+\label{eq:biasratio}
+\end{equation}
+so a fit with $N$ in-band counts carries an emulator systematic of
+$\sqrt{N/N_\star}$ standard deviations. Three consequences follow, and the
+third is the one most easily misread.
+
+First, $N_\star$ is expressed in \emph{in-band counts} rather than exposure
+time, because counts is the quantity that already folds together effective
+area, exposure and source brightness; it is directly comparable to the
+integrated counts of a real spectrum in the same fit band.
+
+Second, $N_\star$ is a property of the triple (emulator, modelling strategy,
+parameter point) and not of any observation. Larger is safer, and the number
+to compare it against is the counts one actually has.
+
+Third---and this is why a large $N_\star$ is less reassuring than it looks---the
+dependence in Eq.~\eqref{eq:biasratio} is a \emph{square root}. An $N_\star$ two
+orders of magnitude above the observed counts leaves a bias of $0.1\sigma$, not
+$0.01\sigma$: a factor of $100$ in counts buys only a factor of $10$ in bias.
+Margins should therefore be read on the $\sqrt{N/N_\star}$ scale of
+Table~\ref{tab:biassigma}, not on the raw ratio of counts.
+
+Two caveats attach to every $N_\star$ quoted in this work. It is a
+\emph{per-parameter} quantity---there is no single number characterising ``the
+emulator,'' and within one fit the values span five orders of magnitude. And it
+is first order (Sec.~\ref{sec:fisherbias}): since $N_\star\propto b_{\rm
+sys}^{-2}$, a linearisation that under-predicts the bias by $1.5$--$3\times$
+means $N_\star$ \emph{over-predicts} the safe exposure by $2$--$9\times$. Every
+tabulated $N_\star$ should be read as an optimistic bound.
+
 \subsection{Cost and domain of validity}
 Both $\sigma_{\rm stat}$ and $b_{\rm sys}$ are read off the \emph{same}
 finite-difference Jacobian, so the total cost is $2n{+}1$ emulator evaluations
@@ -413,21 +450,28 @@ analyses while the other four are weak and tied to iron, we test directly whethe
 the floor biases the published quantities, and above what exposure.
 
 \paragraph{Design.} We generate one realistic Perseus spectrum from the
-independent \code{SpexTruthModel} (all 28 currently available elements at a
-literature abundance pattern) and fit it back with the emulator under the
-\emph{literature modelling strategy} of the XRISM/Resolve Perseus-core enrichment
-analysis \citep{xrism_perseus}: free Si, S, Ar, Ca, Cr, Mn, Fe and Ni together
-with $kT$ (or a Gaussian DEM), $\sigma_v$, $\nh$ and the normalisation, with every
-other metal tied to the \emph{fitted} iron (a paramless
-\code{AbundanceModel.tie\_const}). Injected values follow that analysis
-($\mathrm{Fe}=0.71\,\zsun$, $[X/\mathrm{Fe}]$ near unity, $z=0.017284$,
-$\nh=1.36\times10^{21}\,\mathrm{cm^{-2}}$, $\sigma_v=180\kms$, $kT=3.9\kev$), over
-the $1.9$--$12\kev$ band with the Fe\,XXV complex ($6.567$--$6.620\kev$) masked and
-the XRISM/Resolve response ($\sim0.5\,\mathrm{eV}$ channels). Truth and emulator
-span the \emph{identical} element set, so their only difference is emulator error.
-Code: \code{inference\_demo/hot\_floor/} (\code{experiment.py} builds the store and
-a memory-frugal per-element streaming truth; \code{fisher\_bias.py} the estimator
-below; \code{plot\_bias.py}, \code{mcmc\_check.py} the figure and cross-check).
+independent \code{SpexTruthModel} --- a \emph{complete} plasma, all 30 elements
+of the store at a literature abundance pattern, not a hot-element subset --- and
+fit it back with the emulator under the \emph{literature modelling strategy} of
+the XRISM/Resolve Perseus-core enrichment analysis \citep{xrism_perseus}: free
+Si, S, Ar, Ca, Cr, Mn, Fe and Ni together with $kT$ (or a Gaussian DEM),
+$\sigma_v$, $\nh$ and the normalisation, with every other metal tied to the
+\emph{fitted} iron (a paramless \code{AbundanceModel.tie\_const}). The four
+worst-emulated metals (Ti, Co, Cu, Zn) are therefore present in the spectrum
+and contribute their full line-head error, but reach the fit only through the
+tied-to-iron combination; that they ``leak essentially nothing'' is a
+consequence of this strategy and would not carry over to an analysis that freed
+them. Injected values follow that analysis ($\mathrm{Fe}=0.71\,\zsun$,
+$[X/\mathrm{Fe}]$ near unity, $z=0.017284$,
+$\nh=1.36\times10^{21}\,\mathrm{cm^{-2}}$, $\sigma_v=180\kms$, $kT=3.9\kev$),
+over the $1.9$--$12\kev$ band with the XRISM/Resolve response
+($\sim0.5\,\mathrm{eV}$ channels); the Fe\,XXV region is treated both ways, per
+\S\ref{sec:mask}. Truth and emulator span the \emph{identical} element set, so
+their only difference is emulator error. Code:
+\code{scripts/experiments/hot\_floor/} (\code{fisher\_bias.py} the estimator
+below, \code{plot\_bias.py} the figure, \code{compare\_masking.py} the
+masked/unmasked comparison) over the campaign configuration in
+\code{scripts/inference/campaign.py}.
 
 \paragraph{Bias versus statistical error.} Since the emulator error is small, the
 maximum-likelihood offset in the infinite-count limit is one Newton step from the
@@ -452,83 +496,313 @@ is the in-band count level at which the emulator bias equals the Poisson error:
 below $N_\star$ the floor is invisible, above it it dominates.
 
 \paragraph{Residual character.} The unweighted in-band residual $d/\mu-1$ has
-RMS $\sim14\%$, but this lives entirely in the faint inter-line channels (tiny
+RMS $13.8\%$, but this lives entirely in the faint inter-line channels (tiny
 $\mu$); the \emph{counts-weighted} RMS, which drives the likelihood, is
-$0.077\%$---below the $0.1\%$ target---and the noise-free Poisson deviance per
-degree of freedom at $10^5$ in-band counts is $3\times10^{-6}$, i.e.\
+$0.083\%$---at the $0.1\%$ target---and the noise-free Poisson deviance per
+degree of freedom at $10^5$ in-band counts is $3.4\times10^{-6}$, i.e.\
 statistically invisible. This counts-weighted residual is nearly binning
-independent (it is the coherent amplitude floor, not a sub-resolution centroid
-artifact), confirming the small-residual premise of the linearisation.
+independent, falling only from $8.3\times10^{-4}$ at the native $0.5\,$eV
+channels to $7.4\times10^{-4}$ at $16\,$eV grouping, a $10\%$ change over a
+$32\times$ rebin. That near-invariance identifies it as the coherent
+multiplicative amplitude floor rather than a sub-resolution centroid artifact
+(which would average down), and it confirms the small-residual premise of the
+linearisation.
+
+The Gaussian-DEM fit has an essentially identical residual: unweighted RMS
+$13.81\%$ (the same to four figures), counts-weighted $0.082\%$, deviance per
+degree of freedom $3.3\times10^{-6}$, and $6.8\%$ at $\sigma_v=0$. This is
+expected---a DEM spectrum is a weighted sum of the same per-element
+emissivities, so it inherits the same multiplicative floor---but it is worth
+stating, because it localises the reason the DEM fit is the more exposed of the
+two configurations (Table~\ref{tab:biassigma}). The DEM's smaller $N_\star$ does
+\emph{not} come from a larger emulator residual. It comes from the parameter
+covariance: adding $T_\sigma$ introduces a direction in which the same residual
+projects more strongly, so the effect lives in $F^{-1}$ rather than in $r$. Any
+attempt to improve the DEM margin by reducing the emulator's error is therefore
+attacking the wrong term.
 
 \paragraph{Results.} Table~\ref{tab:hotfloor} lists $N_\star$ per parameter for
-both temperature models; the fractional systematic biases are $\lesssim0.5\%$
-throughout (single-$T$: Fe and the science elements Cr/Mn/Ni at
-$0.18$--$0.92\%$). A Perseus \emph{region} carries $\sim4\times10^4$ in-band
-counts and a deep stacked core $\sim10^6$; every $N_\star$ exceeds these by
-factors of $\sim2\times10^1$ to $\sim10^5$. Equivalently, at a realistic region
-the largest emulator-induced bias (Fe and $\nh$) is $\sim4$--$5\%$ of the
-$1\sigma$ statistical error, and the hot science elements Cr, Mn and Ni are
-$0.1$--$1\%$ of it. The mechanism is exactly the multiplicative character of the
-floor: the abundance and normalisation parameters absorb it, and the
-worst-emulated metals (Ti, Co, Cu, Zn), being weak and tied to iron, leak
-essentially nothing into the free parameters. The Gaussian-DEM fit gives the same
-picture (smallest $N_\star=$ Fe at $1.9\times10^7$), so multi-temperature mixing
-does not expose the floor. We therefore find that the $0.1\%$ floor miss does
-\emph{not} bias XRISM Perseus science at any realistic exposure.
+both temperature models, and Table~\ref{tab:biassigma} converts it via
+Eq.~\eqref{eq:biasratio} into the bias in units of the statistical error at
+four exposures. A Perseus \emph{region} carries $\sim4\times10^4$ in-band counts
+and a deep stacked core $\sim10^6$.
+
+Values below are the unmasked configuration (\S\ref{sec:mask}).
+
+For the single-temperature fit the smallest crossover is nickel,
+$N_\star=9.0\times10^7$, roughly $2000\times$ a realistic region and
+$90\times$ a deep stacked core; on the $\sqrt{N/N_\star}$ scale that is a
+$0.02\sigma$ bias at a region and $0.11\sigma$ in a deep stack. The other
+science-critical elements sit below it (Cr $0.04\sigma$, Mn $0.07\sigma$ in a
+deep stack), and iron is negligible at $<0.01\sigma$. The mechanism is the
+multiplicative character of the floor: the abundance and normalisation
+parameters absorb it, and the worst-emulated metals (Ti, Co, Cu, Zn), being
+weak and tied to iron, leak essentially nothing into the free parameters. That
+last point is a property of the \emph{fit strategy} rather than of the
+emulator, and it would not survive an analysis that freed those elements.
+
+The Gaussian-DEM fit is the more exposed of the two, and differs from the
+single-$T$ case in which parameter binds. The smallest crossover is the DEM
+width, $T_\sigma$ at $N_\star=2.3\times10^7$, with Ni next at
+$5.1\times10^7$: a $0.04\sigma$ bias at a realistic region but $0.21\sigma$ in
+a deep stacked core. Multi-temperature mixing therefore does expose the floor
+somewhat more than a single-temperature fit does, though not enough to matter at
+any single-region exposure.
+
+We therefore find that the $0.1\%$ floor miss does \emph{not} bias XRISM Perseus
+science at a realistic single-region exposure, by a margin of more than an order
+of magnitude in $\sigma$, and that this holds under either treatment of the
+Fe\,XXV region. The qualification is the deep-stack DEM case: at $10^6$ counts
+$T_\sigma$ reaches $0.21\sigma$ \emph{as linearised}, and
+Sec.~\ref{sec:readnstar}'s factor of $2$--$9$ on $N_\star$ would put it at
+$0.3$--$0.6\sigma$ (the masked configuration gives $0.4$--$0.9\sigma$). That is
+the one configuration in this study where the emulator floor is not comfortably
+negligible, and it is the motivation for measuring the linearisation factor
+directly rather than carrying it as a bound. Note that the bound, not the
+central value, is what the DEM conclusion rests on: the linearised
+$0.21\sigma$ is unambiguously safe, while the upper end of the corrected range
+is not, so the correction factor is load-bearing here in a way it is not
+anywhere else in this section.
 
 \begin{table}[t]
 \centering
 \caption{Crossover counts $N_\star$ for the literature-strategy Perseus fit, for
-both a single-temperature and a Gaussian-DEM model. $N_\star$ is the in-band
-count level at which the emulator systematic bias equals the $1\sigma$ Poisson
-error; fractional biases $|b_{\rm sys}|/\mathrm{truth}$ are $\lesssim0.5\%$ for
-every parameter in both cases. Realistic anchors: $\sim4\times10^4$ counts per
-XRISM region, $\sim10^6$ for a deep stacked core -- every $N_\star$ is orders of
-magnitude larger.}
+both a single-temperature and a Gaussian-DEM model, folded through the real
+XRISM/Resolve RMF \emph{and} ARF (\code{rsl\_Hp\_L\_2025.rmf} $+$
+\code{rsl\_extflat5\_GVC\_2025.arf}), with and without the Fe\,XXV mask
+(\S\ref{sec:mask}). $N_\star$ is the in-band count level at which the emulator
+systematic bias equals the $1\sigma$ Poisson error. \textbf{Unmasked is the
+primary column}: with a self-consistent CIE injection the mask defends against
+nothing and only removes channels. Realistic anchors: $\sim4\times10^4$ counts
+per XRISM region, $\sim10^6$ for a deep stacked core. Read alongside
+Table~\ref{tab:biassigma}, which converts the unmasked values into $\sigma$ via
+Eq.~\eqref{eq:biasratio}. Binding parameters in bold: unmasked, Ni for the
+single-$T$ fit and $T_\sigma$ for the DEM fit.}
 \label{tab:hotfloor}
-\begin{tabular}{llcc}
+\begin{tabular}{llcccc}
 \toprule
-Parameter & Group & $N_\star$ single-$T$ & $N_\star$ DEM \\
+& & \multicolumn{2}{c}{single-$T$} & \multicolumn{2}{c}{Gaussian DEM} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+Parameter & Group & unmasked & masked & unmasked & masked \\
 \midrule
-Cr & science-critical & $3.6\times10^{9}$ & $8.6\times10^{9}$ \\
-Mn & science-critical & $6.2\times10^{8}$ & $2.6\times10^{9}$ \\
-Ni & science-critical & $1.5\times10^{8}$ & $1.1\times10^{8}$ \\
-Fe & iron            & $2.6\times10^{7}$ & $1.9\times10^{7}$ \\
-Si, S, Ar, Ca & $\alpha$ & $1.2$--$6.3\times10^{8}$ & $0.6$--$17\times10^{8}$ \\
-$kT$ / $T_{\rm mean}$ & thermal & $3.5\times10^{9}$ & $2.4\times10^{8}$ \\
-$T_\sigma$ (DEM) & thermal & --- & $3.4\times10^{7}$ \\
-$\sigma_v$ & nuisance & $4.5\times10^{7}$ & $3.0\times10^{7}$ \\
-$\nh$     & nuisance & $1.8\times10^{7}$ & $1.1\times10^{8}$ \\
-$Y$ (norm) & nuisance & $3.6\times10^{7}$ & $4.3\times10^{7}$ \\
+Cr & science-critical & $5.0\times10^{8}$ & $7.4\times10^{8}$
+                      & $8.8\times10^{8}$ & $1.1\times10^{9}$ \\
+Mn & science-critical & $2.0\times10^{8}$ & $2.1\times10^{8}$
+                      & $7.5\times10^{8}$ & $6.4\times10^{8}$ \\
+Ni & science-critical & $\mathbf{9.0\times10^{7}}$ & $7.8\times10^{7}$
+                      & $5.1\times10^{7}$ & $4.2\times10^{7}$ \\
+Fe & iron             & $3.0\times10^{12}$ & $2.1\times10^{7}$
+                      & $1.0\times10^{8}$ & $1.2\times10^{7}$ \\
+Si & $\alpha$ & $1.9\times10^{9}$ & $1.8\times10^{9}$
+              & $3.6\times10^{8}$ & $1.4\times10^{8}$ \\
+S  & $\alpha$ & $2.2\times10^{10}$ & $2.0\times10^{12}$
+              & $1.0\times10^{8}$ & $4.3\times10^{7}$ \\
+Ar & $\alpha$ & $2.3\times10^{8}$ & $1.8\times10^{8}$
+              & $2.3\times10^{8}$ & $1.1\times10^{8}$ \\
+Ca & $\alpha$ & $3.1\times10^{10}$ & $4.4\times10^{9}$
+              & $3.7\times10^{8}$ & $8.7\times10^{8}$ \\
+$kT$ / $T_{\rm mean}$ & thermal & $2.6\times10^{8}$ & $3.1\times10^{8}$
+                                & $1.3\times10^{8}$ & $3.7\times10^{7}$ \\
+$T_\sigma$ (DEM) & thermal & --- & ---
+                 & $\mathbf{2.3\times10^{7}}$ & $1.1\times10^{7}$ \\
+$\sigma_v$ & nuisance & $1.1\times10^{8}$ & $5.2\times10^{8}$
+                      & $1.4\times10^{8}$ & $2.8\times10^{8}$ \\
+$\nh$      & nuisance & $4.2\times10^{8}$ & $2.0\times10^{8}$
+                      & $2.2\times10^{8}$ & $5.5\times10^{7}$ \\
+$Y$ (norm) & nuisance & $1.7\times10^{9}$ & $1.7\times10^{8}$
+                      & $6.0\times10^{7}$ & $1.9\times10^{7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Emulator systematic bias in units of the $1\sigma$ statistical error,
+$\sqrt{N/N_\star}$ (Eq.~\ref{eq:biasratio}), at four in-band count levels, for
+the \textbf{unmasked} configuration. This is Table~\ref{tab:hotfloor} expressed
+on the scale that matters for interpretation. The first column is a realistic
+XRISM region and the second a deep stacked core; $10^{7}$--$10^{8}$ are shown to
+locate the regime where the floor becomes visible (relevant to NewAthena, not
+XRISM). Binding parameters in bold. Values are \emph{linearised} and should be
+scaled up by the $1.5$--$3\times$ factor of Sec.~\ref{sec:readnstar} to bound
+the true offset.}
+\label{tab:biassigma}
+\begin{tabular}{lcccc|cccc}
+\toprule
+& \multicolumn{4}{c|}{single-$T$} & \multicolumn{4}{c}{Gaussian DEM} \\
+Parameter & $4{\times}10^4$ & $10^6$ & $10^7$ & $10^8$
+          & $4{\times}10^4$ & $10^6$ & $10^7$ & $10^8$ \\
+\midrule
+Si       & 0.00 & 0.02 & 0.07 & 0.23 & 0.01 & 0.05 & 0.17 & 0.53 \\
+S        & 0.00 & 0.01 & 0.02 & 0.07 & 0.02 & 0.10 & 0.31 & 0.98 \\
+Ar       & 0.01 & 0.07 & 0.21 & 0.67 & 0.01 & 0.07 & 0.21 & 0.66 \\
+Ca       & 0.00 & 0.01 & 0.02 & 0.06 & 0.01 & 0.05 & 0.16 & 0.52 \\
+Cr       & 0.01 & 0.04 & 0.14 & 0.45 & 0.01 & 0.03 & 0.11 & 0.34 \\
+Mn       & 0.01 & 0.07 & 0.22 & 0.70 & 0.01 & 0.04 & 0.12 & 0.36 \\
+Fe       & 0.00 & 0.00 & 0.00 & 0.01 & 0.02 & 0.10 & 0.32 & 1.00 \\
+\textbf{Ni} & 0.02 & \textbf{0.11} & 0.33 & 1.06
+            & 0.03 & 0.14 & 0.44 & 1.41 \\
+$kT$ / $T_{\rm mean}$ & 0.01 & 0.06 & 0.18 & 0.57
+                      & 0.02 & 0.09 & 0.28 & 0.87 \\
+\textbf{$T_\sigma$}   & --- & --- & --- & ---
+                      & 0.04 & \textbf{0.21} & 0.66 & 2.08 \\
+$\sigma_v$ & 0.02 & 0.10 & 0.30 & 0.96 & 0.02 & 0.09 & 0.27 & 0.86 \\
+$\nh$      & 0.01 & 0.05 & 0.15 & 0.49 & 0.01 & 0.07 & 0.21 & 0.67 \\
+$Y$ (norm) & 0.00 & 0.02 & 0.08 & 0.24 & 0.03 & 0.13 & 0.41 & 1.29 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.72\textwidth]{../inference_demo/hot_floor/results/bias_vs_counts.png}
+\includegraphics[width=\textwidth]{figures/bias_vs_counts_nomask.png}
 \caption{Systematic emulator bias relative to the Poisson statistical error,
 $|b_{\rm sys}|/\sigma_{\rm stat}$, versus in-band counts for each fitted
-parameter (left: single-$T$; right: Gaussian DEM). Each line has slope $1/2$ and crosses unity
-(``bias $=$ noise'', dotted) at $N_\star$; vertical guides mark a realistic XRISM
-region and a deep stacked core. All parameters sit far below unity at realistic
-exposures.}
+parameter (left: single-$T$; right: Gaussian DEM), with the real Resolve
+RMF$+$ARF and \emph{without} the Fe\,XXV mask (\S\ref{sec:mask}). Each line has
+slope $1/2$ and crosses unity (``bias $=$ noise'', dotted) at $N_\star$;
+vertical guides mark a realistic XRISM region and a deep stacked core. All
+parameters sit below unity at both anchors. Nickel (purple) binds in the
+single-$T$ panel, where iron drops off the bottom of the plot because restoring
+the Fe\,XXV complex cancels its bias almost entirely; in the DEM panel the DEM
+width $T_\sigma$ (grey dashed, uppermost) binds. Note the square-root scaling:
+the wide margin in \emph{counts} at the anchors corresponds to a much narrower
+margin in $\sigma$ (Table~\ref{tab:biassigma}).}
 \label{fig:hotfloor}
 \end{figure}
 
+\subsection{The Fe\,XXV mask, and why both configurations are
+reported}\label{sec:mask}
+The XRISM/Resolve Perseus analysis excludes $6.567$--$6.620\kev$ from the fit.
+The window is specified in the \emph{observed} frame, and at Perseus's
+$z=0.017284$ it corresponds to $6.681$--$6.734\kev$ in the rest frame: it
+covers the Fe\,XXV He-$\alpha$ resonance line $w$ ($6.7004\kev$) and the
+intercombination line $x$ ($6.6824\kev$), while retaining $y$ ($6.6675\kev$)
+and the forbidden line $z$ ($6.6366\kev$). Masking $w$ while keeping $z$ is the
+signature of a \emph{resonance-scattering} cut: $w$ is optically thick in the
+cluster core, so its photons are scattered out of the line of sight and its
+flux redistributed, and an optically thin CIE model cannot reproduce it. The
+$w/z$ ratio is itself the standard resonance-scattering diagnostic.
+
+That justification does not transfer to the experiment of this section. Here
+the observation is \emph{simulated} from \code{SpexTruthModel} and fitted with
+the emulator, and both are optically thin CIE: resonance scattering is absent
+from the truth and from the model alike. The mask therefore corrects no
+mismatch---the mismatch it exists to remove cannot arise---and its only effect
+is to delete channels. Since those channels are the brightest Fe-K feature in
+the band, deleting them is not a neutral act.
+
+It is worth separating two things that both travel under the name ``literature
+strategy''. The \emph{parametrisation}---which elements are freed and which are
+tied to fitted iron---must be reproduced, because it governs how emulator error
+propagates into the reported parameters, and it is the reason the weakest
+emulated metals (Ti, Co, Cu, Zn) leak so little. The \emph{band mask} is a
+different kind of choice: a defence against un-modelled source physics. The
+first belongs in any emulator-bias measurement; the second belongs only where
+the goal is to reproduce a published analysis.
+
+We therefore report both configurations, and treat the unmasked one as
+primary. The comparison is not a formality, because the choice moves the
+result more than the ARF correction did:
+
+\begin{itemize}
+\item In the single-temperature fit, \emph{iron's bias almost vanishes} when
+the complex is restored: $b_{\rm sys}$ falls from $+1.04\times10^{-3}$ to
+$-2.1\times10^{-6}$, a factor of ${\sim}500$ with a sign reversal, and
+$N_\star$ rises from $2.1\times10^{7}$ to $3.0\times10^{12}$. The emulator's
+residual across the Fe\,XXV complex \emph{opposes} its residual elsewhere in
+the band, so including those channels cancels most of the iron bias; the mask
+had removed the cancelling half. The binding parameter consequently changes
+from Fe to Ni, and the worst $N_\star$ improves by a factor of four
+($2.1\times10^{7}\to9.0\times10^{7}$). \emph{This cancellation is specific to
+the Perseus abundance pattern and must not be read as an emulator property}:
+across the 20-point sweep of Sec.~\ref{sec:biassweep} iron's unmasked
+$N_\star$ has median $3.6\times10^{7}$ and maximum $3.4\times10^{9}$, so the
+Perseus value sits three orders of magnitude above the sweep maximum.
+\item In the DEM fit the effect is milder and more uniform---mostly factors of
+two to four, with no sign reversals---and $T_\sigma$ remains binding, its
+$N_\star$ rising from $1.1\times10^{7}$ to $2.3\times10^{7}$.
+\item The unweighted residual is unchanged ($13.77\%$ versus $13.81\%$). Nothing
+about the emulator differs between the two runs; only the projection of a fixed
+residual onto the parameters does.
+\end{itemize}
+
+Two consequences follow. First, the unmasked configuration is the more
+\emph{favourable} one, not the more conservative one---the opposite of what one
+would guess from the emulator's line-head error being largest at K-shell
+complexes, which is a property established for the poorly-emulated heavy metals
+(Ti, Zn) and does not generalise to iron, one of the better-trained elements.
+Second, because the mask relocates the binding parameter and can reverse the
+sign of a bias, any quoted $N_\star$ is meaningless without stating which
+configuration produced it.
+
+For that reason the mask is no longer a default anywhere in the code.
+\code{campaign.band\_mask} takes \code{exclude} as a required keyword-only
+argument, with named constants \code{EXCLUDE\_PERSEUS\_LITERATURE} and
+\code{EXCLUDE\_NONE}; the reproduction experiments select the former and the
+characterisation experiments the latter, each at its own call site. It had
+previously been a module-level default inherited by all ten call sites, which
+is how a source-specific astrophysical decision came to sit inside
+measurements of emulator error without having been chosen. Finally, the window
+is observed-frame and is only meaningful because every experiment currently
+fixes $z$ at Perseus's value; a sweep that varies redshift would need it
+recomputed in the rest frame per point, or dropped.
+
 \paragraph{Caveats and status.} The result is broadening dependent: the
-counts-weighted residual rises from $0.077\%$ at $\sigma_v=180\kms$ to $5.4\%$ at
-$\sigma_v=0$, so cold, quiet sources are the harder case and are being mapped with
-a dedicated low-broadening stress run. The biases above are the linearised
-(infinite-count) limit; a direct \code{emcee} counts scan near $N_\star$---where
-the systematic offset reaches $\sim1\sigma$ and becomes directly detectable---is
-carried out on the cluster (\code{mcmc\_check.py}; the Poisson likelihood cost is
-independent of the simulated counts) and is reported next. Both single-$T$ and
-Gaussian-DEM Fisher results are reported above and agree; the DEM emulator
+counts-weighted residual rises from $0.083\%$ at $\sigma_v=180\kms$ to $7.0\%$ at
+$\sigma_v=0$, a factor of $84$, so cold, quiet sources are the harder case and are
+being mapped with a dedicated low-broadening stress run. The biases above are the
+linearised (infinite-count) limit; a direct \code{emcee} counts scan near
+$N_\star$---where the systematic offset reaches $\sim1\sigma$ and becomes directly
+detectable---is carried out on the cluster (\code{mcmc\_check.py}; the Poisson
+likelihood cost is independent of the simulated counts). The DEM emulator
 temperature grid is held within the training range ($\geq0.7\kev$) to avoid
 PCHIP extrapolation of the SPEX truth.
 
-\paragraph{MCMC cross-check.} The linearised bias was validated against a direct
+\paragraph{Response provenance.} Every number in this section was recomputed on
+2026-09-01 against the real XRISM/Resolve ARF. The earlier version of this
+section was computed with a \emph{flat unit effective area}---the historical
+default of \code{Response}, since removed---and all of its values are withdrawn.
+The correction is not cosmetic. The residual itself is ARF-independent, since
+$d/\mu-1$ is a ratio in which a common multiplicative area cancels (the
+unweighted RMS is unchanged at $13.8\%$), but the channel weighting inside $s$
+and $F$ is not, and individual $N_\star$ moved by factors between $0.09$ and
+$3\times10^{3}$. Three specific corrections are worth recording. The
+science-critical Cr, Mn and Ni each \emph{lost} a factor of $2$--$5$ in margin;
+the sign of $b_{\rm sys}$ for $kT$ reversed, which weakens the sign-agreement
+evidence quoted in the cross-check below; and the previously tabulated $\nh$ row
+was numerically degenerate ($b_{\rm sys}=-3.8\times10^{19}$,
+$\sigma_{\rm ref}=5.1\times10^{20}$, a finite ratio of two meaningless numbers),
+because absorption is constrained almost entirely in the soft band---precisely
+where a flat area misrepresents a gate-valve-closed instrument---leaving $F$
+near-singular along that direction. The severity is quantifiable after the
+fact: since $\mathrm{cond}(F)\geq\max_i F^{-1}_{ii}/\min_i F^{-1}_{ii}$ for a
+symmetric positive-definite matrix, the withdrawn run's spread of variances
+implies $\mathrm{cond}(F)\gtrsim8\times10^{45}$---beyond the range in which a
+\code{float64} solve carries any significant figures at all, and $38$ orders of
+magnitude above the $3.2\times10^{7}$ of the ARF-folded run.
+
+We therefore now compute and record $\mathrm{cond}(F)$ alongside every
+$b_{\rm sys}$, and flag any point exceeding $10^{10}$. The motivation is
+specific to the sweep of Sec.~\ref{sec:biassweep}: a near-singular $F$ leaves
+the \emph{ratio} $\sigma_{\rm stat}/|b_{\rm sys}|$, and hence $N_\star$, finite
+and entirely plausible-looking while both quantities are individually
+meaningless, so over hundreds of unattended points there would otherwise be
+nothing to distinguish a degenerate direction from a well-measured one.
+
+\paragraph{MCMC cross-check.} \emph{The results in this paragraph predate the
+ARF correction above and are reported as provisional.} They were computed with
+the same flat unit effective area, so the offsets, the figure and the
+$1.5$--$3\times$ factor all await recomputation; the $kT$ sign reversal noted
+above means the ``$10$ of $11$ signs matched'' agreement was in part scored
+against a prediction that has since changed. The redo is folded into the
+multi-seed maximum-likelihood study (Sec.~\ref{sec:biassweep}), which measures
+the same linearisation factor from many Poisson realisations rather than one,
+and therefore supersedes rather than repeats this check. The description is
+retained because the method and its conclusions about the \emph{direction} of
+the effect are expected to survive.
+
+The linearised bias was validated against a direct
 \code{emcee} fit at three in-band count levels ($4\times10^4$, $10^6$, $10^8$),
 with a walker-batched GPU forward (\code{gpu\_forward.py}, \code{emcee}
 \code{vectorized}). The run uses the production acceleration (TF32 tensor-core
@@ -536,7 +810,7 @@ matmul $+$ float32 continuum FFT, ${\sim}3\times$ faster with a ${\sim}10^{-3}$
 accuracy cost, below the emulator's own error). All chains are stationary and
 unimodal ($\tau\!\approx\!35$--$44$, ESS ${\sim}800$), and the
 posterior-predictive residuals are consistent with $\mathcal N(0,1)$ with no
-structure at the line complexes. Fig.~\ref{fig:crosscheck} overlays the recovered
+structure at the line complexes. The check overlays the recovered
 offsets $(\mathrm{median}-\mathrm{truth})/\sigma$ on the analytic prediction
 $|b_{\rm sys}|/\sigma_{\rm stat}(N)$. At the realistic count levels the predicted
 bias is $0.01$--$0.25\sigma$ while the observed offsets are pure statistical
@@ -546,8 +820,8 @@ real observation---the bias emerges, in the \emph{predicted direction}: the sign
 of the recovered offset matches $b_{\rm sys}$ for $10$ of the $11$ parameters. Its
 \emph{magnitude} runs a factor ${\sim}1.5$--$3$ above the first-order
 $b_{\rm sys}$. A dedicated float64 run (TF32/FFT acceleration off) reproduces the
-accelerated offsets to ${\lesssim}0.3\sigma$ (Fig.~\ref{fig:crosscheck}, open
-squares), so the excess is \emph{not} an acceleration artefact---it is the
+accelerated offsets to ${\lesssim}0.3\sigma$, so the excess is \emph{not} an
+acceleration artefact---it is the
 first-order linearisation underestimating the true maximum-likelihood bias
 (compounded by single-realisation scatter). The implied true $N_\star$ are then a
 factor of a few below Table~\ref{tab:hotfloor}, but still ${\gtrsim}10^7$ in-band
@@ -556,9 +830,15 @@ counts, and the science-critical Cr/Mn/Ni retain small offsets even at $10^8$
 production acceleration is confirmed science-safe (${\lesssim}0.3\sigma$ at
 $10^8$). A multi-seed scan would pin the linearisation factor precisely.
 
+% WITHDRAWN 2026-09-01 (P1a): crosscheck_overlay.png was generated with a flat
+% unit effective area and its offsets are not valid against the ARF-folded
+% Table~\ref{tab:hotfloor}. Restore this block, with a regenerated figure, once
+% the multi-seed MLE study of Sec.~\ref{sec:biassweep} supersedes it. The
+% caption is kept verbatim so the redo has a specification to hit.
+\iffalse
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.68\textwidth]{../inference_demo/hot_floor/results/crosscheck_overlay.png}
+\includegraphics[width=0.68\textwidth]{figures/crosscheck_overlay.png}
 \caption{MCMC cross-check: recovered posterior offsets
 $|\mathrm{median}-\mathrm{truth}|/\sigma$ (points) at three in-band count levels,
 overlaid on the analytic linearised-bias prediction (lines) from
@@ -570,6 +850,7 @@ coincide with the accelerated points, confirming the acceleration is negligible.
 The science-critical Cr/Mn/Ni and Fe are emphasised.}
 \label{fig:crosscheck}
 \end{figure}
+\fi
 
 \paragraph{Outlook: NewAthena.} The $0.1\%$ floor is comfortably safe for XRISM,
 whose bright-cluster spectra ($\sim4\times10^4$ counts per region, $\sim10^6$ in a
@@ -658,54 +939,92 @@ $Z$'s own (emulator $-$ truth) in-band residual was computed on the shared
 channel grid, then combined two ways -- the actual coherent sum (what the
 science literally sees) and a hypothetical quadrature combination (what $N$
 independent errors of the same per-element magnitudes would give. The ratio
-of the two came out $1.00$--$1.04$ across all four points, indistinguishable
-from $1$ and far from $\sqrt{30}=5.5$: the 30 elements' emulator errors behave
-as independent noise, not a coherent same-direction bias. This is a
-reassuring, not a load-bearing, result -- it rules out the scenario where the
-sweep below would understate the true bias by under-weighting a systematic
-that pervades every element -- and it is consistent with the counts-weighted
-residual figures already on record (${\sim}0.08$--$0.11\%$ here,
-${\sim}0.077\%$ in Sec.~\ref{sec:hotfloor} at the Perseus fiducial).
+of the two came out $0.98$--$1.04$ (median $1.02$) across all four points,
+indistinguishable from $1$ and far from $\sqrt{30}=5.5$: the 30 elements'
+emulator errors behave as independent noise, not a coherent same-direction
+bias. This is a reassuring, not a load-bearing, result -- it rules out the
+scenario where the sweep below would understate the true bias by
+under-weighting a systematic that pervades every element -- and it is
+consistent with the counts-weighted residual figures already on record
+(${\sim}0.086$--$0.12\%$ here, ${\sim}0.083\%$ in Sec.~\ref{sec:hotfloor} at
+the Perseus fiducial). The check was run without the Fe\,XXV mask
+(\S\ref{sec:mask}); repeating it with the mask changes the ratio range only to
+$1.00$--$1.04$, so unlike the $N_\star$ values of Sec.~\ref{sec:hotfloor} this
+conclusion is insensitive to that choice --- as expected, since it compares two
+combinations of the \emph{same} per-element residuals rather than projecting
+them onto fitted parameters.
 
 \paragraph{Results (first sweep, single-temperature, $n=20$).} A 20-point
 Latin-hypercube sweep over the full range above (\code{--seed 3}) gives Table
-\ref{tab:biassweep}, evaluated at $10^{6}$ in-band counts. Every parameter
-stays below $1\sigma$ at every sampled point (\code{frac>1}$=0$ throughout);
-the single worst instance across the whole sweep is $0.95\sigma$ on
-$\mathrm{Fe}$, at a point with $\sigma_v=267\kms$ and a low-$\mathrm{Ca}$
-($0.23\,\zsun$), high-$\mathrm{S}$/$\mathrm{Cr}$/$\mathrm{Mn}$ abundance
-pattern. $kT$ carries the largest \emph{typical} offset (median
-$0.33\sigma$, median $N_\star=9.0\times10^{6}$) -- still an order of
+\ref{tab:biassweep}, evaluated at $10^{6}$ in-band counts and computed without
+the Fe\,XXV mask (\S\ref{sec:mask}). Every parameter stays below $1\sigma$ at
+every sampled point (\code{frac>1}$=0$ throughout, in both the masked and
+unmasked reductions); the single worst instance across the whole sweep is
+$0.83\sigma$ on $\sigma_v$, at a cool ($kT=2.6\kev$), quiet
+($\sigma_v=37\kms$), high-$\nh$ point with an unusually low
+$\mathrm{Cr}$ ($0.39\,\zsun$) against near-maximal $\mathrm{S}$, $\mathrm{Ar}$
+and $\mathrm{Mn}$. $kT$ carries the largest \emph{typical} offset (median
+$0.31\sigma$, median $N_\star=1.0\times10^{7}$) -- still two orders of
 magnitude above a realistic single-region XRISM exposure
 (${\sim}4\times10^{4}$) -- with every other parameter's median $N_\star$ at
-least $3.6\times10^{7}$. This is a screen over 20 of the combinatorially many
-points in a 12-dimensional box, not an exhaustive map; the sweep is designed
-to be extended cheaply (Sec.~\ref{sec:fisherbias}'s cost argument) rather than
-run once.
+least $3.6\times10^{7}$.
+
+\paragraph{The Perseus iron cancellation does not generalise.} The
+single-point hot-floor run showed iron's bias almost vanishing once the
+Fe\,XXV complex is restored, $N_\star$ rising from $2.1\times10^{7}$ to
+$3.0\times10^{12}$ (\S\ref{sec:mask}). The sweep shows that this is a property
+of the Perseus abundance pattern and not of the emulator. Across the 20 sampled
+points iron's unmasked $N_\star$ runs from $1.9\times10^{6}$ to
+$3.4\times10^{9}$ with a median of $3.6\times10^{7}$ --- the Perseus fiducial
+sits three orders of magnitude above the sweep \emph{maximum}. Per point, the
+gain from unmasking has median $1.6\times$ and reaches $97\times$ at its most
+extreme, against $1.4\times10^{5}$ at Perseus. The cancellation between the
+emulator's Fe\,XXV residual and its residual elsewhere in the band is therefore
+finely tuned to one abundance pattern, and the Perseus iron figure must not be
+read as representative. This is precisely the kind of single-point artifact the
+sweep exists to catch, and it is an argument for quoting sweep distributions
+rather than fiducial-point values wherever both are available.
+
+\paragraph{Caveat on the sub-$1\sigma$ headline.} \code{frac>1}$=0$ describes
+the \emph{linearised} screen. Applying Sec.~\ref{sec:readnstar}'s
+$1.5$--$3\times$ correction to the worst sampled instances puts $\sigma_v$ at
+$1.2$--$2.5\sigma$ and $\mathrm{Fe}$ at $1.1$--$2.2\sigma$, so the correct
+statement is that no point exceeds $1\sigma$ \emph{as linearised}, while the
+tail of the distribution plausibly does once the linearisation is corrected.
+Those are exactly the points Tier C should confirm.
+
+This is a screen over 20 of the combinatorially many points in a 12-dimensional
+box, not an exhaustive map; the sweep is designed to be extended cheaply
+(Sec.~\ref{sec:fisherbias}'s cost argument) rather than run once.
 
 \begin{table}[t]
 \centering
 \caption{Linearised bias/statistical-error ratio $|b_{\rm sys}|/\sigma_{\rm
 stat}$ at $10^{6}$ in-band counts, over a 20-point Latin-hypercube sweep of
-the cluster science range (single-temperature). \code{frac>1} is the fraction
-of the 20 points exceeding $1\sigma$.}
+the cluster science range (single-temperature), with and without the Fe\,XXV
+mask (\S\ref{sec:mask}). \code{frac>1} is the fraction of the 20 points
+exceeding $1\sigma$; it is zero for every parameter under both reductions.
+Unlike the single-point results of Table~\ref{tab:hotfloor}, the sweep is only
+mildly sensitive to the mask --- no parameter's median moves by more than a
+factor ${\sim}1.5$, and the ordering is essentially preserved.}
 \label{tab:biassweep}
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrr|rrr}
 \toprule
-param & median & p90 & max & frac$>$1 & median $N_\star$ \\
+& \multicolumn{3}{c|}{unmasked} & \multicolumn{3}{c}{masked} \\
+param & median & max & median $N_\star$ & median & max & median $N_\star$ \\
 \midrule
-Si       & 0.014 & 0.038 & 0.120 & 0.00 & $4.9\times10^{9}$ \\
-S        & 0.031 & 0.069 & 0.103 & 0.00 & $1.0\times10^{9}$ \\
-Ar       & 0.039 & 0.099 & 0.159 & 0.00 & $6.6\times10^{8}$ \\
-Ca       & 0.057 & 0.137 & 0.183 & 0.00 & $3.2\times10^{8}$ \\
-Cr       & 0.024 & 0.091 & 0.129 & 0.00 & $1.9\times10^{9}$ \\
-Mn       & 0.029 & 0.093 & 0.205 & 0.00 & $1.2\times10^{9}$ \\
-Fe       & 0.209 & 0.511 & 0.954 & 0.00 & $2.6\times10^{7}$ \\
-Ni       & 0.112 & 0.224 & 0.255 & 0.00 & $8.2\times10^{7}$ \\
-$kT$     & 0.334 & 0.513 & 0.746 & 0.00 & $9.0\times10^{6}$ \\
-$\sigma_v$ & 0.056 & 0.329 & 0.715 & 0.00 & $3.2\times10^{8}$ \\
-$\nh$    & 0.093 & 0.242 & 0.346 & 0.00 & $1.1\times10^{8}$ \\
-$\log(\text{norm})$ & 0.168 & 0.283 & 0.508 & 0.00 & $3.6\times10^{7}$ \\
+Si       & 0.013 & 0.123 & $5.7\times10^{9}$ & 0.014 & 0.120 & $4.9\times10^{9}$ \\
+S        & 0.022 & 0.103 & $2.1\times10^{9}$ & 0.031 & 0.103 & $1.0\times10^{9}$ \\
+Ar       & 0.026 & 0.132 & $1.6\times10^{9}$ & 0.039 & 0.159 & $6.6\times10^{8}$ \\
+Ca       & 0.088 & 0.170 & $1.3\times10^{8}$ & 0.057 & 0.183 & $3.2\times10^{8}$ \\
+Cr       & 0.024 & 0.130 & $1.9\times10^{9}$ & 0.024 & 0.129 & $1.9\times10^{9}$ \\
+Mn       & 0.032 & 0.181 & $1.0\times10^{9}$ & 0.029 & 0.205 & $1.2\times10^{9}$ \\
+Fe       & 0.167 & 0.725 & $3.6\times10^{7}$ & 0.209 & 0.954 & $2.6\times10^{7}$ \\
+Ni       & 0.107 & 0.257 & $8.8\times10^{7}$ & 0.112 & 0.255 & $8.2\times10^{7}$ \\
+$kT$     & 0.312 & 0.657 & $1.0\times10^{7}$ & 0.334 & 0.746 & $9.0\times10^{6}$ \\
+$\sigma_v$ & 0.064 & 0.833 & $2.5\times10^{8}$ & 0.056 & 0.715 & $3.2\times10^{8}$ \\
+$\nh$    & 0.118 & 0.314 & $7.2\times10^{7}$ & 0.093 & 0.346 & $1.1\times10^{8}$ \\
+$\log(\text{norm})$ & 0.133 & 0.508 & $5.7\times10^{7}$ & 0.168 & 0.508 & $3.6\times10^{7}$ \\
 \bottomrule
 \end{tabular}
 \end{table}

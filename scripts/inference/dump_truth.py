@@ -18,7 +18,7 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 from campaign import (                                       # noqa: E402
-    injected_abundances, find_xrism_response, band_mask, TruthConfig,
+    injected_abundances, find_xrism_response, band_mask, EXCLUDE_PERSEUS_LITERATURE, TruthConfig,
     stream_truth_counts, gaussian_dem, resolve_perseus)
 from spexai.config import STORE, RESULTS                      # noqa: E402
 from spexai.inference.response import Response               # noqa: E402
@@ -40,7 +40,7 @@ def main():
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     absorption = Absorption.default()
-    keep = band_mask(response)
+    keep = band_mask(response, exclude=EXCLUDE_PERSEUS_LITERATURE)
     emu = JointOperatorModel(models_dir=STORE, device="cpu")   # for element set
     dem, dem_p = (gaussian_dem() if args.mode == "dem" else (None, {}))
 
