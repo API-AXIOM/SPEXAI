@@ -243,6 +243,30 @@ class JointOperatorModel:
         self.accel = (enable_inference_acceleration(self.models.values(), device)
                       if accelerate else [])
         self._batched = None
+        # Validity box, intersected over the loaded elements: outside it the
+        # operators extrapolate, which has never been tested and will not be
+        # (D.H., 2026-09-01) -- so it is made unreachable instead. Buffers are
+        # log10 of keV.
+        self.temp_range = (max(10.0 ** float(m.t_lo) for m in self.models.values()),
+                           min(10.0 ** float(m.t_hi) for m in self.models.values()))
+        self.energy_range = (
+            max(10.0 ** float(m.x_lo) for m in self.models.values()),
+            min(10.0 ** float(m.x_hi) for m in self.models.values()))
+
+    def check_temperature(self, temp_kev):
+        """Raise if any temperature falls outside the trained range."""
+        t = torch.as_tensor(temp_kev, dtype=torch.float64).reshape(-1)
+        lo, hi = self.temp_range
+        # a hair of tolerance: t_lo/t_hi are float32 buffers, so a caller that
+        # legitimately asks for the endpoint can land 1e-7 outside it
+        bad = (t < lo * (1 - 1e-6)) | (t > hi * (1 + 1e-6))
+        if bool(bad.any()):
+            raise ValueError(
+                f"temperature outside the emulator's trained range "
+                f"[{lo:.4f}, {hi:.4f}] keV: "
+                f"{t[bad].tolist()[:5]}{' ...' if int(bad.sum()) > 5 else ''}. "
+                f"The emulator is not validated outside its training box and "
+                f"will not extrapolate.")
 
     @property
     def batched(self):
@@ -273,6 +297,7 @@ class JointOperatorModel:
         """
         temp_kev = torch.as_tensor(temp_kev, dtype=torch.float32,
                                    device=self.device).view(-1)
+        self.check_temperature(temp_kev)
         bin_edges = torch.as_tensor(bin_edges, dtype=torch.float32,
                                     device=self.device)
         total = torch.zeros((temp_kev.numel(), bin_edges.numel() - 1),

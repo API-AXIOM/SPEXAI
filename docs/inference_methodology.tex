@@ -127,17 +127,96 @@ the OGIP ARF. These constants live in \code{spexai.inference.units}. $Y$ and $D$
 are perfectly degenerate in a single spectrum, so $D$ is supplied fixed (from the
 known redshift/distance) and $Y$ is fitted.
 
-\paragraph{Validation against SPEX.} We installed SPEX (SPEXACT 2.07, native
-Apple-Silicon conda build) and compared the emulator's \emph{absolute} flux to a
-SPEX \code{cie} spectrum at $T=4\kev$, $Y=1$, $D=D_{\rm ref}$
-(\code{scripts/validate\_spex\_norm.py}). The emulator reproduces SPEX to a
-median $\sim2.5\%$ across the $3$--$8\kev$ continuum (ratio $0.99$ at $2$--$5\kev$,
-falling to $0.95$ at $8\kev$). This confirms the flux units
-($\mathrm{ph\,s^{-1}\,m^{-2}\,bin^{-1}}$, hence $u_{\rm A}=10^{-4}$), $Y_{\rm
-ref}=1$ and $D_{\rm ref}=10^{22}\,\mathrm{m}$ -- there is no order-of-magnitude
-unit error. The mild high-energy deficit is the expected signature of the
-present model covering only 16 of 30 elements (SPEX's additional metals add
-continuum), and should shrink with the full 30-element model.
+\paragraph{Validation against SPEX.} We installed SPEX (3.08.03, SPEXACT
+2.07.00, native Apple-Silicon conda build) and compared the emulator's
+\emph{absolute} flux to SPEX \code{cie} spectra at $Y=1$, $D=D_{\rm ref}$,
+Lodders et al.\ (2009) abundances and the Urdampilleta et al.\ (2017)
+ionisation balance (\code{scripts/inference/validate\_spex\_norm.py}). The
+comparison is made on the emulator's own native $24{,}212$-bin grid --- SPEX is
+handed those bin boundaries directly via \code{egrid\_set}, so no interpolation
+enters --- at six temperatures spanning the training range. Summing all thirty
+elements at solar abundance, the ratio of integrated flux over the fit band
+($1.9$--$12\kev$) is
+\begin{center}
+\begin{tabular}{lcccccc}
+\hline
+$T$ [keV] & 0.7 & 1 & 2 & 4 & 8 & 16 \\
+emulator/SPEX & 1.043 & 1.037 & 1.014 & 1.007 & 1.003 & 0.9995 \\
+median per bin & 1.016 & 1.002 & 1.002 & 1.002 & 1.003 & 1.002 \\
+\hline
+\end{tabular}
+\end{center}
+The per-bin median is $0.2\%$ everywhere above $1\kev$: the continuum
+normalisation is right, and the larger flux-weighted numbers are carried by a
+small number of high-flux (line) bins at the cooler temperatures. This confirms
+the flux units ($\mathrm{ph\,s^{-1}\,m^{-2}\,bin^{-1}}$, hence $u_{\rm
+A}=10^{-4}$), $Y_{\rm ref}=1$ and $D_{\rm ref}=10^{22}\,\mathrm{m}$.
+
+This supersedes an earlier measurement of $\sim2.5\%$ at $T=4\kev$ made with
+only 16 of 30 elements trained and on a coarse 2001-bin logarithmic grid. That
+text attributed the deficit to the missing metals' continuum, and the
+attribution was correct: with all thirty elements the $4\kev$ figure falls to
+$0.7\%$. The caveat is withdrawn.
+
+\paragraph{The composition error of a linear element sum.} The emulator adds
+elements linearly, which is exact for CIE emissivities only if the electron
+density is held fixed. SPEX can be asked the same question about itself: the
+sum of thirty single-element \code{cie} runs, divided by one full \code{cie}
+run, is $1.0049$, $1.0032$, $1.0010$, $1.0006$, $1.0005$, $1.00006$ at the six
+temperatures above. This is a floor on the architecture, independent of
+training: no amount of per-element accuracy removes it. It is well below the
+emulator's own error at every temperature, and below $0.1\%$ for $T\ge2\kev$,
+but it should be quoted whenever a sub-percent claim is made about the cool
+end.
+
+\paragraph{Provenance of the training spectra, and the free-bound accuracy
+setting.}\label{par:gacc} The script that generated the per-element training
+spectra predates this repository and is lost --- it appears in no branch of
+either repository, and the thesis that introduced the emulator records only
+that the (earlier, smaller) training set came from SPEX v3.07 --- so the SPEX
+settings behind the present cache were not recorded. They can be recovered by
+comparison
+(\code{scripts/inference/check\_training\_provenance.py}): each cached row is
+matched against a single-element \code{cie} run at exactly that row's
+temperature. Because hydrogen cannot be switched off (SPEX aborts with no
+electrons), element $Z$ alone is obtained as $\mathrm{cie}(\mathrm{H},Z) -
+\mathrm{cie}(\mathrm{H})$, both runs at the same temperature.
+
+Under SPEX's default settings, H, He, C, N, O, Ne, Na, Si and S reproduce bin
+for bin to $10^{-5}$ --- which fixes the abundance table (Lodders 2009) and
+confirms that the cache holds flux \emph{density} --- while eight elements
+missed by far more than the emulator's own error: at $T=1\kev$ the cached Ar,
+Ca and Ni spectra carried only $0.28$, $0.45$ and $0.13$ of the flux SPEX
+computes over $1.9$--$12\kev$. A further fifteen elements could not be compared
+at all, for a reason that turned out to be the more important half of the
+answer.
+
+Two settings are involved, neither recorded. The first is the \textbf{free-bound
+emission accuracy}: at \code{var gacc 0.01}, against a default near $10^{-3}$,
+Ar, Ca and Ni return to $1.00000$. A coarse free-bound setting is the natural
+choice when generating $\sim\!4\times10^{5}$ spectra. The ionisation balance is
+\emph{not} involved --- Arnaud \& Rothenflug, Bryans and Urdampilleta were all
+tested, and none accounts for the discrepancy.
+
+The second is the \textbf{SPEXACT version}. SPEXACT 2 computes only the
+fifteen-element MEKAL set; for the other fifteen it returns literally nothing,
+and setting titanium to $10^{4}$ times solar changes its output by exactly
+zero. The cached spectra for Sc, Ti, V, Cr, Mn, Co, Cu and Zn --- elements whose
+abundances this work fits and quotes --- therefore cannot have come from
+SPEXACT 2. Under full SPEXACT 3 with \code{var gacc 0.01}, Ti and Cr reproduce
+to $10^{-5}$, as do O, Ar, Ca and Ni. We conclude the training set was
+generated with full SPEXACT 3 at a loosened free-bound accuracy. A residual
+mismatch survives for Fe and Ni at $1\kev$, Mg at $4\kev$, and Mn at every
+temperature tried, so the recovery is not complete.
+
+Two consequences. First, the emulator emulates SPEX \emph{as configured for
+data generation}, not SPEX's default configuration, and at the cool end that
+distinction is the dominant discrepancy: the $4\%$ full-CIE offset at
+$0.7$--$1\kev$ in the table above is an order of magnitude larger than the
+emulator's own $0.2\%$ per-bin residual. Second, any independent SPEX truth
+(\S\ref{sec:truth}) must adopt both settings or measure the difference, or it
+will report the generation configuration as emulator error --- and under
+SPEXACT 2 it would silently supply zero truth for half the periodic table.
 
 \section{Independent SPEX ground truth}\label{sec:truth}
 To test the emulator for bias we need spectra \emph{not} produced by it.

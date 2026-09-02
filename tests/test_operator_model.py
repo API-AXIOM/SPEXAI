@@ -117,3 +117,26 @@ def test_redshift_changes_spectrum(fe_model, acis_response):
     c0 = fe_model.predict_counts(logz=-10.0, **args)          # z ~ 0
     cz = fe_model.predict_counts(logz=float(np.log10(0.3)), **args)  # z = 0.3
     assert not torch.allclose(c0, cz)
+
+
+# --- validity-range guard (P3b) --------------------------------------------
+
+def test_temp_range_matches_checkpoints(fe_model):
+    lo, hi = fe_model.temp_range
+    assert 0.50 < lo < 0.51 and 19.9 < hi < 20.0
+
+
+def test_flux_raises_below_training_range(fe_model, edges):
+    with pytest.raises(ValueError, match="outside the emulator's trained range"):
+        fe_model.flux(torch.tensor([0.4]), {}, 150.0, edges)
+
+
+def test_flux_raises_above_training_range(fe_model, edges):
+    with pytest.raises(ValueError, match="outside the emulator's trained range"):
+        fe_model.flux(torch.tensor([2.0, 25.0]), {}, 150.0, edges)
+
+
+def test_flux_allows_the_endpoints(fe_model, edges):
+    lo, hi = fe_model.temp_range
+    f = fe_model.flux(torch.tensor([lo, hi]), {}, 150.0, edges)
+    assert torch.isfinite(f).all()

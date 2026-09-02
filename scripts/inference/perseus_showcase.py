@@ -97,7 +97,11 @@ def run_single(truth, emu, response, absorption, args):
 def run_dem(truth, emu, response, absorption, args):
     logz = float(np.log10(PERSEUS["z"]))
     ab = metal_abundances(truth.elements, PERSEUS["Z"])
-    grid = td.TempGrid(0.5, 10.0, n=48)
+    # 0.5 keV sits just BELOW the per-element training floor (~0.5013 keV), so
+    # it now trips the emulator's validity guard; use the same PCHIP-safe floor
+    # the campaign uses (campaign.gaussian_dem), where the Gaussian carries
+    # negligible weight anyway.
+    grid = td.TempGrid(td.PCHIP_TRUTH_SAFE_LO_KEV, 10.0, n=48)
     dem = td.gaussian_T(grid)
     tp = {"T_mean": PERSEUS["dem_mean"], "T_sigma": PERSEUS["dem_sigma"]}
     w = dem.weights(tp)

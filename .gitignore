@@ -23,3 +23,6 @@ inference_demo/
 logs/
 sim_plots/
 docs/development_plots/
+
+# SPEX session scratch files (pyspex writes these into the working directory)
+spex???0000*.dum
