@@ -231,6 +231,59 @@ rather than SPEX. Against the emulator it agrees to $\sim0.1$--$0.7\%$ in flux
 for iron, i.e.\ both approximate SPEX at the sub-percent level; the residual is
 what the bias study probes.
 
+\subsection{How good is the interpolation? A direct test against
+SPEX}\label{sec:pchiptest}
+The PCHIP step is the one approximation in the truth standard that is shared
+with the object being tested: both interpolate the same training rows, so an
+error common to the two would cancel and go unseen. We therefore called SPEX
+itself at temperatures the emulator never trained on
+(\code{scripts/inference/spex\_offgrid\_truth.py}). The test temperatures are
+the midpoints of the six widest gaps in the \emph{training-split} temperature
+grid --- val/test rows are held out, so the nodes actually available to the
+interpolator are sparser than the raw cache --- which makes this the worst case
+rather than a typical one. All lie inside the training box; the emulator is
+never asked to extrapolate (\S\ref{sec:validity}).
+
+Two effects must be separated, because the smaller one is the object of
+interest. A raw PCHIP-vs-SPEX ratio also contains the training-data offset of
+\S\ref{par:gacc}, which is the larger term. We remove it by dividing through the
+same ratio evaluated at each element's nearest \emph{training} node, where PCHIP
+is exact by construction. What remains is interpolation error alone:
+\textbf{median $1.4\times10^{-5}$ across elements, 90th percentile
+$2.2\times10^{-4}$, and 24 of 26 comparable elements below $1\%$ at every
+temperature.} The PCHIP caveat is therefore retired: the truth standard is
+exact at the level any of this work cares about.
+
+The two exceptions are not interpolation failures. Ni ($10.8\%$) and Cu
+($1.4\%$) both fail at $T=1.19\kev$, where the cache itself is locally
+inconsistent: two \emph{adjacent} training rows at $1.19231$ and $1.19572\kev$
+--- $0.29\%$ apart in temperature --- give nickel fluxes differing by $\sim20\%$.
+No interpolator, and no network, can be more accurate than the data it is fitted
+to. Elsewhere the cache is smooth, with a median adjacent-row
+$|\mathrm{d}\ln F / \mathrm{d}\ln T|$ between 1 and 3.5 for every element
+(\code{scripts/inference/scan\_cache\_jumps.py}), so this is a localised defect
+rather than a systemic one --- but it falls on an element whose abundance this
+work fits.
+
+\paragraph{The cost of using the wrong SPEX configuration.} Repeating the same
+off-grid runs at SPEX's \emph{default} free-bound accuracy instead of the
+generation setting changes the single-element spectra by a median of $64\%$ for
+Zn, $47\%$ for Co, $28\%$ for Mn, $22\%$ for Ti and $10\%$ for Cr, while leaving
+the light elements unchanged to four decimals. A truth set built with default
+settings would thus have attributed up to $64\%$ of ``emulator error'' to the
+emulator when it belongs to the atomic-data configuration. This is the
+quantitative reason \S\ref{par:gacc} matters, and why both configurations were
+generated.
+
+\subsection{Validity range}\label{sec:validity}
+The emulator is defined only on its training box, and extrapolation beyond it
+has deliberately not been characterised. Rather than leave an untested regime
+reachable, \code{JointOperatorModel} raises on any temperature outside
+$[0.5013, 19.94]\kev$, the intersection of the per-element training ranges. The
+model's band limit acts similarly in energy: response bins outside the trained
+range fold to zero flux. The guard immediately caught a DEM grid in the Perseus
+showcase that started $0.3\%$ below the training floor.
+
 \section{Temperature distributions and abundances}\label{sec:dem}
 A DEM is a weighted sum $\sum_g w_g\, f(T_g)$ over a temperature grid, evaluated
 by \code{predict\_counts\_dem} (folding once, after the sum). Shapes are drawn

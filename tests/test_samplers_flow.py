@@ -183,3 +183,45 @@ def test_flow_samplers_agree_with_ultranest():
     assert np.all((width > 0.6) & (width < 1.6)), f"width ratio {width}"
     # log Z is the other thing both claim to measure
     assert abs(nau.logz - ref.logz) < 1.0
+
+
+# --- non-deterministic likelihood (the i-nessai ModelError) ------------------
+
+class _JitteryForward(_LinearForward):
+    """A forward whose last bits differ between identical calls.
+
+    Stands in for the real CUDA behaviour: ``deposit_gaussian_lines``
+    accumulates with ``index_add_``, whose duplicate indices make CUDA use
+    floating-point ``atomicAdd``, so the summation order varies. nessai's
+    ``verify_model`` compares 16 repeated calls with ``==``, so jitter far below
+    any physical significance aborts the run before sampling starts.
+    """
+
+    def __init__(self, n=64, rel=1e-13):
+        super().__init__(n)
+        self.rel = rel
+        self.rng = np.random.default_rng(0)
+
+    def __call__(self, th):
+        mu = super().__call__(th)
+        return mu * (1.0 + self.rel * self.rng.standard_normal(mu.shape))
+
+
+def test_jittery_forward_would_fail_nessais_equality_check():
+    """The stand-in really is non-deterministic -- otherwise the next test
+    would pass for the wrong reason."""
+    post = PoissonPosterior(_JitteryForward(), _problem().data,
+                            _problem().prior)
+    th = TRUTH[None, :]
+    vals = [float(post.loglike(th)[0]) for _ in range(16)]
+    assert len(set(vals)) > 1, "the jittery forward is not actually jittery"
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_inessai_survives_a_nondeterministic_likelihood(tmp_path):
+    """i-nessai must start even when the forward is not bit-reproducible."""
+    base = _problem()
+    post = PoissonPosterior(_JitteryForward(), base.data, base.prior)
+    res = samplers.run_inessai(post, nlive=500, seed=0, target_ess=1000.0,
+                               output=str(tmp_path / "inessai_jitter"))
+    _check(res, post, "inessai")

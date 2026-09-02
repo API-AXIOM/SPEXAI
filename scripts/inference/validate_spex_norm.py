@@ -117,9 +117,22 @@ def dump_spex(out, edges_file, temps, spexact, abun, timing_only=False,
           f"unit={spec.spectrum.unit}, spexact={spexact}, abun={abun}")
 
 
-def nearest_cache_temp(datadir, z, temp):
-    """The training-grid temperature of element ``z`` nearest ``temp``."""
-    t = np.load(os.path.join(datadir, f"element{z}", "temps.npy"))
+def nearest_cache_temp(datadir, z, temp, train_only=True):
+    """The cached temperature of element ``z`` nearest ``temp``.
+
+    ``train_only`` (the default) restricts to the **training split**, and it
+    matters: the only reason to evaluate at a cached temperature is that the
+    PCHIP truth is exact there, and ``ElementTruth`` is built from training rows
+    alone. Snapping to a val/test row instead gives a point where PCHIP is
+    interpolating, so any "on-node" correction computed there silently mixes
+    interpolation error into the offset it is supposed to isolate. Measured
+    2026-09-02: without this, 63 of 180 nodes landed on held-out rows.
+    """
+    d = os.path.join(datadir, f"element{z}")
+    t = np.load(os.path.join(d, "temps.npy"))
+    if train_only:
+        tr = np.load(os.path.join(d, "splits.npz"))["train"]
+        t = t[tr]
     return float(t[int(np.argmin(np.abs(t - temp)))])
 
 

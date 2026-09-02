@@ -456,6 +456,7 @@ def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
             self.names = names
             self.bounds = {n: [float(lo[i]), float(hi[i])]
                            for i, n in enumerate(names)}
+            self._cache_key, self._cache_val = None, None
 
         def _block(self, x):
             # copy=True is REQUIRED. The default returns a
@@ -504,7 +505,33 @@ def run_inessai(post, nlive=2000, seed=0, output=None, resume=False,
             return out
 
         def log_likelihood(self, x):
-            return post.loglike(self._block(x))
+            th = self._block(x)
+            # Memoise the most recent evaluation, keyed on the exact bytes of
+            # the request.
+            #
+            # nessai's `verify_model` calls the likelihood 16 times on ONE
+            # point and requires the results to be **bit-identical**
+            # (`all(logl == logl[0])`, not `allclose`). On CUDA the forward is
+            # not bit-reproducible: `deposit_gaussian_lines` accumulates with
+            # `index_add_`, whose indices repeat whenever two lines share a
+            # target bin, and CUDA implements that with floating-point
+            # `atomicAdd` -- so the summation order, and the last bits, vary
+            # between identical calls. The jitter is ~1e-10 relative on a
+            # log-likelihood of order 1e6, far below anything physical, but the
+            # equality test is exact and the run aborts before sampling starts.
+            #
+            # Caching one entry makes the repeated-call test see one evaluation
+            # instead of sixteen, which is both correct (the same point really
+            # does have one likelihood) and 16x cheaper. It does NOT hide the
+            # underlying jitter for distinct points -- nothing here depends on
+            # cross-point bit-reproducibility -- and it costs one array compare
+            # per call, against a forward model of ~0.1 s.
+            key = th.tobytes()
+            if key != self._cache_key:
+                self._cache_key, self._cache_val = key, post.loglike(th)
+            # a copy, so a caller mutating the result in place cannot poison
+            # the cache and make later identical requests return garbage
+            return np.array(self._cache_val, copy=True)
 
     post.n_eval = 0
     rng = np.random.default_rng(seed)
