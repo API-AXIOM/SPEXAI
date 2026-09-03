@@ -358,6 +358,12 @@ def main():
                          "the truth (control against a truth-anchored optimum)")
     ap.add_argument("--objective", choices=["mle", "map"], default="mle",
                     help="mle = likelihood only, what b_sys predicts")
+    ap.add_argument("--seed_chunk", type=int, default=None,
+                    help="seeds per L-BFGS call (--method lbfgs). THE memory "
+                         "lever: counts_torch(grad=True) does not chunk "
+                         "walkers, so the graph scales with the seeds in one "
+                         "call. Rows are independent optimisations, so "
+                         "grouping changes no result. Default: all at once")
     args = ap.parse_args()
     args.seed = 0        # build_problem's own draw is unused (mu_true is
                           # recomputed below); kept only so the arg exists
@@ -437,10 +443,27 @@ def main():
             print(f"  starts displaced by {args.start_sigma} sigma "
                   f"(max {np.abs(start - truth[None, :]).max():.3e} absolute)",
                   flush=True)
-        mle, move = lbfgs_batch(forward, prior, data_batch, truth,
+        # Seed groups run sequentially: each row is its own optimisation
+        # problem (row i's loss depends only on theta_i), so the split is
+        # invisible to the result and only bounds the graph.
+        sc = args.seed_chunk or args.n_seeds
+        mle_parts, move_parts = [], []
+        for lo_k in range(0, args.n_seeds, sc):
+            hi_k = min(lo_k + sc, args.n_seeds)
+            if sc < args.n_seeds:
+                print(f"\nseeds {lo_k}-{hi_k - 1} of {args.n_seeds}",
+                      flush=True)
+            st = start if start.ndim == 1 else start[lo_k:hi_k]
+            m, mv = lbfgs_batch(forward, prior, data_batch[lo_k:hi_k], truth,
                                 args.max_iter, n_restarts=args.n_restarts,
-                                start=start, sigma_ref=sigma_ref,
+                                start=st, sigma_ref=sigma_ref,
                                 objective=args.objective)
+            mle_parts.append(m)
+            move_parts.append(mv)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        mle = np.concatenate(mle_parts, axis=0)
+        move = np.concatenate(move_parts, axis=0)
         if args.n_restarts < 2:
             print("  WARNING: --n_restarts 1 gives no convergence diagnostic; "
                   "the reported movement is just the distance from the start.",
