@@ -38,8 +38,45 @@ stay numerically safe. Needs ``--device cuda``.
     # cluster GPU:
     python -u scripts/inference/mle_reseed.py --method lbfgs --device cuda \\
         --n_seeds 20 --max_iter 60 --compile
+
+P6 MODE -- the linearisation factor
+-----------------------------------
+Passing ``--bias_jsonl``/``--truth_npz`` switches the problem from the
+bake-off's single Perseus point to a *Tier B sweep point* (``--point i``), and
+the report from sigma-unit pulls to the P6 estimator
+
+    k_j = mean_k(theta_hat[k,j] - theta_true[j]) / b_sys[j]
+
+the factor by which ``fisher_bias.linear_bias_fisher``'s LINEARISED bias
+underpredicts the bias a real fit actually incurs. Tier B's whole ``N*`` table
+scales as ``k^-2``, so this is the calibration of the screen, not a bias
+measurement in its own right -- which is why it is run at several points: one
+value of ``k`` cannot distinguish "uniformly 2x optimistic" from "fine except
+in one corner", and those imply different things for P7.
+
+Three things make the estimator cheap. The bias is a fixed offset in parameter
+units while sigma ~ N^-1/2, so bias/noise grows as sqrt(N) and ~20-40 seeds
+suffice at 1e8 counts; the Poisson likelihood costs the same to evaluate at
+1e8 as at 1e6; and the autograd graph is batch-size independent, so K seeds
+cost the memory of one. ``b_sys`` is count-independent and ``sigma_ref``
+scales as N^-1/2, so both rescale analytically from the jsonl's ``n_ref``.
+
+The failure mode to guard against is under-convergence: L-BFGS starts AT the
+truth, so a fit that stops early leaves theta_hat near theta_true and reports
+a spuriously SMALL k -- i.e. it fails in the reassuring direction. Two guards,
+both on by default: ``--n_restarts 2`` reruns L-BFGS from its own solution and
+reports the second pass's movement in sigma units (converged => ~0), and
+``--start_sigma`` starts every seed displaced from the truth to confirm the
+solutions do not depend on where they began.
+
+    # P6, one Tier B point:
+    python -u scripts/inference/mle_reseed.py --method lbfgs --device cuda \\
+        --bias_jsonl $R/bias_sweep/bias_single_n20_s3.jsonl \\
+        --truth_npz  $R/bias_sweep/truth_single_n20_s3.npz \\
+        --point 14 --counts 1e8 --n_seeds 40 --max_iter 200
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -49,10 +86,104 @@ import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "scripts", "experiments", "hot_floor"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from bake_off import build_problem                                # noqa: E402
+from bias_sweep import NORM_REF, build_pars                       # noqa: E402
+from campaign import (                                            # noqa: E402
+    PERSEUS, FREE_Z, find_xrism_response, band_mask, EXCLUDE_NONE,
+    check_truth_response)
 from spexai.config import STORE, RESULTS                          # noqa: E402
+from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
+from spexai.inference.absorption import Absorption                # noqa: E402
+from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
+from spexai.inference.posterior import BoxPrior                   # noqa: E402
+from spexai.inference.response import Response                    # noqa: E402
+from spexai.inference.vector_forward import VectorForward         # noqa: E402
+
+
+def load_tierb(bias_jsonl, truth_npz, point):
+    """(record, truth counts row) for one Tier B sweep point.
+
+    The two files must come from the SAME sweep run: the jsonl carries the
+    fitted-parameter side (``b_sys``, ``sigma_ref``, the point's truth vector)
+    and the npz carries the noise-free SPEX truth spectrum, which the jsonl
+    does not store.
+    """
+    with open(bias_jsonl) as f:
+        recs = {int(json.loads(l)["point"]): json.loads(l)
+                for l in f if l.strip()}
+    if point not in recs:
+        raise SystemExit(f"point {point} not in {bias_jsonl} "
+                         f"(have {sorted(recs)[:5]}...{sorted(recs)[-1]})")
+    tz = np.load(truth_npz, allow_pickle=True)
+    counts = tz["counts"]                              # (n_points, n_channels)
+    if point >= len(counts):
+        raise SystemExit(f"truth npz has {len(counts)} points, asked for "
+                         f"{point} -- the jsonl and npz are from different runs")
+    return recs[point], counts[point], tz
+
+
+def worst_ratio(rec):
+    """max_j |b_sys_j| / sigma_ref_j -- the sweep's own severity ranking."""
+    b = np.abs(np.asarray(rec["b_sys"]))
+    return float((b / np.asarray(rec["sigma_ref"])).max())
+
+
+def build_tierb_problem(args, rec, counts_row, tz):
+    """Forward/prior/truth for one Tier B point, matching the sweep exactly.
+
+    Mirrors ``bake_off.build_problem`` but on the sweep's terms: this point's
+    LHS parameters rather than the Perseus fiducials, and ``EXCLUDE_NONE``
+    rather than the Perseus resonance-scattering mask -- the mask is what
+    ``bias_sweep`` used to produce the ``b_sys`` we are calibrating, and it
+    deletes exactly the Fe-K channels the emulator is worst at (see
+    ``campaign.EXCLUDE_NONE``). Using the other mask here would compare two
+    different measurements.
+    """
+    rmf, arf = find_xrism_response()
+    response = Response(rmf, arf)
+    check_truth_response(tz, rmf, arf)
+    keep = band_mask(response, exclude=EXCLUDE_NONE)
+
+    d_ref = counts_row[keep]
+    if d_ref.sum() <= 0:
+        raise SystemExit(f"point has zero in-band truth counts")
+    scale = args.counts / d_ref.sum()
+    mu_true = d_ref * scale
+    log_norm_truth = float(np.log10(NORM_REF * scale))
+
+    # identical bounds/steps to the sweep's own Fisher solve
+    pars = build_pars(None, rec["params"], log_norm_truth, "single")
+    names = [p.name for p in pars]
+    if names != list(rec["names"]):
+        raise SystemExit(f"parameter order changed: jsonl has {rec['names']}, "
+                         f"build_pars gives {names}")
+
+    emu = JointOperatorModel(models_dir=args.store, device=args.device,
+                             accelerate=False)
+    ab = AbundanceModel(emu.elements)
+    for z in FREE_Z:
+        ab.free_element(z, SYMBOL[z])
+    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z],
+                 1.0, 26)
+
+    forward = VectorForward(
+        emu, response, keep, names, ab, absorption=Absorption.default(),
+        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
+        velocity=None, device=args.device, chunk=args.chunk,
+        batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
+        echunk=args.echunk)
+    prior = BoxPrior.from_params(pars, device=args.device)
+    truth = np.array([p.truth for p in pars])
+    print(f"point {rec['point']}: kT={rec['params']['kT']:.3f} "
+          f"sigma_v={rec['params']['sigma_v']:.1f} n_h={rec['params']['n_h']:.3f}"
+          f"  cond(F)={rec['cond_F']:.1e}  worst |b|/sig@{rec['n_ref']:.0e}="
+          f"{worst_ratio(rec):.3f}", flush=True)
+    print(f"  {args.counts:.1e} in-band counts on {int(keep.sum())} channels; "
+          f"log_norm_truth={log_norm_truth:.4f}", flush=True)
+    return forward, prior, pars, truth, names, mu_true, (rmf, arf)
 
 
 def batched_jacobian(forward, pars, theta):
@@ -118,7 +249,8 @@ def fisher_scoring(forward, prior, pars, truth, data_batch, n_iter):
                                                     # truth, tiny K-scatter)
 
 
-def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6):
+def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
+                n_restarts=1, start=None, sigma_ref=None, objective="mle"):
     """K-way batched L-BFGS MLE on the autograd path. GPU only in practice.
 
     Rows are independent (row i's loss depends only on theta_i), so the true
@@ -126,30 +258,59 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6):
     is an expedient, not exact per-row preconditioning, but it converges fine
     here because the optimum is close to the flat start (truth) and the
     posterior is close to Gaussian at high counts.
+
+    ``objective`` picks what is maximised. ``mle`` is the likelihood alone,
+    which is the quantity ``b_sys`` predicts a shift in and therefore what P6
+    must measure. ``map`` adds the box prior's ``log|det J|``, i.e. the mode of
+    the density in the unconstrained coordinates -- the bake-off's convention.
+    The two differ by O(sigma^2 / box width), negligible at 1e8 counts, but
+    they are not the same estimator and the choice should be explicit.
+
+    ``n_restarts`` > 1 reruns L-BFGS from its own solution with a fresh
+    optimizer (dropping the accumulated curvature history). The movement in
+    the final pass, reported in units of ``sigma_ref``, is the convergence
+    diagnostic that matters here: this optimiser is started at the truth, so
+    stopping early biases the measured bias toward zero -- it fails in the
+    direction that would let us declare the linearisation fine.
     """
     device = forward.device
     K = data_batch.shape[0]
     data = torch.as_tensor(data_batch, dtype=torch.float32, device=device)
-    z0 = prior.to_unconstrained(
-        torch.as_tensor(truth, dtype=torch.float64, device=device))
-    z = z0.unsqueeze(0).repeat(K, 1).clone().detach().requires_grad_(True)
-    opt = torch.optim.LBFGS([z], max_iter=max_iter, tolerance_grad=tol_grad,
-                            line_search_fn="strong_wolfe")
+    th0 = truth if start is None else start                  # (ndim,) or (K, ndim)
+    th0 = torch.as_tensor(np.atleast_2d(th0), dtype=torch.float64, device=device)
+    z0 = prior.to_unconstrained(th0)                      # (1, ndim) or (K, ndim)
+    z = z0.expand(K, z0.shape[-1]).clone().detach().requires_grad_(True)
 
-    def closure():
-        opt.zero_grad()
-        theta, logdet = prior.to_constrained(z.double())
-        mu = forward.counts_torch(theta, grad=True).clamp_min(1e-30)
-        ll = (data.double() * torch.log(mu) - mu).sum(-1) + logdet
-        loss = -ll.sum()
-        loss.backward()
-        return loss
+    def make_closure(opt):
+        def closure():
+            opt.zero_grad()
+            theta, logdet = prior.to_constrained(z.double())
+            mu = forward.counts_torch(theta, grad=True).clamp_min(1e-30)
+            ll = (data.double() * torch.log(mu) - mu).sum(-1)
+            if objective == "map":
+                ll = ll + logdet
+            loss = -ll.sum()
+            loss.backward()
+            return loss
+        return closure
 
-    t0 = time.time()
-    opt.step(closure)
-    print(f"  LBFGS: {time.time() - t0:.1f}s", flush=True)
-    theta_mle, _ = prior.to_constrained(z.detach().double())
-    return theta_mle.cpu().numpy()
+    prev = prior.to_constrained(z.detach().double())[0].cpu().numpy()
+    move = None
+    for r in range(n_restarts):
+        opt = torch.optim.LBFGS([z], max_iter=max_iter,
+                                tolerance_grad=tol_grad,
+                                line_search_fn="strong_wolfe")
+        t0 = time.time()
+        loss = opt.step(make_closure(opt))
+        cur = prior.to_constrained(z.detach().double())[0].cpu().numpy()
+        move = np.abs(cur - prev)
+        if sigma_ref is not None:
+            move = move / sigma_ref[None, :]
+        prev = cur
+        print(f"  LBFGS pass {r + 1}/{n_restarts}: {time.time() - t0:.1f}s, "
+              f"-logL={loss.item():.6e}, max move this pass "
+              f"{move.max():.2e} sigma", flush=True)
+    return prev, move
 
 
 def main():
@@ -180,26 +341,66 @@ def main():
                     help="torch.compile the batched trunk (--method lbfgs, GPU)")
     ap.add_argument("--out", default=os.path.join(RESULTS, "mle_reseed",
                                                    "reseed.npz"))
+    # --- P6 mode ---
+    ap.add_argument("--bias_jsonl", default=None,
+                    help="Tier B bias jsonl; switches to P6 mode (measure the "
+                         "linearisation factor k = bias / b_sys)")
+    ap.add_argument("--truth_npz", default=None,
+                    help="truth npz from the SAME Tier B sweep run")
+    ap.add_argument("--point", type=int, default=None,
+                    help="which sweep point; omit to take the worst by "
+                         "max |b_sys|/sigma_ref")
+    ap.add_argument("--n_restarts", type=int, default=2,
+                    help="L-BFGS passes; the last pass's movement in sigma "
+                         "units is the convergence diagnostic")
+    ap.add_argument("--start_sigma", type=float, default=0.0,
+                    help="start each seed displaced by this many sigma from "
+                         "the truth (control against a truth-anchored optimum)")
+    ap.add_argument("--objective", choices=["mle", "map"], default="mle",
+                    help="mle = likelihood only, what b_sys predicts")
     args = ap.parse_args()
     args.seed = 0        # build_problem's own draw is unused (mu_true is
                           # recomputed below); kept only so the arg exists
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    p6 = args.bias_jsonl is not None
 
-    print(f"building the bake-off problem (literature Perseus fit, "
-          f"{args.device})...", flush=True)
-    post0, pars, truth, names = build_problem(args)
-    forward, prior = post0.forward, post0.prior
+    if p6:
+        if args.truth_npz is None:
+            raise SystemExit("--bias_jsonl needs --truth_npz from the same run")
+        if args.point is None:
+            with open(args.bias_jsonl) as f:
+                allrecs = [json.loads(l) for l in f if l.strip()]
+            args.point = int(max(allrecs, key=worst_ratio)["point"])
+            print(f"no --point given; taking the worst by |b_sys|/sigma_ref: "
+                  f"point {args.point}", flush=True)
+        rec, counts_row, tz = load_tierb(args.bias_jsonl, args.truth_npz,
+                                         args.point)
+        (forward, prior, pars, truth, names, mu_true,
+         (rmf, arf)) = build_tierb_problem(args, rec, counts_row, tz)
+        # b_sys is count-independent (F and the residual term both scale with
+        # N, so F^-1 J^T diag(1/mu) r does not); sigma ~ N^-1/2.
+        b_sys = np.asarray(rec["b_sys"])
+        sigma_jsonl = np.asarray(rec["sigma_ref"]) * np.sqrt(
+            float(rec["n_ref"]) / args.counts)
+    else:
+        print(f"building the bake-off problem (literature Perseus fit, "
+              f"{args.device})...", flush=True)
+        post0, pars, truth, names = build_problem(args)
+        forward, prior = post0.forward, post0.prior
+        b_sys = sigma_jsonl = None
 
-    # recompute mu_true exactly as build_problem does internally, so every
-    # reseed draws from the SAME independent-SPEX-truth mean the bake-off used
-    tz = np.load(args.truth)
-    scale = args.counts / tz["d_inband"].sum()
-    mu_true = tz["d_inband"] * scale
+        # recompute mu_true exactly as build_problem does internally, so every
+        # reseed draws from the SAME independent-SPEX-truth mean the bake-off
+        # used
+        tz = np.load(args.truth)
+        scale = args.counts / tz["d_inband"].sum()
+        mu_true = tz["d_inband"] * scale
 
     data_batch = np.stack([
         np.random.default_rng(args.seed0 + k).poisson(mu_true)
         for k in range(args.n_seeds)]).astype(np.float64)
 
+    move = None
     if args.method == "fisher":
         print(f"\ndrawing {args.n_seeds} independent Poisson realizations at "
               f"{args.counts:.1e} counts (seeds {args.seed0}.."
@@ -216,12 +417,81 @@ def main():
               f"{args.counts:.1e} counts (seeds {args.seed0}.."
               f"{args.seed0 + args.n_seeds - 1}) and running batched "
               f"L-BFGS ({args.max_iter} iterations)...", flush=True)
-        mu0, J = batched_jacobian(forward, pars, truth[None, :])
-        F = (J[0] / mu0[0]) @ J[0].T
-        sigma_ref = np.sqrt(np.diag(np.linalg.inv(F)))     # at the truth only
-        mle = lbfgs_batch(forward, prior, data_batch, truth, args.max_iter)
+        if sigma_jsonl is not None:
+            sigma_ref = sigma_jsonl          # the sigma b_sys is paired with
+        else:
+            mu0, J = batched_jacobian(forward, pars, truth[None, :])
+            F = (J[0] / mu0[0]) @ J[0].T
+            sigma_ref = np.sqrt(np.diag(np.linalg.inv(F)))  # at the truth only
+        start = truth
+        if args.start_sigma > 0:
+            # per-seed displaced starts, clipped inside the box: if the fits
+            # converge to the same place from here, the result is not an
+            # artefact of starting the optimiser at the answer
+            rng = np.random.default_rng(args.seed0 - 1)
+            start = truth[None, :] + args.start_sigma * sigma_ref[None, :] * \
+                rng.standard_normal((args.n_seeds, len(truth)))
+            lo = np.array([p.low for p in pars])
+            hi = np.array([p.high for p in pars])
+            start = np.clip(start, lo + 1e-9, hi - 1e-9)
+            print(f"  starts displaced by {args.start_sigma} sigma "
+                  f"(max {np.abs(start - truth[None, :]).max():.3e} absolute)",
+                  flush=True)
+        mle, move = lbfgs_batch(forward, prior, data_batch, truth,
+                                args.max_iter, n_restarts=args.n_restarts,
+                                start=start, sigma_ref=sigma_ref,
+                                objective=args.objective)
+        if args.n_restarts < 2:
+            print("  WARNING: --n_restarts 1 gives no convergence diagnostic; "
+                  "the reported movement is just the distance from the start.",
+                  flush=True)
+        elif move.max() > 0.05:
+            print(f"  WARNING: final pass still moved {move.max():.2f} sigma "
+                  f"-- NOT converged. An under-converged fit sits near its "
+                  f"truth start and reports k too SMALL.", flush=True)
 
+    if p6:
+        # always report against the sigma b_sys was computed with, so k is a
+        # ratio of two quantities from the same linearisation
+        sigma_ref = sigma_jsonl
     pulls = (mle - truth[None, :]) / sigma_ref[None, :]
+    if p6:
+        # --- the P6 estimator ---------------------------------------------
+        K = mle.shape[0]
+        delta = mle - truth[None, :]                       # (K, ndim)
+        mean_d = delta.mean(0)
+        se_d = delta.std(0, ddof=1) / np.sqrt(K)
+        k = mean_d / b_sys
+        se_k = se_d / np.abs(b_sys)
+        print(f"\nlinearisation factor at point {args.point}, {K} seeds, "
+              f"{args.counts:.1e} counts")
+        print(f"{'param':>10} {'b_sys/sig':>10} {'meas/sig':>10} "
+              f"{'k':>8} {'+-':>7}   (k = measured bias / linear b_sys)")
+        for j, n in enumerate(names):
+            # a parameter the linear estimate says is unbiased has no ratio to
+            # measure: k is 0/0 and its error bar diverges. Flag, do not hide.
+            flag = "  (b_sys < 0.01 sigma: k undefined)" \
+                if abs(b_sys[j]) < 0.01 * sigma_ref[j] else ""
+            print(f"{n:>10} {b_sys[j] / sigma_ref[j]:>+10.3f} "
+                  f"{mean_d[j] / sigma_ref[j]:>+10.3f} {k[j]:>+8.2f} "
+                  f"{se_k[j]:>7.2f}{flag}")
+        np.savez(args.out, names=names, truth=truth, sigma_ref=sigma_ref,
+                 seeds=np.arange(args.seed0, args.seed0 + args.n_seeds),
+                 mle=mle, pulls=pulls, counts=args.counts, point=args.point,
+                 b_sys=b_sys, k=k, se_k=se_k, mean_delta=mean_d, se_delta=se_d,
+                 cond_F=rec["cond_F"], n_ref=rec["n_ref"],
+                 params=json.dumps(rec["params"]), method=args.method,
+                 start_sigma=args.start_sigma, objective=args.objective,
+                 final_move_sigma=(np.nan if move is None else move),
+                 rmf=os.path.basename(rmf), arf=os.path.basename(arf))
+        print(f"\nsaved {args.out}")
+        print("\nk ~ 1 means the linearised b_sys is honest and Tier B's N* "
+              "table stands. k > 1 means every N* is optimistic by k^2. Read "
+              "the SE before either: a k whose error bar spans 1 measures "
+              "nothing, and a parameter with b_sys ~ 0 cannot yield a ratio "
+              "at all.")
+        return
+
     print(f"\n{'param':>10} {'mean pull':>10} {'std':>7} {'min':>7} "
           f"{'max':>7}   (original bake-off pull)")
     bakeoff_pulls = {"Ni": 2.0, "Mn": -1.4, "S": -1.3, "sigma_v": 1.45}
