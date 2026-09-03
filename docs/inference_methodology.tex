@@ -319,8 +319,9 @@ misspecification test rather than a calibration test and are labelled as such.
 
 Where posterior fits are used for bias---to confirm points the Fisher screen
 flags, and to validate the linearisation---observations are simulated from
-\code{SpexTruthModel}, fitted with the emulator (\code{run\_emcee};
-\code{run\_ultranest} for evidence/spot checks), and scored by the
+\code{SpexTruthModel}, fitted with the emulator (\code{run\_emcee} for the
+many-realisation sweeps, \code{run\_nautilus} where a single posterior is
+examined in detail or an evidence is quoted; see Sec.~\ref{sec:bakeoff}), and scored by the
 median$-$truth pull and central-interval coverage. An emulator-self round-trip
 is the control that separates emulator bias from sampler and statistical
 scatter. One caveat applies to all of these: \code{SpexTruthModel} interpolates
@@ -880,10 +881,20 @@ is observed-frame and is only meaningful because every experiment currently
 fixes $z$ at Perseus's value; a sweep that varies redshift would need it
 recomputed in the rest frame per point, or dropped.
 
-\paragraph{Caveats and status.} The result is broadening dependent: the
-counts-weighted residual rises from $0.083\%$ at $\sigma_v=180\kms$ to $7.0\%$ at
-$\sigma_v=0$, a factor of $84$, so cold, quiet sources are the harder case and are
-being mapped with a dedicated low-broadening stress run. The biases above are the
+\paragraph{Caveats and status.} The result does not depend on
+broadening. The counts-weighted residual is flat to within a factor
+$1.9$ across the whole range the $\sigma_v$ prior admits --- $0.134\%$ at
+$25\kms$ to $0.072\%$ at $1000\kms$, and $0.091\%$ at the
+$\sigma_v=180\kms$ fiducial --- and the same holds in every energy
+sub-band separately. An earlier version of this section quoted $7.0\%$
+at $\sigma_v=0$, a factor of $84$, and concluded that cold, quiet sources
+are the harder case. That came from a diagnostic which rebuilt only the
+emulator at the new velocity while reusing a truth constructed at
+$180\kms$, and both the number and the conclusion are withdrawn; the
+residual below $25\kms$ is a numerical artifact of the $\sigma_v \to 0$
+limit, at velocities the prior excludes and at which the thermal width
+makes the line profile indistinguishable from the $25\kms$ case. The
+full sweep and its interpretation are in the emulator report. The biases above are the
 linearised (infinite-count) limit; a direct \code{emcee} counts scan near
 $N_\star$---where the systematic offset reaches $\sim1\sigma$ and becomes directly
 detectable---is carried out on the cluster (\code{mcmc\_check.py}; the Poisson
@@ -1271,41 +1282,48 @@ calibration campaign is affordable at all. We therefore fit the \emph{same}
 simulated Perseus spectrum ($10^{6}$ in-band counts, 12 free parameters, the
 literature modelling strategy of Sec.~\ref{sec:hotfloor}) with each sampler over
 an identical \code{PoissonPosterior}, so that what is compared is the algorithm
-and nothing else. Code: \code{scripts/bake\_off.py}.
+and nothing else. Code: \code{scripts/inference/bake\_off.py}. All runs use the
+extended flat-field, gate-valve-closed Resolve response
+(\code{rsl\_Hp\_L\_2025.rmf} with \code{rsl\_extflat5\_GVC\_2025.arf}); earlier
+results obtained before that response was wired in have been discarded and
+regenerated rather than rescaled.
 
-\paragraph{Results.} Table~\ref{tab:bakeoff} gives the state of the comparison.
-\emph{These are partial. The flow-accelerated samplers (\code{nautilus},
-\code{pocoMC}, \code{i-nessai}) are implemented and verified against analytic
-problems but not yet run at scale; NUTS was diagnosed rather than completed;
-and the variational row is being repeated with a defensible particle count.
-The three ensemble rows are final.}
+\paragraph{Results.} Table~\ref{tab:bakeoff} gives the comparison. Six
+algorithms completed: two ensemble samplers, three nested or
+sequential samplers with normalizing-flow proposals, and one variational
+method. Two did not, for reasons given below.
 
 \begin{table}[t]
 \centering
 \caption{Sampler comparison on one $10^{6}$-count Perseus spectrum, 12 free
 parameters, on an A10-class GPU. ``Evals'' counts walkers pushed through the
-emulator. Agreement is against the \code{emcee} chain.}
+emulator; ESS is the minimum over the 12 parameters. Rows are ordered by
+effective samples per wall-clock second, the quantity that decides campaign
+cost. Agreement is the largest median shift against the \code{emcee} chain in
+units of its posterior width, with the range of width ratios.}
 \label{tab:bakeoff}
 \begin{tabular}{lrrrrrl}
 \toprule
-sampler & wall (h) & evals & min ESS & ESS/eval & ms/eval & agreement \\
+sampler & wall (h) & evals & min ESS & ESS/eval & ESS/$10^{3}$s & agreement \\
 \midrule
-\code{emcee}     &  1.65 &  51\,020 &  144 & $2.8\times10^{-3}$ & 117 & (reference) \\
-\code{zeus}      &  5.38 &  70\,800 &  194 & $2.7\times10^{-3}$ & 274 & $0.21\sigma$, width $1.04$--$1.24$ \\
-\code{UltraNest} & 10.83 & 218\,711 & 3507 & $1.6\times10^{-2}$ & 178 & $0.14\sigma$, width $0.94$--$1.11$ \\
-\code{SVI}       &  1.25 &   8\,006 & 4000\rlap{$^\dagger$} & --\rlap{$^\dagger$} & 564 & $2.57\sigma$, width $0.43$--$2.96$ \\
+\code{nautilus}  & 12.64 & 167\,500 & 24\,729\rlap{$^{*}$} & $1.5\times10^{-1}$ & 544 & $0.15\sigma$, width $0.96$--$1.09$ \\
+\code{pocoMC}    & 12.20 & 160\,256 &  4613\rlap{$^{*}$} & $2.9\times10^{-2}$ & 105 & $0.16\sigma$, width $0.99$--$1.11$ \\
+\code{UltraNest} & 10.83 & 215\,086 &  3501 & $1.6\times10^{-2}$ &  90 & $0.16\sigma$, width $0.97$--$1.06$ \\
+\code{SVI}       & 18.71 & 128\,006 &  4000\rlap{$^\dagger$} & --\rlap{$^\dagger$} &  59\rlap{$^\dagger$} & $0.94\sigma$, width $0.74$--$1.09$ \\
+\code{i-nessai}  & 15.79 & 144\,021 &  2025\rlap{$^{*}$} & $1.4\times10^{-2}$ &  36 & $0.25\sigma$, width $0.93$--$1.11$ \\
+\code{emcee}     &  1.66 &  51\,191 &   147 & $2.9\times10^{-3}$ &  24 & (reference) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{ESS per evaluation is not the whole story.} Two rows of
+\paragraph{ESS per evaluation is not the whole story.} Two kinds of row in
 Table~\ref{tab:bakeoff} must not be read as they stand. $^\dagger$A variational
 posterior is independent by construction, so its ``ESS'' is simply the number of
-draws requested and its ESS/eval is an artefact of two settings rather than a
-measurement; the variational row is judged on recovery and agreement only.
-Separately, the importance-based samplers report a Kish effective size over
-their weights, which \emph{is} comparable as an ESS but corresponds to a much
-larger raw sample array. More fundamentally, ESS/eval and wall-clock measure
+draws requested and both efficiency columns are an artefact of two settings
+rather than a measurement; the variational row is judged on recovery and
+agreement only. $^{*}$Separately, the importance-based samplers report a Kish
+effective size over their weights, which \emph{is} comparable as an ESS but
+corresponds to a much larger raw sample array. More fundamentally, ESS/eval and wall-clock measure
 different things here: the ensemble samplers amortise a whole batch of walkers
 into each forward, so their per-evaluation cost is the batched
 $112$--$131\,$ms/walker of Sec.~\ref{sec:forwardcost}, whereas a single-point
@@ -1313,24 +1331,85 @@ sampler pays ${\sim}4\times$ that for a $B{=}1$ forward. A method can therefore
 need far fewer evaluations and still lose badly on wall-clock; that is a fact
 about batching, not about mixing.
 
-\paragraph{UltraNest is the most efficient, but not the cheapest.} Nested
-sampling delivers $5.7\times$ more effective samples per evaluation than
-\code{emcee} and $3.7\times$ more per wall-clock second, and it is the only
-sampler here that returns $\log Z$. Its cost is nonetheless irreducible: it runs
-to an evidence tolerance rather than a step count, so it cannot be asked for
-fewer draws. It produced ESS $3507$ where simulation-based calibration needs
-only ${\sim}100$, at $10.8\,$h. For a campaign of many fits \code{emcee}
-remains the economical choice ($1.65\,$h per posterior) with UltraNest as the
-reference; the information gain from prior to posterior here is ${\sim}44$ nats,
-which sets the nested-sampling iteration count.
+\paragraph{The most efficient sampler is not the cheapest one.} Flow-accelerated
+nested sampling dominates on efficiency: \code{nautilus} returns $52\times$ more
+effective samples per evaluation than \code{emcee} and $22\times$ more per
+wall-clock second, $9\times$ and $6\times$ respectively over plain nested
+sampling with \code{UltraNest}. \code{pocoMC} and \code{i-nessai} sit between the
+two extremes. That ranking does not, however, decide the campaign, because the
+efficient methods have no throttle: all four nested and sequential samplers run
+to an evidence or a live-fraction tolerance rather than a step count, so they
+cannot be asked for fewer draws. \code{nautilus} spends $12.6\,$h producing ESS
+$24\,729$; a validation campaign that needs ${\sim}100$ effective samples per
+fit gets that from \code{emcee} in $1.66\,$h and discards the rest of what
+\code{nautilus} would deliver. The two therefore have distinct roles, and we use
+both: \code{emcee} where the unit of work is \emph{many} posteriors and each is
+only summarised, \code{nautilus} where the unit of work is \emph{one} posterior
+that is examined in detail or an evidence that is quoted. The information gain
+from prior to posterior here is ${\sim}44$ nats, which sets the
+nested-sampling iteration count.
+
+\paragraph{The evidence is now cross-validated, not taken on trust.} Four of the
+six samplers return $\log Z$, by three different mechanisms: classical nested
+sampling with a region-sampled likelihood-restricted prior (\code{UltraNest}),
+nested sampling with a learned flow proposal (\code{nautilus}, \code{i-nessai}),
+and preconditioned sequential Monte Carlo, which estimates the evidence from a
+temperature ladder rather than from a shrinking prior volume (\code{pocoMC}).
+They agree to within $0.10$ nats in total spread --- $3\,381\,277.86$,
+$3\,381\,277.91$, $3\,381\,277.96$ and $3\,381\,277.97$ --- comfortably inside
+\code{UltraNest}'s own quoted $\pm0.45$. This matters more than an efficiency
+ranking. An evidence is the one output of this pipeline with no cheap
+independent check available: unlike a posterior median it cannot be compared
+against a maximum-likelihood point estimate or a Fisher width. Agreement across
+algorithms whose failure modes are unrelated is therefore the available
+validation, and it passes.
+
+\paragraph{Two of the four evidence errors had to be recovered by hand, for
+unrelated reasons.} Only \code{pocoMC} reported a usable uncertainty
+($\pm0.035$) directly; \code{nautilus} and \code{i-nessai} both returned a
+non-finite value, and the two causes are worth separating because only one is a
+defect. \code{nautilus} (v1.0.6) simply exposes no evidence-error API:
+\code{Sampler.log\_z} is a bare point estimate with no companion uncertainty, so
+the missing value is a faithful record of what the library provides. We estimate
+one by bootstrapping the per-shell mean likelihood over that shell's sampled
+points, which gives $\pm0.002$ --- a \emph{lower} bound, since it propagates the
+Monte Carlo error in the likelihood means while holding nautilus's shell volume
+estimates fixed. \code{i-nessai} is different: nessai does implement the
+estimator, and it overflows. It evaluates the standard error in \emph{linear}
+evidence space, forming $\hat{Z}=\exp(\log Z)$; at $\log Z\approx3.4\times10^{6}$
+that is infinite in any floating-point type, and the standard error degenerates
+to \code{nan}. Rearranging the identical algebra into log space, using
+$\sum_i(Z_i-\hat Z)^2=\sum_i Z_i^2-n\hat Z^2$ so that only exponentials of
+$O(\log n)$ quantities appear, recovers $\pm0.022$ and reproduces the stored
+$\log Z$ exactly. This is not an exotic failure: a Poisson likelihood over
+$10^{6}$ counts has an absolute log-likelihood of order $10^{6}$ by
+construction, so any library that touches linear evidence space will break on
+X-ray spectral fits while working perfectly on the low-count test problems it
+was validated against. Code: \code{scripts/inference/evidence\_error.py}.
+
+The recovered numbers carry a lesson of their own. The three internal errors
+--- $\pm0.002$, $\pm0.022$, $\pm0.035$ --- are all \emph{smaller} than the
+$0.103$ spread between the four estimates, by factors of $3$ to $50$. Each is a
+pure Monte Carlo error conditional on its own algorithm's shells, levels or
+temperature ladder being right, and none propagates the systematic error in
+those constructions. We therefore quote the inter-sampler spread, not any
+internal error bar, as the uncertainty on $\log Z$ --- which is the concrete
+argument for having run four independent evidence estimators rather than
+trusting one.
 
 \paragraph{Slice sampling is defeated by the hardware, not the algorithm.}
 \code{zeus} needs only ${\sim}5.5$ evaluations per walker per iteration -- its
 mixing is as advertised -- but its vectorised implementation hands the sampler a
 \emph{shrinking} active subset as walkers accept, so the tail of every iteration
-runs at $B{=}8,4,2$ where the GPU is idle. Its effective cost is
-$274\,$ms/eval against \code{emcee}'s $117$. Combined with posteriors $4$--$24\%$
-wider, it is dominated on every axis.
+runs at $B{=}8,4,2$ where the GPU is idle. Its effective cost was
+$274\,$ms/eval against \code{emcee}'s $117$, with posteriors $4$--$24\%$ wider:
+dominated on every axis. It is absent from Table~\ref{tab:bakeoff} because the
+rerun on the final response did not complete, aborting after an hour without
+finishing a single one of $200$ requested steps when its slice expansion
+exceeded the allowed number of contractions. We did not pursue the cause. The
+diagnosis above is a statement about how a shrinking active batch interacts with
+a GPU, and it is not repaired by tuning a slice-sampler limit; the method was
+already dominated when it did run.
 
 \paragraph{Gradient-based sampling is defeated by the batch size, not by
 mixing.} Pyro's NUTS ran at $958\,$s per iteration, saturating its tree-depth
@@ -1355,65 +1434,153 @@ that evaluates many chains per forward, since the batched potential and its
 gradient are already available; at $B{=}64$ a gradient costs $233\,$ms per
 chain rather than $936$.
 
-\paragraph{Variational inference is fast and wrong, and the two are related.}
-SVI was the quickest ($1.25\,$h) and eleven of its twelve parameters look
-healthy (pulls of mean $+0.18$, standard deviation $1.10$, indistinguishable
-from \code{emcee}'s $-0.17$, $1.00$). The exception is decisive: $\nh$ is
-recovered $8\sigma$ from the truth \emph{in its own units}, which decomposes
-into a $2.6\sigma$ offset combined with a posterior $0.43\times$ too narrow. It
-is the dangerous kind of failure: confidently wrong error bars on one parameter,
-with nothing anomalous elsewhere.
+We implemented that ensemble sampler --- a batched leapfrog integrator running
+many chains through one call of the differentiable forward --- and it did not
+run, for a reason worth recording because it bounds the approach rather than the
+implementation. The memory cost of a gradient is set not by the number of chains
+but by the retained autograd graph of a single forward, which for this model is
+$11$--$15\,$GB and cannot be chunked, since a backward pass requires the whole
+graph at once. The run exhausted a $22\,$GB device at \emph{two} chains. The
+arithmetic that makes ensemble gradients attractive is therefore correct and
+irrelevant: amortising a gradient over $B$ chains requires holding $B$ chains'
+graphs, and this forward cannot hold two. Making gradient-based sampling viable
+here is a problem of reducing the activation footprint of the emulator ---
+checkpointing the operator trunk, or a hand-written adjoint for the broadening
+convolution --- not of choosing a better sampler. We did not attempt it, because
+the derivative-free samplers already meet the accuracy requirement of
+Sec.~\ref{sec:biassweep} at an affordable cost.
 
-The speed was, however, borrowed from the accuracy. A variational run costs
-exactly $(\text{steps})\times(\text{particles})$ forward evaluations, and this
-one used only four ELBO particles -- a memory-driven choice, not an
-accuracy-driven one -- for $8\,000$ evaluations, a sixth of \code{emcee}'s. Four
-samples is a very noisy estimate of the ELBO gradient, and restoring a
-defensible particle count costs the speed advantage outright: staying cheaper
-than \code{emcee} allows at most ${\sim}25$ particles over $2000$ steps.
+\paragraph{Variational inference loses its speed advantage before it becomes
+accurate.} An earlier run of the same problem was the fastest method in the
+comparison at $1.25\,$h and was badly wrong on one parameter: $\nh$ recovered
+$8\sigma$ from the truth in its own units, decomposing into a $2.6\sigma$ offset
+and a posterior $0.43\times$ too narrow, with posterior widths elsewhere ranging
+up to $2.96\times$ too wide. That run used only four ELBO particles --- a
+memory-driven choice, not an accuracy-driven one --- so we repeated it properly.
+A variational run costs exactly $(\text{steps})\times(\text{particles})$ forward
+evaluations, and the honest configuration is a full-rank Gaussian guide with $32$
+particles over $4\,000$ steps, the particles chunked eight ways so that memory
+scales with the chunk while gradient quality scales with the total.
 
-We do not yet attribute the failure. The natural suspicion is an inadequate
-variational family, but the evidence points the other way: minimising the
-reverse Kullback--Leibler divergence is mode-seeking and systematically
-\emph{under}-estimates variance, whereas several of these posteriors came out up
-to $2.96\times$ \emph{too wide}, which is the signature of an unconverged
-optimiser rather than of a family mismatch. A full-rank Gaussian can in any case
-represent a linear degeneracy exactly, and at $10^{6}$ counts with ${\sim}44$
-nats of information the posterior should be close to Gaussian -- an assumption
-the Fisher treatment of Sec.~\ref{sec:fisherbias} already relies on and
-validates. The informative next experiment is therefore not a more expressive
-guide but a better-initialised one: $F^{-1}$ from Sec.~\ref{sec:fisherbias}
-\emph{is} the posterior covariance, so initialising the guide's location at the
-truth and its scale at $\mathrm{chol}(F^{-1})$ starts the optimisation with the
-correct correlation structure instead of requiring it to be discovered by
-stochastic gradient descent. Only if that still fails is a normalizing-flow
-guide indicated -- and it carries $2\,786$ parameters against the full-rank
-Gaussian's $168$, so it would need proportionally more steps and make the cost
-problem worse.
+The repeat is the row in Table~\ref{tab:bakeoff}, and it settles the question in
+both directions. Accuracy improved a great deal: the erratic widths are gone
+(ratios now $0.74$--$1.09$ against \code{emcee}) and $\nh$ is no longer
+catastrophic, shifted $0.94\sigma$ rather than $8$. Most of the original failure
+was indeed optimiser noise from four particles. But the speed that motivated
+variational inference is gone with it: at $18.7\,$h this is now the second-slowest
+method in the table, $11\times$ the cost of \code{emcee}, for a posterior that is
+still the least accurate. The trade is not a favourable one at any setting we can
+reach.
+
+What remains after convergence looks like a genuine limitation rather than a
+tuning failure. The ELBO was flat from step ${\sim}1\,400$ onward, so the
+optimiser had converged; and the residual error changed character, from widths
+scattered on both sides of the truth to widths that are systematically at or
+below \code{emcee}'s, with the largest shrinkage ($0.74\times$) on the one
+parameter that is also most displaced. That is the textbook signature of
+minimising the reverse Kullback--Leibler divergence, which is mode-seeking and
+under-estimates variance --- and it appears on $\nh$, which is the parameter
+most entangled in the near-degeneracy between column density, normalisation and
+overall metallicity, precisely the direction along which the posterior is least
+Gaussian and a full-rank Gaussian guide least able to help. A
+normalizing-flow guide is the remaining option, but it carries $2\,786$
+parameters against the full-rank Gaussian's $168$ and would need proportionally
+more steps, making an already unfavourable cost worse. We therefore do not use
+variational inference in what follows, and record it as tested rather than
+promising for this problem.
+
+\subsection{Convergence diagnostics}\label{sec:bakeoffdiag}
+Every run was checked with the diagnostics appropriate to its algorithm: trace,
+log-posterior, acceptance-fraction and autocorrelation plots for the ensemble
+samplers; prior-volume, per-shell likelihood, evidence-accumulation and
+weight-concentration plots for the nested and sequential samplers; and the ELBO
+trace for the variational run. The full set --- a marginal corner plot for each
+sampler, plus one diagnostic panel per algorithm --- is archived in
+\code{results/bakeoff/bakeoff\_diagnostics/} and generated by
+\code{scripts/inference/bakeoff\_diagnostics.py}. One gap: \code{pocoMC} stores
+no replayable internal state (its output is equal-weight draws only), so it has
+a corner plot but no diagnostic panel.
+
+Figure~\ref{fig:bakeoffcorner} overlays all six posteriors. It is the compact
+form of the agreement column of Table~\ref{tab:bakeoff}: the five sampling
+methods are mutually indistinguishable at this scale in every one of the 66
+two-dimensional marginals, while the variational posterior separates visibly on
+$\nh$ --- offset and too narrow --- and on $kT$. The $\nh$--$\log\mathcal{N}$
+panel also shows the degeneracy that Sec.~\ref{sec:bakeoff} invokes to explain
+why $\nh$ is the parameter variational inference gets wrong.
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth]{figures/bakeoff_corner_joint.png}
+\caption{Marginal posteriors from all six samplers on the same simulated
+$10^{6}$-count Perseus spectrum, plotted as $1$- and $2\sigma$ contours with
+the truth dotted. The five sampling methods (\code{emcee}, \code{UltraNest},
+\code{nautilus}, \code{pocoMC}, \code{i-nessai}) overlie one another
+throughout; \code{SVI} (brown) is the only visible outlier, separating on
+$\nh$ and $kT$.}
+\label{fig:bakeoffcorner}
+\end{figure}
+
+\paragraph{One caveat on the reference chain.} The \code{emcee} run is short
+relative to its own autocorrelation time. Its integrated autocorrelation time
+$\tau$ does not plateau as a function of chain length --- it continues to grow
+roughly linearly with $N$ out to the end of the run --- so the value it reaches,
+${\sim}41$ steps, is a lower bound rather than a converged estimate, and the
+post-burn-in chain is only ${\sim}12\tau$ long against the ${\sim}50\tau$ usually
+required before $\tau$ can be trusted. The effective sample size of $147$ in
+Table~\ref{tab:bakeoff} inherits that uncertainty; it is reproduced
+independently by a rank-normalised estimator, but both rest on the same
+under-resolved autocorrelation.
+
+This does not compromise the comparison, and the reason is external rather than
+internal. The \code{emcee} posterior is validated directly against four
+independent algorithms that have no such difficulty: its medians agree with
+\code{UltraNest}, \code{nautilus}, \code{pocoMC} and \code{i-nessai} to at most
+$0.25\sigma$ and its widths to within $11\%$ (Table~\ref{tab:bakeoff}), the
+sole disagreement anywhere in the set being the variational run. An ensemble
+sampler's $64$ walkers collectively cover the posterior even when no single
+walker has traversed it, which is what these numbers show. The chain is
+therefore sound as the bake-off reference. What the $\tau$ result does bound is
+the \emph{precision} of any single quantity extracted from it: at
+$\mathrm{ESS}=147$ the Monte Carlo error on a posterior median is
+$1.25/\sqrt{147}\approx0.10\sigma$, against $0.008\sigma$ for \code{nautilus}.
+That is immaterial when comparing samplers, whose disagreements here are a few
+tenths of a $\sigma$, but it is the reason the bias confirmations of
+Sec.~\ref{sec:biassweep} --- which measure median shifts of order $0.1\sigma$
+--- should not use a chain of this length.
 
 \paragraph{Recovery is consistent across samplers, and consistent with noise.}
-All three sampling methods agree on the same parameter offsets --
-$\mathrm{Ar}$ at ${\sim}-2\sigma$, $\mathrm{Ca}$ at ${\sim}+1.4\sigma$ -- and
-agree with each other to $0.21\sigma$ (zeus) and $0.14\sigma$ (UltraNest). Those
-offsets are therefore a property of the simulated data, not of the samplers. They
-are also fully consistent with counting noise: across the 12 parameters the
-\code{emcee} pulls have mean $-0.23$ and standard deviation $0.98$ against
-expectations of $0\pm0.29$ and $1$, giving $\chi^{2}=11.1$ for 12 degrees of
-freedom ($p=0.52$). The Fisher estimator of Sec.~\ref{sec:fisherbias} predicts a
-maximum emulator-induced bias of $0.23\sigma$ at this exposure, twenty times
-smaller than the largest observed pull. A single fit therefore cannot measure
-emulator bias, which is precisely the argument for the sweep of
-Sec.~\ref{sec:biassweep} and for calibration over many realisations rather than
-one showcase.
+The five sampling methods agree on the same parameter offsets --- $\mathrm{Ni}$
+at $+1.94$ to $+2.03\sigma$, $\mathrm{Mn}$ at $-1.32$ to $-1.43$,
+$\mathrm{S}$ at $-1.25$ to $-1.35$, $\sigma_v$ at $+1.43$ to $+1.56$ --- and
+agree with each other to at most $0.25\sigma$, in every case on the same
+parameter ($\mathrm{Fe}$, the most tightly constrained). Those offsets are
+therefore a property of the simulated data, not of the samplers. They are also
+fully consistent with counting noise: across the 12 parameters the \code{emcee}
+pulls have mean $+0.10$ and standard deviation $1.00$ against expectations of
+$0\pm0.29$ and $1$, giving $\chi^{2}=11.1$ for 12 degrees of freedom
+($p=0.52$). The Fisher estimator of Sec.~\ref{sec:fisherbias} predicts a maximum
+emulator-induced bias of $0.22\sigma$ at this exposure, nine times smaller than
+the largest observed pull and, for $\mathrm{Ni}$ specifically, of the opposite
+sign. A single fit therefore cannot measure emulator bias, which is precisely
+the argument for the sweep of Sec.~\ref{sec:biassweep} and for calibration over
+many realisations rather than one showcase.
+
+It is worth being explicit about what the agreement across samplers does and
+does not establish, because the temptation to over-read it is strong. All five
+fit the identical Poisson realisation. They therefore \emph{must} agree on
+whatever that particular draw's fluctuation did, and their agreement rules out a
+sampler defect while saying nothing at all about whether the offsets are noise
+or emulator bias. Only the reseeding test below separates those.
 
 \paragraph{Confirmed by multi-seed reseeding: noise, not bias.} The argument
 above is indirect (a Fisher prediction is much smaller than an observed pull);
 a direct test redraws the Poisson realisation at the identical truth and
 exposure with independent seeds and asks whether a parameter's offset stays
 pinned near its original value (bias) or scatters around zero (that one draw's
-noise). Three algorithms agreeing on the original draw cannot distinguish
-these, because all three fit the same single realisation and necessarily agree
-on whatever its particular fluctuation did. We redrew 8 independent
+noise). Five algorithms agreeing on the original draw cannot distinguish
+these, for the reason given above: they all fit the same single realisation and
+necessarily agree on whatever its particular fluctuation did. We redrew 8 independent
 realisations (\code{scripts/mle\_reseed.py}) and computed a quick point
 estimate for each -- not a full posterior, but batched Fisher scoring
 (iteratively reweighted least squares for the Poisson likelihood, reusing the

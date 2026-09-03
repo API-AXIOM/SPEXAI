@@ -5,7 +5,14 @@
 \usepackage{graphicx}
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 \usepackage{natbib}
+\usepackage[most]{tcolorbox}
 \bibliographystyle{plainnat}
+
+% Open question for the collaboration: something that must be resolved with
+% people outside this document before the work is published. Deliberately
+% loud -- these are not caveats to be absorbed into a footnote.
+\newtcolorbox{collabquestion}[1]{colback=red!4!white, colframe=red!70!black,
+  fonttitle=\bfseries, title={#1}, breakable, left=3mm, right=3mm}
 
 \newcommand{\mre}{\mathrm{MRE}}
 \newcommand{\kev}{\,\mathrm{keV}}
@@ -45,6 +52,68 @@ per-element velocity broadening, an active-learning scheme for placing
 new SPEX evaluations, and a feasibility analysis for full 30-element
 inference within a 200\,ms budget.
 \end{abstract}
+
+\begin{collabquestion}{OPEN QUESTION FOR COLLABORATORS --- the training data
+carries discontinuities from an unrecorded SPEX setting}
+\label{box:gacc}
+\emph{Raised 2026-09-02. This must be resolved before publication, and it is a
+question about how the training set was generated, which no one currently on
+the project witnessed.}
+
+The generator script for the per-element training spectra is lost, and no SPEX
+settings were recorded with them. They were recovered by comparison
+(\code{scripts/inference/check\_training\_provenance.py}): the cache is
+reproduced to $10^{-5}$ by \textbf{full SPEXACT~3 with a loosened free-bound
+accuracy, \code{var gacc}~$\approx0.01$} against a default near $10^{-3}$, using
+Lodders~(2009) abundances. SPEXACT~2 can be excluded outright: it computes only
+the fifteen-element MEKAL set, and returns \emph{nothing} for Sc, Ti, V, Cr, Mn,
+Co, Cu and Zn at any abundance --- yet those elements have training spectra.
+
+The coarse accuracy has a consequence we did not anticipate. It makes SPEX drop
+sub-threshold free-bound contributions, and as temperature varies a
+contribution crosses the threshold and switches on discontinuously. A fine scan
+of nickel over $1.398$--$1.416\kev$ with today's SPEX shows a
+$\mathbf{+38.8\%}$ jump between adjacent temperatures at \code{gacc}~$=0.01$,
+and $\mathbf{+0.21\%}$ --- i.e.\ nothing --- at \code{gacc}~$=10^{-4}$. Steps of
+this kind are stamped into the delivered training data:
+\textbf{10 of 30 elements are affected, 45 steps in total, the largest
+$+45.6\%$ across a temperature change of $2\times10^{-4}$}, which no physics
+produces. Ni (16 steps), Cr (6), Fe (6) and Mn (5) are the worst, and
+\textbf{16 of the 45 lie above $2\kev$}, inside the band we fit. Sodium shows a
+factor $\sim\!4400$ jump at $0.52\kev$ that does not fit this pattern at all
+and needs separate explanation.
+
+These are numerical artefacts that the emulator has faithfully learned, and no
+network or interpolator can be more accurate than the data it is fitted to.
+
+\textbf{What we need from whoever generated the data} (the thesis credits
+Dr.~Aurora Simionescu with guiding its generation, and states that an earlier,
+smaller set came from SPEX~v3.07, whereas the present cache is larger and was
+evidently regenerated later):
+\begin{enumerate}\itemsep2pt
+  \item Which SPEX \emph{version} produced the delivered cache?
+  \item Was \code{var gacc} set, and to what? Was any other accuracy or
+    line-selection setting changed for speed?
+  \item Were the elements generated in one campaign or several? The
+    temperature grids differ between $Z\!\le\!18$, $19$--$24$ and $25$--$30$.
+  \item Is a regeneration at default accuracy feasible? Cost is the obstacle:
+    $\sim\!4$\,s per spectrum $\times$ $14{,}000$ temperatures $\times$ 30
+    elements is of order five CPU-months serially, so this is a cluster job and
+    a retraining decision, not a patch. Restricting it to the ten affected
+    elements would cut it substantially.
+\end{enumerate}
+
+\textbf{What is \emph{not} in question.} The bias campaign compares the
+emulator against a truth model built from the same cached rows, so both carry
+the same steps and they largely cancel; a cross-check
+(\code{scripts/inference/crosscheck\_steps.py},
+\code{weight\_step\_impact.py}) finds the Perseus single-temperature fiducial
+clean, and bounds the flux-weighted effect on the Perseus DEM at $0.45\%$ for
+Cr and below $0.3\%$ for everything else. What the steps do compromise is
+\emph{absolute} fidelity to SPEX as a physics code, and any future
+multi-temperature sweep at large DEM width, where the bound rises to $1.8\%$
+for Ni.
+\end{collabquestion}
 
 \section{Problem setting and scope}
 \label{sec:setting}
@@ -231,6 +300,93 @@ its own thermal width at zero cost. Caveats where the convolution
 picture itself breaks (multiphase kinematics, resonant scattering) are
 orthogonal to the per-element choice.
 
+\subsection{What the emulator represents: thermal width, grid resolution,
+and the delta-comb approximation}
+\label{sec:broadrep}
+
+Three facts about how line widths enter the emulator are easy to get
+wrong, and each of them bounds what a low-$\sigma_v$ validation can
+mean. All three were verified against the training cache
+(\code{scripts/emulator/probe\_intrinsic\_width.py}).
+
+\paragraph{The thermal term is already in the training data.} SPEX
+applies the ion thermal width of Eq.~(1) when it generates a spectrum
+(with $T_{\rm ion}=T_e$ by default), so the cached per-element spectra
+are \emph{already} thermally broadened. Fitting a Gaussian plus a linear
+baseline to the Fe\,\textsc{xxv} resonance line at $6.7004\,\mathrm{keV}$
+in the $Z=26$ cache gives $\sigma = 33, 56, 81, 132, 194, 261\kms$ at
+$kT = 0.6, 1, 2, 5, 10, 18\,\mathrm{keV}$: a clean $\sqrt{T}$ scaling at
+$\approx 1.4\times$ the pure-thermal $c\sqrt{kT/A m_p}$, the excess
+coming from blending with unresolved satellites. Consequently the
+$\sigma_v$ applied downstream is the \emph{turbulent term only}, and no
+thermal contribution may be added to it without double counting. In
+particular, $\sigma_v = 0$ denotes zero turbulence, not delta-function
+lines: the total width there is still $27$--$220\kms$ depending on
+element and temperature.
+
+\paragraph{The native grid is linear in energy, so the resolution floor
+is a strong function of energy.} The training grid is $24{,}212$ bins
+uniformly spaced by $0.4914\,\mathrm{eV}$ over $0.1002$--$11.9998\,
+\mathrm{keV}$, i.e.\ Resolve's channel width, \emph{not} a logarithmic
+grid. The velocity subtended by one bin is therefore $c\,\Delta E/E$ and
+varies by a factor $240$ across the band:
+
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+$E$ (keV) & 0.5 & 1 & 2 & 6.7 & 9 & 12\\
+$c\,\Delta E/E$ ($\kms$) & 299 & 150 & 75 & 22 & 17 & 12.5\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The median is $24.9\kms$ and the extremes are $6.3$ and
+$1491\kms$. Any statement of the form ``the emulator resolves velocities
+down to $X\kms$'' is therefore meaningless unless it names an energy.
+This also explains why the Fe-only benchmark of
+Sec.~\ref{sec:broadening} is optimistic: $6.7\,\mathrm{keV}$ sits in the
+finest sixth of the grid. At the bottom of the training temperature
+range ($kT \approx 0.5\,\mathrm{keV}$) the thermal width is sub-bin for
+every element with $Z \le 21$, and only $1.3$ bins for iron.
+
+\paragraph{Lines are represented as a delta comb, consistently.}
+\code{find\_line\_bins} does not identify lines; it flags \emph{bins}
+whose flux exceeds a continuum estimate by a threshold, so a thermally
+broadened line spanning five bins becomes five independent amplitude
+slots. \code{LineHead.deposit} then treats each slot as a point mass at
+its bin centre, and \code{deposit\_gaussian\_lines} spreads that point
+mass by $\sigma = E\sigma_v/c$ alone. This is not an inconsistency: the
+exact reference \code{direct\_broadening\_matrix} makes the identical
+delta-at-bin-centre assumption, and the cache is itself a
+$0.49\,\mathrm{eV}$ sampling of the true thermal profile. Convolving the
+comb by $\sigma_v$ is a quadrature of the true convolution whose error
+falls exponentially in $\sigma_v/\Delta$, so on the native grid the
+approximation is excellent for $\sigma_v \gtrsim c\,\Delta E/E$ and
+should degrade below it. That threshold is \emph{not} what the folded
+spectra actually show (Sec.~\ref{sec:lowsigmav}): the instrument
+redistribution kernel is several times wider than a training bin and
+erases the comb before it reaches a channel, so the argument bounds an
+intermediate quantity rather than the observable. It is retained here
+because it governs the unfolded model. Two consequences follow. First,
+sub-bin line placement might be expected to cost accuracy whenever the
+target instrument grid is offset from the training grid; it does not,
+and Sec.~\ref{sec:instruments} measures the offset dependence directly
+against a calibrated control and finds it absent, while identifying the
+displacement this representation \emph{is} exposed to (a coherent gain
+error). Second, and more importantly for
+validation, \code{direct\_broaden} \emph{cannot detect} a sub-bin error,
+because it shares the assumption being tested; only SPEX evaluated at
+matching $\sigma_v$ is an independent reference in this regime.
+
+\paragraph{Observational context.} The lowest published intracluster
+turbulence is $78\pm17\kms$ in Abell~496 \citep{xrism_a496}; the M87
+atmosphere falls to $\sim 60\kms$ at $5$--$25\,\mathrm{kpc}$
+\citep{xrism_m87}, the Centaurus core is below $120\kms$, and Hitomi's
+Perseus value was $164\pm10\kms$ \citep{hitomi16}. Quiescent gas and
+stellar coronae plausibly sit at a few tens of $\kms$, below current
+instrumental systematics. A validation grid reaching $\sigma_v = 0$ with
+sampling near $10\kms$ therefore brackets everything observable.
+
 \subsection{Benchmark of broadening implementations}
 
 Against exact erf-integral broadening of true spectra: FFT convolution
@@ -241,6 +397,166 @@ Gaussian lines with exact per-line fluxes) reaches $0.13$--$0.18\%$;
 the legacy sparse-matrix implementation degrades from $0.3\%$ to
 $2.8\%$ at $1000\kms$ with $20\%$ of line flux misplaced.
 \textbf{Recommendation: replace the sparse method with FFT/hybrid.}
+These numbers cover iron only, at $100$--$1000\kms$; the low-$\sigma_v$
+regime identified in Sec.~\ref{sec:broadrep} is not probed by them.
+
+\paragraph{Correction: the previously quoted low-$\sigma_v$ residual was
+not a measurement of emulator accuracy.} An earlier version of this work
+propagated a counts-weighted residual of $7\%$ ``at $\sigma_v=0$'', a
+factor $84$ above the $0.083\%$ obtained at $180\kms$, and used it to
+argue that cold, quiet sources are the harder case. That number is
+invalid. The diagnostic that produced it
+(\code{fisher\_bias.\_diagnose\_residual}) re-evaluated only the
+\emph{emulator} at $\sigma_v=0$ while reusing a truth spectrum
+constructed once at the Perseus value of $180\kms$; it therefore
+compared a broadened truth against an unbroadened model and largely
+measured the magnitude of the broadening operation itself, not any
+emulator error. The diagnostic now rebuilds the truth at the same
+$\sigma_v$ as the model.
+
+\subsection{Low-velocity validation}
+\label{sec:lowsigmav}
+
+Re-running the corrected diagnostic --- truth and emulator both rebuilt
+at each velocity, folded through the XRISM/Resolve response, and scored
+on $10^5$ in-band counts at the Perseus single-temperature fiducial ---
+gives Table~\ref{tab:lowv}.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{rccc}
+\toprule
+$\sigma_v$ ($\kms$) & cw.RMS & shape-only & norm ratio\\
+\midrule
+$0^\dagger$  & $1.84\%$   & $1.84\%$   & 0.99978\\
+$10^\dagger$ & $0.550\%$  & $0.550\%$  & 0.99978\\
+25   & $0.134\%$  & $0.132\%$  & 0.99978\\
+50   & $0.125\%$  & $0.123\%$  & 0.99978\\
+100  & $0.109\%$  & $0.107\%$  & 0.99978\\
+180  & $0.091\%$  & $0.088\%$  & 0.99978\\
+300  & $0.078\%$  & $0.075\%$  & 0.99979\\
+1000 & $0.072\%$  & $0.069\%$  & 0.99980\\
+\bottomrule
+\end{tabular}
+\caption{Counts-weighted truth-vs-emulator residual against turbulent
+velocity, both sides rebuilt at each $\sigma_v$. ``Shape-only''
+marginalises the common multiplicative offset that a free normalisation
+would absorb in a real fit; ``norm ratio'' is the in-band flux ratio,
+reported separately so that a flux-conservation difference between the
+truth's and the emulator's broadening cannot hide inside the residual.
+The unweighted RMS is flat at $13.8\%$ across the whole sweep: it is
+dominated by near-empty channels and carries no velocity information.
+$^\dagger$These two rows are \emph{not} emulator accuracies; they are a
+numerical diagnostic of the $\sigma_v \to 0$ limit, for the reason given
+below, and should not be quoted as an error budget.}
+\label{tab:lowv}
+\end{table}
+
+\textbf{The result is that the residual is velocity-independent over the
+entire physically accessible range}, varying only between $0.072\%$ and
+$0.134\%$ from $25$ to $1000\kms$ --- a factor of $1.9$ across a factor
+of $40$ in $\sigma_v$. The norm ratio holds at $0.99978$ throughout, so
+no flux is lost differentially and what variation there is is pure
+lineshape. The earlier claim that cold, quiet sources are the harder
+case is withdrawn in full: it was an artifact of the invalid diagnostic,
+and nothing replaces it.
+
+\paragraph{Why the two lowest rows are not a measurement.} The apparent
+blow-up below $25\kms$ cannot be a lineshape effect, because at those
+velocities the lineshape barely changes. The cached spectra already
+carry the ion thermal width (Sec.~\ref{sec:broadrep}), which at the
+$kT = 3.9\kev$ fiducial is $82\kms$ for iron and $116\kms$ for silicon,
+and the observed cache widths including blending are $115$ and
+$162\kms$. Since $\sigma_{\rm tot} = \sqrt{\sigma_{\rm th}^2 +
+\sigma_v^2}$, moving $\sigma_v$ from $0$ to $10\kms$ changes the total
+line width by $0.2$--$0.4\%$, and moving it to $25\kms$ changes it by
+$1.2$--$2.5\%$. Those steps change the measured residual by factors of
+$3.3$ and $14$ respectively. A sub-percent change in the observable
+cannot produce a several-hundred-percent change in the residual through
+any physical mechanism, so the jump is a numerical artifact of the
+$\sigma_v \to 0$ limit --- where both broadening paths clamp their width
+at $10^{-12}$ and cease to agree --- and not an emulator error.
+
+It is also unreachable. The turbulent velocity prior is
+$\mathcal{U}(30, 600)\kms$ (\code{priors.py}), so no fit can enter the
+affected region; the lowest published intracluster value is
+$78\pm17\kms$; and a source with genuinely zero turbulence would still
+present the $115$--$162\kms$ thermal profile, which is what the $25\kms$
+row already measures. The artifact is therefore left documented and
+unfixed, on the understanding that anyone widening the prior floor below
+$30\kms$ must revisit it --- a kink at the edge of parameter space is
+harmless only while the parameter cannot go there.
+
+\paragraph{The obvious explanation is wrong.} Sec.~\ref{sec:broadrep}
+predicts that the delta-comb quadrature should fail once $\sigma_v$
+drops below one native bin, and since the bin subtends $c\,\Delta E/E$,
+the threshold should scale with energy: $60\kms$ at the soft edge of the
+$1.9$--$12\kev$ analysis band, $15\kms$ at the hard edge. Splitting the
+same sweep by energy (Table~\ref{tab:lowvband}) tests that directly, and
+it does not hold. The breakdown sits between $10$ and $25\kms$ in
+\emph{every} band, while the predicted threshold varies by a factor of
+four across them. In the $1.9$--$3\kev$ band, where a bin is $60\kms$
+wide, the residual is still flat at $0.075\%$ at $\sigma_v = 50\kms$ ---
+well inside the regime where the comb was supposed to have failed.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{rccccc}
+\toprule
+band (keV) & 1.9--3 & 3--5 & 5--6.4 & 6.4--7.2 & 7.2--12\\
+$c\,\Delta E/E$ ($\kms$) & 60 & 37 & 26 & 22 & 15\\
+share of counts & $13.5\%$ & $44.2\%$ & $18.6\%$ & $13.7\%$ & $10.0\%$\\
+\midrule
+$\sigma_v = 0$ & $2.35\%$ & $1.99\%$ & $1.53\%$ & $1.65\%$ & $0.98\%$\\
+$10\kms$   & $1.13\%$  & $0.51\%$  & $0.115\%$ & $0.290\%$ & $0.129\%$\\
+$25\kms$   & $0.111\%$ & $0.057\%$ & $0.057\%$ & $0.302\%$ & $0.128\%$\\
+$50\kms$   & $0.075\%$ & $0.056\%$ & $0.057\%$ & $0.285\%$ & $0.127\%$\\
+$100\kms$  & $0.073\%$ & $0.053\%$ & $0.057\%$ & $0.241\%$ & $0.123\%$\\
+$180\kms$  & $0.069\%$ & $0.049\%$ & $0.056\%$ & $0.184\%$ & $0.116\%$\\
+$300\kms$  & $0.066\%$ & $0.045\%$ & $0.055\%$ & $0.144\%$ & $0.110\%$\\
+$1000\kms$ & $0.065\%$ & $0.042\%$ & $0.052\%$ & $0.138\%$ & $0.083\%$\\
+\bottomrule
+\end{tabular}
+\caption{Counts-weighted residual split by energy band, single-temperature
+fiducial. The second row
+is the velocity subtended by one native training bin at the band centre
+--- the threshold the delta-comb argument predicts, which the data do
+not follow. The breakdown is at $10$--$25\kms$ in every band.}
+\label{tab:lowvband}
+\end{table}
+
+The likely reason is that the comb never survives to the detector: the
+Resolve response has a $\sim5\,\mathrm{eV}$ FWHM, which at $6.7\kev$ is
+a redistribution kernel of $\sigma \approx 95\kms$ --- four times wider
+than the training bin, and applied to truth and emulator alike. Any
+comb structure finer than that is smoothed away before the residual is
+formed, at every energy, which is exactly why the threshold refuses to
+track $\Delta E/E$.
+
+The sharp common jump between $10$ and $0\kms$ --- a factor of $2$--$13$
+depending on band --- is the same $\sigma_v \to 0$ numerical artifact
+discussed above, and appears in every band because the clamp is
+energy-independent. It is not pursued further, for the reasons given
+there.
+
+\paragraph{An unrelated finding.} The $6.4$--$7.2\kev$ band is the worst
+at \emph{every} velocity, $0.14$--$0.30\%$ against $0.04$--$0.13\%$
+elsewhere, and it degrades smoothly as $\sigma_v$ falls rather than
+showing a threshold. This is the Fe\,\textsc{xxv}/\textsc{xxvi} complex
+and it is the line-head temperature-conditioning floor of
+Sec.~\ref{sec:linehead_floor} showing up in a velocity sweep, not a
+broadening effect.
+
+Repeating the whole sweep in Gaussian-DEM mode reproduces the
+single-temperature numbers to three figures ($1.841\%$ vs $1.842\%$ at
+$\sigma_v = 0$, $0.127\%$ vs $0.134\%$ at $25\kms$, $0.085\%$ vs
+$0.091\%$ at $180\kms$), which is expected: a DEM spectrum is a weighted
+sum of the same per-element emissivities and inherits the same floor.
+
+The practical statement for users is therefore that across the whole
+$1.9$--$12\kev$ band and every sub-band of it, emulator fidelity is flat
+for any turbulence the prior admits, and this closes with no
+velocity-dependent caveat to carry forward.
 
 \paragraph{Discarded: monolithic $(T,v)$ emulator of broadened spectra
 (option~2, v1).} A two-parameter version of the winning architecture,
@@ -864,42 +1180,206 @@ be required.
 \label{sec:instruments}
 
 Native-grid metrics cannot answer whether the emulator is accurate
-\emph{at the resolution an instrument sees}. We evaluate on
-(i) resolution-matched grids (bin width $=$ FWHM/2 from published
-resolutions) and (ii) the actual detector channel grids, folding both
-truth and prediction through the real redistribution matrices: XRISM
-Resolve \code{rsl\_Hp\_L\_2025.rmf} \citep[$60000^2$, 93M non-zeros;][]
-{ishisaki25}, Chandra ACIS \code{aciss\_aimpt\_cy28.rmf}
-\citep{garmire03}, and HETG HEG/MEG grating RMFs \citep{canizares05},
-parsed from the OGIP format \citep{george07}. The instrument metric is
-Eq.~\ref{eq:mre} applied to integrated flux per channel with validity
-mask $F^{\rm true}>0$, band-restricted (Resolve: $1.8$--$12\kev$, the
-closed-gate-valve limit). ARF weighting is deliberately excluded
-(effective area does not mix channels).
+\emph{at the resolution an instrument sees}. We evaluate the full
+30-element abundance-summed spectrum on (i) resolution-matched grids
+(bin width $=$ FWHM/2 from published resolutions) and (ii) the actual
+detector channel grids, folding both truth and prediction through the
+real response: XRISM Resolve \code{rsl\_Hp\_L\_2025.rmf}
+\citep[$60000^2$, 93M non-zeros;][]{ishisaki25}, Chandra ACIS
+\code{aciss\_aimpt\_cy28.rmf} \citep{garmire03}, and HETG HEG/MEG
+grating RMFs \citep{canizares05}, parsed from the OGIP format
+\citep{george07}, each with its effective-area file. Truth is the SPEX
+cache itself, summed over the 30 elements at solar abundance and
+broadened by the exact \code{direct\_broadening\_matrix} on the native
+grid; no interpolation enters. Sixteen temperatures spanning
+$0.50$--$19.94\kev$, $\sigma_v = 180\kms$, band-restricted (Resolve:
+$1.8$--$12\kev$, the closed-gate-valve limit).
+Tooling: \code{scripts/emulator/benchmark\_instruments30.py}.
 
-Findings: (i) \emph{median} channel errors (0.03--0.08\%) are better
-than native MRE -- rebinning averages independent per-bin errors;
-(ii) \code{big\_trunk} is the best model on ACIS and both gratings and
-repairs the Tier-1 grating regression; (iii) at Resolve's 0.5\,eV
-channels, sub-bin line placement -- exact-bin deposit vs.\ flux split
-across a channel edge -- is a real error mode invisible on the native
-grid; (iv) unweighted per-channel \emph{means} are ill-conditioned:
-rebinning gives every channel a scrap of flux, so near-empty channels
-(unbounded relative error on $\sim$zero truth) and the 4/16 coolest
-test spectra (negligible in-band flux) dominate, with means swinging by
-$30\times$ between models whose medians agree.
-
-\paragraph{Discarded: unweighted per-channel means as a headline
-number.} For publication, the flux-weighted error
+\paragraph{Metric.} The headline number is the flux-weighted error
 \begin{equation}
 \mre^{\rm flux}_s
 = \frac{\sum_c F^{\rm true}_{sc}\,\varepsilon_{sc}}{\sum_c F^{\rm true}_{sc}}
-= \frac{\sum_c |F^{\rm pred}_{sc}-F^{\rm true}_{sc}|}{\sum_c F^{\rm true}_{sc}}
+= \frac{\sum_c |F^{\rm pred}_{sc}-F^{\rm true}_{sc}|}{\sum_c F^{\rm true}_{sc}},
 \end{equation}
-(the misplaced-flux fraction) is immune to empty-channel pathology by
-construction; implementation is a planned change. Restricting the
-$1.8\kev$ Resolve cutoff changed results by $<2\%$ relative -- the
-pathology lives inside the science band, not below it.
+the misplaced-flux fraction, now implemented. It replaces the
+unweighted per-channel mean, which is ill-conditioned: rebinning gives
+every channel a scrap of flux, so near-empty channels (unbounded
+relative error on $\sim$zero truth) and the coolest spectra (negligible
+in-band flux) dominate, and means swing by $30\times$ between models
+whose medians agree. $\mre^{\rm flux}$ is immune to that by
+construction.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+& \multicolumn{2}{c}{resolution-matched} & \multicolumn{3}{c}{folded through the response}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-6}
+& $\mre^{\rm flux}$ & median & $\mre^{\rm flux}$ & median & no ARF\\
+\midrule
+Resolve & $0.232\%$ & $0.087\%$ & $\mathbf{0.103\%}$ & $0.077\%$ & $0.163\%$\\
+ACIS    & $0.104\%$ & $0.052\%$ & $\mathbf{0.093\%}$ & $0.048\%$ & $0.094\%$\\
+HEG     & $1.158\%$ & $0.281\%$ & $\mathbf{0.264\%}$ & $0.092\%$ & $0.752\%$\\
+MEG     & $1.256\%$ & $0.373\%$ & $\mathbf{0.212\%}$ & $0.085\%$ & $0.676\%$\\
+\bottomrule
+\end{tabular}
+\caption{Instrument-level accuracy of the 30-element emulator, 16
+temperatures, $\sigma_v=180\kms$. ``Median'' is the median per-channel
+relative error over occupied channels. The last column repeats the
+folded evaluation with a flat unit effective area, as in the earlier
+Fe-only version of this test.}
+\label{tab:p5}
+\end{table}
+
+Every instrument lands below $0.3\%$ once folded, and median channel
+errors ($0.05$--$0.09\%$) are better than the native MRE because
+rebinning averages independent per-bin errors. The gratings are the
+outlier before folding: their bands reach $0.4$--$0.8\kev$, where the
+emulator is weakest and where one training bin subtends
+$150$--$300\kms$ (Sec.~\ref{sec:broadrep}).
+
+\paragraph{The ARF is a weight on the metric, not just a
+normalisation.} The earlier version of this test excluded effective
+area on the grounds that it does not mix channels. That is true of the
+\emph{redistribution} but not of the \emph{score}: writing the folded
+residual as $\sum_c |\sum_e a_e r_e R_{ec}| / \sum_c\sum_e a_e F^{\rm
+true}_e R_{ec}$, the effective area $a_e$ sits inside both sums and
+reweights which energies the number is about. Setting $a_e=1$ does not
+remove a weighting, it asserts a uniform one that no instrument has.
+The effect is large and one-directional here (Table~\ref{tab:p5}, last
+column): $2.9\times$ for HEG, $3.2\times$ for MEG, $1.6\times$ for
+Resolve, nil for ACIS. The gratings gain most because a flat area
+over-weights precisely the soft band where the emulator is worst and
+the real area is small. We note that a single-element trial gave the
+\emph{opposite} sign for Resolve; the direction depends on where each
+instrument's area falls relative to the emulator's error distribution
+and cannot be guessed.
+
+\paragraph{Sub-bin line placement: refuted.} An earlier version of this
+section reported sub-bin placement at Resolve's $0.5\,\mathrm{eV}$
+channels as ``a real error mode invisible on the native grid''. It is
+not. Because \code{find\_line\_bins} flags bins rather than lines, the
+line head carries flux at training-bin \emph{centres}
+(Sec.~\ref{sec:broadrep}), so evaluating onto a grid whose edges are
+offset by a fraction of a bin should, if the effect is real, depend on
+that offset. We sweep the phase of a target grid of exactly the
+training bin width ($0.4914\,\mathrm{eV}$) over $[0,1)$: phase $0$
+aligns edges with the training grid, phase $\tfrac12$ puts every
+training bin centre on a target edge. Folded, the sweep is flat to
+$2.3\%$ --- $0.110$--$0.113\%$ at $\sigma_v=180\kms$ and
+$0.133$--$0.136\%$ at $25\kms$.
+
+A null result is only as good as the sensitivity of the test that
+produced it, so the sweep is calibrated against an injected control:
+the truth displaced by a known $0.1$, $0.25$ or $0.5$ of a bin. Folded,
+those raise the same score to $0.205$, $0.435$, $0.834\%$ at $180\kms$
+and $0.275$, $0.594$, $1.137\%$ at $25\kms$. A tenth of a bin thus
+roughly doubles the folded error, against a phase dependence of
+$2\%$. The effect is absent, not hidden (Fig.~\ref{fig:p5subbin}).
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/p5_subbin.pdf}
+\caption{Sub-bin line placement, measured against a calibrated control.
+Lines: the folded flux-weighted error when the truth is displaced by a
+known coherent fraction of a training bin. Open markers at zero
+displacement: the observed spread of the grid-phase sweep across its
+full $[0,1)$ bin range, which is smaller than the marker. The metric
+resolves a tenth of a bin; the emulator shows no phase dependence at
+all.}
+\label{fig:p5subbin}
+\end{figure}
+
+\paragraph{What folding does and does not erase.} The control also
+settles a question left open in Sec.~\ref{sec:broadrep}, where the
+delta-comb argument was said to bound an intermediate quantity because
+the redistribution kernel erases the comb. The response in fact
+discriminates between two displacements that are indistinguishable on
+the unfolded grid. An \emph{incoherent} displacement --- each line
+independently misplaced within its own bin, which is the quantisation
+mode --- is averaged away by a kernel several training bins wide: at
+$25\kms$ the unfolded error is $1.184\%$ and the folded error
+$0.134\%$, a factor $8.8$. A \emph{coherent} displacement --- every
+line shifted alike, i.e.\ a gain or energy-scale error --- moves flux
+systematically and survives: $7.516\%$ unfolded against $1.137\%$
+folded, a factor of only $6.6$, still $8.5\times$ the baseline. The
+practical reading is that this architecture is insensitive to its own
+binning but \emph{is} exposed to gain calibration, which is an
+instrument requirement rather than an emulator defect.
+
+A corollary is that folded accuracy is nearly velocity-independent:
+$0.110\%$ at $180\kms$ against $0.134\%$ at $25\kms$, a factor $1.2$,
+even though the unfolded error degrades by $4.4\times$ over the same
+range exactly as the comb-quadrature argument of
+Sec.~\ref{sec:broadrep} predicts. This is the instrument-level
+counterpart of Sec.~\ref{sec:lowsigmav}: there is no low-turbulence
+penalty at the detector.
+
+\paragraph{On-grid evaluation is not flattering the result.} Because
+the 30 element caches were generated in groups they do not share a
+temperature grid --- $8619$ temperatures are common to all 30, and no
+temperature is in the test split of every element --- so the
+evaluation above uses cache rows that most elements saw in training.
+Two checks bound what that costs. First, the per-element native median
+error is the same on training and held-out rows to within $0.4\%$
+(ratios $1.000$, $0.999$, $0.999$, $1.002$, $0.996$ for C, O, Si, Fe,
+Ni): there is no memorisation to exploit. Second, repeating the folded
+evaluation against PCHIP truth at off-grid temperatures paired
+one-to-one with the on-grid set changes the answer by under $3\%$
+(Resolve $0.103\to0.106\%$, ACIS $0.093\to0.094\%$, HEG
+$0.264\to0.265\%$, MEG $0.212\to0.213\%$). An unpaired off-grid set
+appears $10$--$40\%$ worse, but its temperatures cluster below
+$1\kev$, where the emulator is weaker; that is a temperature effect,
+not an on-grid effect.
+
+\paragraph{Future work: train the line head on SPEX's line list, not on
+lines recovered from binned spectra.}
+\label{par:linelist}
+The measurements above show that bin-quantised line energies cost
+nothing at the resolution of any instrument now flying. They also make
+plain that the current pipeline is doing avoidable work: SPEXACT is a
+line-based code that computes transition energies and emissivities
+individually and bins them only at output, and \code{ascdump} can emit
+that list. \code{find\_line\_bins} is therefore a detector for
+information the generator already had, and its output is a
+lossy re-encoding of it --- a thermally broadened line becomes several
+independent amplitude slots at bin centres, from which the true line
+energy is not recoverable. Training the line head directly on the SPEX
+line list would remove the quantisation by construction rather than
+bounding its consequences empirically, as this section has had to.
+
+The model-side change is small: \code{deposit\_gaussian\_lines} already
+accepts arbitrary line energies and integrates exact Gaussians over any
+target binning, so only the construction of \code{line\_energies}
+assumes bin centres. The cost lies in the training data. Supervision
+would move from per-bin flux in flagged bins --- which is what the
+cache contains --- to per-\emph{line} flux, which a binned cache cannot
+provide; each training point becomes a continuum on a grid plus a line
+list with fluxes, so the cache must be regenerated. Selection does not
+disappear either, since SPEXACT's transition count is far larger than
+any usable slot budget: it moves from a threshold on binned flux to an
+emissivity threshold on physical lines, which is at least a
+well-posed criterion. The natural design remains hybrid, with strong
+lines explicit and unresolved weak ones absorbed into the trunk as
+pseudo-continuum --- structurally what exists today, minus the
+quantisation.
+
+Two returns justify the effort, neither of them a correctness fix.
+First, the emulator would become resolution-independent by
+construction: the sub-bin question, the \code{scatter\_to\_grid}
+requirement that the target grid be finer than the source, and the
+delta-comb argument of Sec.~\ref{sec:broadrep} all cease to arise at
+any target resolution, including instruments finer than Resolve.
+Second, and more valuable scientifically, line energies carry ion
+identities, so the thermal width of Eq.~(1) becomes analytic and free
+per ion instead of frozen into the cache at $T_{\rm ion}=T_e$. That
+makes $T_{\rm ion}\neq T_e$ and per-ion turbulence fittable rather than
+assumed --- precisely the measurements microcalorimeter spectroscopy
+exists to make \citep{hitomi16,hitomi18}. The principal risk is tighter
+version-locking to a SPEXACT release, an exposure the atomic-data
+systematic already documented elsewhere in this work makes explicit
+rather than new.
 
 \section{Inference feasibility for the 30-element model}
 \label{sec:inference}
@@ -929,7 +1409,13 @@ additionally be truncated at $10^{-5}$ of row peak (54\% of non-zeros,
 
 A survey of recent ML-venue literature identifies candidates in three
 categories: improvements on deployed strategies, competing
-alternatives, and additions for performance per unit compute.
+alternatives, and additions for performance per unit compute. The
+largest structural change we would make, however, comes from the
+physics side rather than this literature: supervising the line head on
+SPEX's own transition list instead of on lines recovered from binned
+spectra, which would make the emulator resolution-independent by
+construction and free the per-ion thermal width currently frozen into
+the training cache (p.~\pageref{par:linelist}).
 
 \paragraph{Improvements on deployed strategies.}
 (i) Our error-prioritized sampling is a \emph{biased} gradient
@@ -1260,6 +1746,14 @@ Tancik, M., et al.\ 2020, NeurIPS (Fourier features)
 \bibitem[Wu et al.(2023)]{wu23}
 Wu, C., et al.\ 2023, Comput.~Methods Appl.~Mech.~Eng., 403, 115671
 (RAD/RAR-D adaptive sampling)
+
+\bibitem[XRISM Collaboration(2026a)]{xrism_a496}
+XRISM Collaboration 2026a, arXiv:2607.00114 (The quiescent sloshing core
+of Abell 496)
+
+\bibitem[XRISM Collaboration(2026b)]{xrism_m87}
+XRISM Collaboration 2026b, arXiv:2512.06596 (Dynamics in the hot
+gaseous atmosphere of M87)
 
 \end{thebibliography}
 

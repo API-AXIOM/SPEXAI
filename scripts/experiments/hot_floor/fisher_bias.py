@@ -114,17 +114,43 @@ def linear_bias_fisher(fwd, pars, d, verbose=True):
     return b_sys, sigma_ref, cond_F
 
 
+# native training-grid bin width and c, for the per-band resolution floor
+TRAIN_DE_KEV = 4.914e-4
+C_KMS_LOCAL = 299792.458
+
+
 def _rebin(a: np.ndarray, g: int) -> np.ndarray:
     """Sum a 1-D array into non-overlapping groups of g channels."""
     n = (a.size // g) * g
     return a[:n].reshape(-1, g).sum(1)
 
 
-def _diagnose_residual(fwd, pars, d, mu0):
+def _diagnose_residual(fwd, pars, d, mu0, truth_at_vel=None,
+                       velocities=(0.0, 10.0, 25.0, 50.0, 100.0, 180.0,
+                                   300.0, 1000.0), chan_kev=None,
+                       bands=((1.9, 3.0), (3.0, 5.0), (5.0, 6.4),
+                              (6.4, 7.2), (7.2, 12.0))):
     """Characterise the truth-vs-emulator residual: is the big native-resolution
     RMS a sub-resolution lineshape artifact (averages down with binning) or a
     coherent emissivity error (survives binning)? Reports unweighted and
-    counts-weighted RMS + deviance/dof vs channel grouping, and at sigma_v=0.
+    counts-weighted RMS + deviance/dof vs channel grouping, then sweeps sigma_v.
+
+    ``truth_at_vel(v)`` must return the N_REF-scaled truth counts rebuilt at
+    velocity ``v``. It is REQUIRED for the velocity sweep: until 2026-09-02 this
+    function re-evaluated only the emulator at sigma_v=0 while reusing the truth
+    built at the fiducial 180 km/s, so the "7% at sigma_v=0" it reported was a
+    broadened truth compared against an unbroadened model -- it measured the size
+    of the broadening operation, not any emulator error. Both sides must move
+    together or the number is meaningless.
+
+    ``chan_kev`` (in-band channel energies) additionally splits the sweep by
+    energy. This is not cosmetic: the native training grid is LINEAR at
+    0.4914 eV, so one bin subtends c*dE/E -- 78 km/s at the 1.9 keV band edge
+    but only 12 km/s at 12 keV. The delta-comb line representation degrades
+    once sigma_v drops below one bin, so the band-integrated number (dominated
+    by Fe K, where bins are narrow) is the optimistic case and hides the soft
+    end of the band, where the same threshold sits inside the range of observed
+    turbulent velocities.
     """
     x0 = np.array([p.truth for p in pars])
     print("\nRESIDUAL DIAGNOSTIC (truth d vs emulator mu0, N_REF in-band):")
@@ -138,16 +164,64 @@ def _diagnose_residual(fwd, pars, d, mu0):
         dev = poisson_deviance(mg, dg) / (dg.size - len(pars))
         print(f"{g:>6} {0.5*g:>8.1f} {unw:>9.3e} {cw:>9.3e} {dev:>9.2e}",
               flush=True)
-    # velocity off: isolates whether velocity broadening drives the mismatch
+    if truth_at_vel is None:
+        print("\n(no truth_at_vel supplied -- velocity sweep skipped; see the "
+              "docstring for why the old truth-reuse shortcut was withdrawn)")
+        return
+    # sigma_v sweep with BOTH sides rebuilt at each velocity. The grid reaches
+    # 0 (no turbulence; lines still carry SPEX's thermal width, which is baked
+    # into the training cache) and samples near 10 km/s, below the lowest
+    # published ICM turbulence (78 +/- 17 km/s, Abell 496).
     iv = fwd.names.index("sigma_v")
-    xv = x0.copy(); xv[iv] = 0.0
-    muv = np.clip(fwd(xv), 1e-30, None)
-    # rescale truth stays same d; compare shape via counts-weighted RMS
-    rv = d / muv - 1.0
-    cwv = np.sqrt(np.sum(muv * rv ** 2) / np.sum(muv))
-    print(f"counts-weighted RMS at sigma_v=0 (native): {cwv:.3e} "
-          f"(vs {np.sqrt(np.sum(mu0*(d/mu0-1)**2)/np.sum(mu0)):.3e} at 180)",
-          flush=True)
+    print("\nSIGMA_V SWEEP (truth and emulator both rebuilt at each v):")
+    # ``norm`` = sum(truth)/sum(model) in band. It is reported rather than
+    # divided out: a common multiplicative offset is absorbed by the free
+    # log_norm in a real fit, so folding it into cw.RMS would overstate the
+    # error, but hiding it would conceal a genuine flux-conservation difference
+    # between the truth's and the emulator's broadening.
+    print(f"{'sigma_v':>8} {'unw.RMS':>9} {'cw.RMS':>9} {'cw.shape':>9} "
+          f"{'norm':>8} {'dev/dof':>9}")
+    band_rows = []
+    for v in velocities:
+        dv = truth_at_vel(float(v))
+        xv = x0.copy(); xv[iv] = float(v)
+        muv = np.clip(fwd(xv), 1e-30, None)
+        r = dv / muv - 1.0
+        unw = np.sqrt(np.mean(r ** 2))
+        cw = np.sqrt(np.sum(muv * r ** 2) / np.sum(muv))
+        k = float(dv.sum() / muv.sum())
+        rs = dv / (k * muv) - 1.0                     # norm-marginalised shape
+        cws = np.sqrt(np.sum(muv * rs ** 2) / np.sum(muv))
+        dev = poisson_deviance(muv, dv) / (dv.size - len(pars))
+        print(f"{v:>8.0f} {unw:>9.3e} {cw:>9.3e} {cws:>9.3e} {k:>8.5f} "
+              f"{dev:>9.2e}", flush=True)
+        if chan_kev is not None:
+            # counts-weighted RMS within each band, each band separately
+            # norm-marginalised (a fit's free normalisation is global, but a
+            # per-band offset is exactly the shape error we want to keep)
+            band_rows.append((v, [
+                float(np.sqrt(np.sum(muv[m] * r[m] ** 2) / np.sum(muv[m])))
+                if (m := ((chan_kev >= lo) & (chan_kev < hi))).any()
+                and np.sum(muv[m]) > 0 else float("nan")
+                for lo, hi in bands]))
+
+    if chan_kev is None:
+        return
+    # counts share per band, at the fiducial mu0, to weight the columns
+    share = [float(mu0[m].sum() / mu0.sum())
+             if (m := ((chan_kev >= lo) & (chan_kev < hi))).any() else 0.0
+             for lo, hi in bands]
+    hdr = "".join(f"{f'{lo:g}-{hi:g}':>11}" for lo, hi in bands)
+    print("\nPER-BAND counts-weighted RMS (keV bands). "
+          "'bin' = c*dE/E at the band centre, the velocity below which the "
+          "delta-comb line representation degrades:")
+    print(f"{'sigma_v':>8}{hdr}")
+    print(f"{'bin km/s':>8}" + "".join(
+        f"{C_KMS_LOCAL * TRAIN_DE_KEV / (0.5 * (lo + hi)):>11.0f}"
+        for lo, hi in bands))
+    print(f"{'counts%':>8}" + "".join(f"{100 * s:>11.1f}" for s in share))
+    for v, row in band_rows:
+        print(f"{v:>8.0f}" + "".join(f"{x:>11.3e}" for x in row), flush=True)
 
 
 def main():
@@ -209,7 +283,22 @@ def main():
           flush=True)
 
     if args.diag:
-        _diagnose_residual(fwd, pars, d, mu0)
+        def truth_at_vel(v):
+            """Truth counts rebuilt at velocity ``v``, scaled to N_REF in-band.
+
+            Rescaled independently at each v: broadening conserves flux inside
+            the band only up to what it pushes across the band edges, so reusing
+            the 180 km/s normalisation would inject a spurious multiplicative
+            offset at the ends of the sweep.
+            """
+            p_v = dict(perseus, vel=float(v))
+            c = stream_truth_counts(cfg, response, absorption, perseus=p_v)
+            c = c[keep]
+            return c * (N_REF / c.sum())
+
+        chan_kev = response.chan_e_cent.numpy()[keep]
+        _diagnose_residual(fwd, pars, d, mu0, truth_at_vel=truth_at_vel,
+                           chan_kev=chan_kev)
         return
 
     b_sys, sigma_ref, cond_F = linear_bias_fisher(fwd, pars, d)
