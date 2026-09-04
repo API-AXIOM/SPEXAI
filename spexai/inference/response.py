@@ -154,8 +154,17 @@ class Response:
 
     def fold(self, flux_per_bin):
         """flux_per_bin: (..., N_energy) integrated flux on ``energy_edges``.
-        Returns (..., N_channels) counts-rate: sum_e flux[e]*ARF[e]*R[e, c]."""
-        f = torch.as_tensor(flux_per_bin, dtype=torch.float32)
-        eff = (f * self.arf).detach().cpu().numpy()     # (..., N_energy)
+        Returns (..., N_channels) counts-rate: sum_e flux[e]*ARF[e]*R[e, c].
+
+        Always returns a CPU tensor: the fold itself is a scipy sparse matmul,
+        so a device input is brought to host here rather than at each call
+        site. Callers on an accelerator do ``response.fold(...).to(device)``,
+        which is the existing contract -- ``self.arf`` lives on CPU, so without
+        the hop a CUDA ``flux_per_bin`` failed on the multiply below.
+        ``VectorForward`` bypasses this entirely with its own on-device sparse
+        fold; this path is for the serial ``JointOperatorModel``.
+        """
+        f = torch.as_tensor(flux_per_bin, dtype=torch.float32).detach().cpu()
+        eff = (f * self.arf).numpy()                    # (..., N_energy)
         counts = np.asarray(eff @ self.R)               # (..., N_channels)
         return torch.tensor(counts, dtype=torch.float32)

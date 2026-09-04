@@ -255,7 +255,12 @@ class JointOperatorModel:
 
     def check_temperature(self, temp_kev):
         """Raise if any temperature falls outside the trained range."""
-        t = torch.as_tensor(temp_kev, dtype=torch.float64).reshape(-1)
+        # .cpu() first: this is a range check, not part of the computation, and
+        # MPS has no float64 at all -- casting an on-device tensor there raises
+        # before the check can run. CUDA is unaffected either way.
+        t = torch.as_tensor(temp_kev)
+        t = t.detach().cpu() if torch.is_tensor(t) else t
+        t = torch.as_tensor(t, dtype=torch.float64).reshape(-1)
         lo, hi = self.temp_range
         # a hair of tolerance: t_lo/t_hi are float32 buffers, so a caller that
         # legitimately asks for the endpoint can land 1e-7 outside it
