@@ -92,7 +92,26 @@ class Absorption:
                          self.sigma_ref, left=self.sigma_ref[0], right=0.0)
 
     def transmission(self, energy_kev, n_h, device=None) -> torch.Tensor:
-        """``exp(-N_H * sigma(E))`` as a float32 tensor. ``n_h`` in cm^-2."""
+        """``exp(-N_H * sigma(E))`` as a float32 tensor. ``n_h`` in cm^-2.
+
+        Accepts a CUDA ``energy_kev``: the cross-section lookup is numpy, so
+        the energies hop to host and the result comes back on the caller's
+        device. Without this the serial ``JointOperatorModel.flux`` path could
+        not run on a GPU at all with absorption active -- it passes this method
+        (not :meth:`transmission_torch`) and numpy refuses a CUDA tensor.
+
+        The round trip is deliberate rather than switching that path to
+        ``transmission_torch``: this one interpolates sigma in float64 and that
+        one in float32, which differ by up to 2e-4 relative. That is below the
+        emulator's own ~1e-3 floor, but every truth spectrum so far was
+        generated through THIS path, and a truth-vs-model mismatch of numerical
+        origin lands directly in ``b_sys``, which is the quantity the bias
+        campaign measures.
+        """
+        if torch.is_tensor(energy_kev):
+            if device is None:
+                device = energy_kev.device
+            energy_kev = energy_kev.detach().cpu()
         t = np.exp(-float(n_h) * self.sigma(energy_kev))
         return torch.as_tensor(t, dtype=torch.float32, device=device)
 
