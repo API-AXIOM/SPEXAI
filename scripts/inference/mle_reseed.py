@@ -131,25 +131,47 @@ def worst_ratio(rec):
     return float((b / np.asarray(rec["sigma_ref"])).max())
 
 
-def build_tierb_problem(args, rec, counts_row, tz):
-    """Forward/prior/truth for one Tier B point, matching the sweep exactly.
+def tierb_response(tz):
+    """(response, keep, rmf, arf) for the Tier B measurement.
 
-    Mirrors ``bake_off.build_problem`` but on the sweep's terms: this point's
-    LHS parameters rather than the Perseus fiducials, and ``EXCLUDE_NONE``
-    rather than the Perseus resonance-scattering mask -- the mask is what
-    ``bias_sweep`` used to produce the ``b_sys`` we are calibrating, and it
-    deletes exactly the Fe-K channels the emulator is worst at (see
-    ``campaign.EXCLUDE_NONE``). Using the other mask here would compare two
-    different measurements.
+    ``EXCLUDE_NONE``, not the Perseus resonance-scattering mask: the unmasked
+    band is what ``bias_sweep`` used to produce the ``b_sys`` we are
+    calibrating, and the mask deletes exactly the Fe-K channels the emulator is
+    worst at (see ``campaign.EXCLUDE_NONE``). Measuring k under a different
+    mask would compare two different things.
+
+    Split out of ``build_tierb_problem`` so the multi-point sweep shares these
+    choices by construction rather than by a second copy that can drift.
     """
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     check_truth_response(tz, rmf, arf)
-    keep = band_mask(response, exclude=EXCLUDE_NONE)
+    return response, band_mask(response, exclude=EXCLUDE_NONE), rmf, arf
 
+
+def tierb_forward(args, names, response, keep):
+    """The emulator forward. Identical for every single-T sweep point, so the
+    sweep builds it ONCE -- only the truth vector and the prior box vary."""
+    emu = JointOperatorModel(models_dir=args.store, device=args.device,
+                             accelerate=False)
+    ab = AbundanceModel(emu.elements)
+    for z in FREE_Z:
+        ab.free_element(z, SYMBOL[z])
+    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z],
+                 1.0, 26)
+    return VectorForward(
+        emu, response, keep, names, ab, absorption=Absorption.default(),
+        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
+        velocity=None, device=args.device, chunk=args.chunk,
+        batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
+        echunk=args.echunk)
+
+
+def tierb_point(args, rec, counts_row, keep, verbose=True):
+    """Per-point pieces: (pars, names, truth, mu_true, log_norm_truth)."""
     d_ref = counts_row[keep]
     if d_ref.sum() <= 0:
-        raise SystemExit(f"point has zero in-band truth counts")
+        raise SystemExit("point has zero in-band truth counts")
     scale = args.counts / d_ref.sum()
     mu_true = d_ref * scale
     log_norm_truth = float(np.log10(NORM_REF * scale))
@@ -160,29 +182,23 @@ def build_tierb_problem(args, rec, counts_row, tz):
     if names != list(rec["names"]):
         raise SystemExit(f"parameter order changed: jsonl has {rec['names']}, "
                          f"build_pars gives {names}")
+    if verbose:
+        print(f"point {rec['point']}: kT={rec['params']['kT']:.3f} "
+              f"sigma_v={rec['params']['sigma_v']:.1f} "
+              f"n_h={rec['params']['n_h']:.3f}  cond(F)={rec['cond_F']:.1e}  "
+              f"worst |b|/sig@{rec['n_ref']:.0e}={worst_ratio(rec):.3f}",
+              flush=True)
+        print(f"  {args.counts:.1e} in-band counts on {int(keep.sum())} "
+              f"channels; log_norm_truth={log_norm_truth:.4f}", flush=True)
+    return pars, names, np.array([p.truth for p in pars]), mu_true
 
-    emu = JointOperatorModel(models_dir=args.store, device=args.device,
-                             accelerate=False)
-    ab = AbundanceModel(emu.elements)
-    for z in FREE_Z:
-        ab.free_element(z, SYMBOL[z])
-    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z],
-                 1.0, 26)
 
-    forward = VectorForward(
-        emu, response, keep, names, ab, absorption=Absorption.default(),
-        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
-        velocity=None, device=args.device, chunk=args.chunk,
-        batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
-        echunk=args.echunk)
+def build_tierb_problem(args, rec, counts_row, tz):
+    """Forward/prior/truth for one Tier B point, matching the sweep exactly."""
+    response, keep, rmf, arf = tierb_response(tz)
+    pars, names, truth, mu_true = tierb_point(args, rec, counts_row, keep)
+    forward = tierb_forward(args, names, response, keep)
     prior = BoxPrior.from_params(pars, device=args.device)
-    truth = np.array([p.truth for p in pars])
-    print(f"point {rec['point']}: kT={rec['params']['kT']:.3f} "
-          f"sigma_v={rec['params']['sigma_v']:.1f} n_h={rec['params']['n_h']:.3f}"
-          f"  cond(F)={rec['cond_F']:.1e}  worst |b|/sig@{rec['n_ref']:.0e}="
-          f"{worst_ratio(rec):.3f}", flush=True)
-    print(f"  {args.counts:.1e} in-band counts on {int(keep.sum())} channels; "
-          f"log_norm_truth={log_norm_truth:.4f}", flush=True)
     return forward, prior, pars, truth, names, mu_true, (rmf, arf)
 
 
@@ -559,9 +575,14 @@ def main():
                 frac = np.where(resolved, move.max(axis=0)
                                 / np.maximum(bias_sig, 1e-12), 0.0)
                 worst = int(np.argmax(frac))
+                # NB this counts parameters whose MEASURED bias clears the
+                # noise; the k table flags on whether B_SYS does. The two
+                # differ, so the counts need not match -- name them apart
+                # rather than let a reader read a contradiction.
                 print(f"  as a fraction of the measured bias, over the "
-                      f"{int(resolved.sum())} resolved parameters, worst is "
-                      f"{names[worst]} at {frac[worst]:.1%}", flush=True)
+                      f"{int(resolved.sum())} parameters with a resolved "
+                      f"measured bias, worst is {names[worst]} at "
+                      f"{frac[worst]:.1%}", flush=True)
                 if frac[worst] > 0.10:
                     print(f"  WARNING: {names[worst]}'s fit is still moving by "
                           f"{frac[worst]:.0%} of its own bias -- NOT "
