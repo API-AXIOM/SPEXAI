@@ -250,7 +250,8 @@ def fisher_scoring(forward, prior, pars, truth, data_batch, n_iter):
 
 
 def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
-                n_restarts=1, start=None, sigma_ref=None, objective="mle"):
+                n_restarts=1, start=None, sigma_ref=None, objective="mle",
+                tol_change=0.0):
     """K-way batched L-BFGS MLE on the autograd path. GPU only in practice.
 
     Rows are independent (row i's loss depends only on theta_i), so the true
@@ -272,6 +273,17 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
     diagnostic that matters here: this optimiser is started at the truth, so
     stopping early biases the measured bias toward zero -- it fails in the
     direction that would let us declare the linearisation fine.
+
+    ``tol_change`` defaults to 0, NOT torch's 1e-9. Torch applies that value as
+    an ABSOLUTE threshold on both the step size and ``|loss - prev_loss|``, and
+    at high counts this problem is scaled such that both legitimately sit near
+    it: at 1e9 counts sigma(Fe) ~ 1.9e-4 and sigma(log_norm) ~ 6e-5, so real
+    optimisation steps are themselves ~1e-9 in absolute terms. The default
+    stopped L-BFGS after a fraction of the requested iterations while the
+    parameters were still drifting by tenths of a sigma -- observed as pass 2
+    finishing in 1/5 the time of pass 1. Zero disables both checks and lets
+    ``max_iter`` and the restart diagnostic decide, which is what a
+    badly-conditioned problem (cond(F) ~ 1e7 here) needs.
     """
     device = forward.device
     K = data_batch.shape[0]
@@ -299,6 +311,7 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
     for r in range(n_restarts):
         opt = torch.optim.LBFGS([z], max_iter=max_iter,
                                 tolerance_grad=tol_grad,
+                                tolerance_change=tol_change,
                                 line_search_fn="strong_wolfe")
         t0 = time.time()
         loss = opt.step(make_closure(opt))
@@ -358,6 +371,11 @@ def main():
                          "the truth (control against a truth-anchored optimum)")
     ap.add_argument("--objective", choices=["mle", "map"], default="mle",
                     help="mle = likelihood only, what b_sys predicts")
+    ap.add_argument("--tol_change", type=float, default=0.0,
+                    help="torch LBFGS tolerance_change. 0 (default) disables "
+                         "it; torch's 1e-9 is ABSOLUTE and stops this problem "
+                         "prematurely at high counts, where sigma itself is "
+                         "~1e-4")
     ap.add_argument("--seed_chunk", type=int, default=None,
                     help="seeds per L-BFGS call (--method lbfgs). THE memory "
                          "lever: counts_torch(grad=True) does not chunk "
@@ -457,7 +475,8 @@ def main():
             m, mv = lbfgs_batch(forward, prior, data_batch[lo_k:hi_k], truth,
                                 args.max_iter, n_restarts=args.n_restarts,
                                 start=st, sigma_ref=sigma_ref,
-                                objective=args.objective)
+                                objective=args.objective,
+                                tol_change=args.tol_change)
             mle_parts.append(m)
             move_parts.append(mv)
             if torch.cuda.is_available():
@@ -468,10 +487,26 @@ def main():
             print("  WARNING: --n_restarts 1 gives no convergence diagnostic; "
                   "the reported movement is just the distance from the start.",
                   flush=True)
-        elif move.max() > 0.05:
-            print(f"  WARNING: final pass still moved {move.max():.2f} sigma "
-                  f"-- NOT converged. An under-converged fit sits near its "
-                  f"truth start and reports k too SMALL.", flush=True)
+        else:
+            # The meaningful test is movement against the BIAS being measured,
+            # not against sigma. At high counts the bias is many sigma, so a
+            # 0.4 sigma residual drift is a few per cent of the answer; at low
+            # counts the same 0.4 sigma would be the whole answer. Judging in
+            # sigma alone cried wolf at 1e9 counts and would have stayed silent
+            # where it mattered.
+            bias_sig = np.abs((mle - truth[None, :]).mean(0) / sigma_ref)
+            frac = move.max(axis=0) / np.maximum(bias_sig, 1e-12)
+            worst = int(np.argmax(frac))
+            print(f"\nconvergence: worst residual drift {move.max():.3f} sigma;"
+                  f" as a fraction of the measured bias, worst is "
+                  f"{names[worst]} at {frac[worst]:.1%}", flush=True)
+            if frac[worst] > 0.10:
+                print(f"  WARNING: {names[worst]}'s fit is still moving by "
+                      f"{frac[worst]:.0%} of its own bias -- NOT converged. An "
+                      f"under-converged fit sits near its truth start and "
+                      f"reports k too SMALL, which is the direction that "
+                      f"falsely exonerates the linearisation. Raise "
+                      f"--max_iter.", flush=True)
 
     if p6:
         # always report against the sigma b_sys was computed with, so k is a
