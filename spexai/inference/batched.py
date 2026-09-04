@@ -363,8 +363,14 @@ class BatchedJointForward:
         temp_kev = torch.as_tensor(temp_kev, dtype=torch.float32,
                                    device=device).view(-1)
         bin_edges = torch.as_tensor(bin_edges, dtype=torch.float32, device=device)
+        # .detach() before the scalar conversion: this only steers a branch
+        # (is absorption on at all?), it is not a value in the computation --
+        # n_h still reaches the graph through tfun below. Without it, torch
+        # warns on every call once n_h carries requires_grad, which it does on
+        # the differentiable path (P6's L-BFGS, HMC/NUTS, VI).
         absorb = (absorption is not None
-                  and float(torch.as_tensor(n_h, dtype=torch.float64).max()) > 0.0)
+                  and float(torch.as_tensor(n_h, dtype=torch.float64)
+                            .detach().max()) > 0.0)
         tfun = absorption.transmission_torch if absorb else None
         if echunk is None:
             echunk = self._echunk(temp_kev.numel(), mem_gb)

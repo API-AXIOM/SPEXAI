@@ -293,12 +293,29 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
     z0 = prior.to_unconstrained(th0)                      # (1, ndim) or (K, ndim)
     z = z0.expand(K, z0.shape[-1]).clone().detach().requires_grad_(True)
 
+    # Reference spectrum at the truth, held fixed: the likelihood is only
+    # needed up to a constant, and subtracting its value at mu_ref turns a sum
+    # of O(1e10) into a sum of O(1e2) without changing the argmax or a single
+    # gradient. This is not a nicety. At 1e9 counts the raw log-likelihood is
+    # 2.1e10, where float64 spacing is ~5e-6, so genuine improvements underflow
+    # to exactly zero and L-BFGS stops on |loss - prev_loss| == 0 while the
+    # parameters are still drifting -- observed as passes exiting in 10 s with
+    # 0.00e+00 movement, and as k coming out systematically low at 1e9 vs 1e7.
+    with torch.no_grad():
+        th_ref = torch.as_tensor(np.atleast_2d(truth), dtype=torch.float64,
+                                 device=device)
+        mu_ref = forward.counts_torch(th_ref, grad=False).double().clamp_min(1e-30)
+    log_mu_ref = torch.log(mu_ref)
+
     def make_closure(opt):
         def closure():
             opt.zero_grad()
             theta, logdet = prior.to_constrained(z.double())
             mu = forward.counts_torch(theta, grad=True).clamp_min(1e-30)
-            ll = (data.double() * torch.log(mu) - mu).sum(-1)
+            # delta log-likelihood against the fixed reference; the dropped
+            # terms (data*log_mu_ref - mu_ref) are constants in theta
+            ll = (data.double() * (torch.log(mu) - log_mu_ref)
+                  - (mu - mu_ref)).sum(-1)
             if objective == "map":
                 ll = ll + logdet
             loss = -ll.sum()
@@ -526,10 +543,16 @@ def main():
         print(f"{'param':>10} {'b_sys/sig':>10} {'meas/sig':>10} "
               f"{'k':>8} {'+-':>7}   (k = measured bias / linear b_sys)")
         for j, n in enumerate(names):
-            # a parameter the linear estimate says is unbiased has no ratio to
-            # measure: k is 0/0 and its error bar diverges. Flag, do not hide.
-            flag = "  (b_sys < 0.01 sigma: k undefined)" \
-                if abs(b_sys[j]) < 0.01 * sigma_ref[j] else ""
+            # k is a ratio, so it is only measurable where the DENOMINATOR is
+            # resolved above this run's own noise. The noise on the mean shift
+            # is se_d ~ sigma/sqrt(K), so a b_sys below a few se_d yields a
+            # large, meaningless k with a huge error bar -- exactly how Si came
+            # out at +10.8 and S at -30.2 in the 1e7 run, from b_sys of 0.08
+            # and 0.02 sigma. A fixed "b_sys < 0.01 sigma" threshold missed
+            # both because it ignored K.
+            flag = f"  (b_sys under {3 * se_d[j] / sigma_ref[j]:.2f} sigma " \
+                   f"noise floor: k not measurable)" \
+                if abs(b_sys[j]) < 3.0 * se_d[j] else ""
             print(f"{n:>10} {b_sys[j] / sigma_ref[j]:>+10.3f} "
                   f"{mean_d[j] / sigma_ref[j]:>+10.3f} {k[j]:>+8.2f} "
                   f"{se_k[j]:>7.2f}{flag}")
