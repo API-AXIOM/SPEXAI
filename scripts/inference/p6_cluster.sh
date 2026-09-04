@@ -41,6 +41,7 @@ R=$RESULTS/bias_sweep
 
 POINT=${1:-14}         # 14 = worst by |b_sys|/sigma_ref in the single-T sweep
 CHUNK=${2:-2}
+LEVELS=${3:-"1e7 1e8 1e9"}
 
 # Inputs: the UNMASKED jsonl (its b_sys is what P6 calibrates -- the Fe XXV cut
 # deletes the channels the emulator is worst at) and the STAMPED truth (the
@@ -49,13 +50,21 @@ CHUNK=${2:-2}
 BIAS=$R/bias_single_n20_s3.jsonl
 TRUTH=$R/truth_single_n20_s3_stamped.npz
 
-# Both count levels at the same point: k should be count-independent, since
-# b_sys is and the MLE bias tends to a fixed pseudo-true offset. If the two
-# disagree, P7's correction has to be count-aware -- cheap to learn now.
-for N in 1e7 1e9; do
+# Several count levels at the same point: k should be count-independent, since
+# b_sys is and the MLE bias tends to a fixed pseudo-true offset. If they
+# disagree, P7's correction has to be count-aware -- cheap to learn now, and
+# Tier B quotes at 1e6, three decades below where k is easiest to measure.
+#
+# --deterministic: the line deposit's index_add_ has repeated indices, so CUDA
+# sums in a varying order and identical parameters return slightly different
+# likelihoods (~0.085 measured). Against the shallow likelihood well at 1e7
+# that jitter stalls the line search; at 1e9 the well is ~60x deeper and it
+# does not matter. Torch raises if it has no deterministic kernel for an op --
+# that error is informative, not a failure of this script.
+for N in $LEVELS; do
     echo "=== point $POINT, $N counts ==="
     python -u scripts/inference/mle_reseed.py \
-        --method lbfgs --device cuda \
+        --method lbfgs --device cuda --deterministic \
         --bias_jsonl "$BIAS" --truth_npz "$TRUTH" \
         --point "$POINT" --counts $N --n_seeds 8 --seed_chunk "$CHUNK" \
         --max_iter 400 --n_restarts 3 --tol_change 0 \

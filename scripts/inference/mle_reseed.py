@@ -331,7 +331,20 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
                                 tolerance_change=tol_change,
                                 line_search_fn="strong_wolfe")
         t0 = time.time()
-        loss = opt.step(make_closure(opt))
+        opt.step(make_closure(opt))
+        # torch's LBFGS.step returns the loss at the START of the pass, not the
+        # end, so printing it made a pass look like it had achieved its own
+        # starting value. Re-evaluate. Two identical evaluations here will
+        # differ slightly: deposit_gaussian_lines accumulates with index_add_,
+        # whose duplicate indices make CUDA use atomicAdd, so the summation
+        # order varies call to call (see commit dc8b9d2). That jitter is also
+        # why a pass can report zero movement and still hand the next pass a
+        # different loss.
+        with torch.no_grad():
+            theta_f, _ = prior.to_constrained(z.detach().double())
+            mu_f = forward.counts_torch(theta_f, grad=False).double().clamp_min(1e-30)
+            loss = -((data.double() * (torch.log(mu_f) - log_mu_ref)
+                      - (mu_f - mu_ref)).sum(-1)).sum()
         cur = prior.to_constrained(z.detach().double())[0].cpu().numpy()
         move = np.abs(cur - prev)
         if sigma_ref is not None:
@@ -388,6 +401,14 @@ def main():
                          "the truth (control against a truth-anchored optimum)")
     ap.add_argument("--objective", choices=["mle", "map"], default="mle",
                     help="mle = likelihood only, what b_sys predicts")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="force deterministic CUDA kernels. The line deposit "
+                         "uses index_add_ with repeated indices, so CUDA sums "
+                         "in a varying order and identical parameters give "
+                         "slightly different likelihoods -- which stalls the "
+                         "line search once the remaining improvement is "
+                         "comparable to that jitter. Torch raises if it has no "
+                         "deterministic kernel, which is itself the answer")
     ap.add_argument("--tol_change", type=float, default=0.0,
                     help="torch LBFGS tolerance_change. 0 (default) disables "
                          "it; torch's 1e-9 is ABSOLUTE and stops this problem "
@@ -404,6 +425,13 @@ def main():
                           # recomputed below); kept only so the arg exists
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     p6 = args.bias_jsonl is not None
+
+    if args.deterministic:
+        # must precede any CUDA work; cuBLAS reads its workspace config once
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+        print("deterministic algorithms ON: identical parameters now give "
+              "identical likelihoods, at some cost in speed", flush=True)
 
     if p6:
         if args.truth_npz is None:
@@ -511,19 +539,36 @@ def main():
             # counts the same 0.4 sigma would be the whole answer. Judging in
             # sigma alone cried wolf at 1e9 counts and would have stayed silent
             # where it mattered.
-            bias_sig = np.abs((mle - truth[None, :]).mean(0) / sigma_ref)
-            frac = move.max(axis=0) / np.maximum(bias_sig, 1e-12)
-            worst = int(np.argmax(frac))
-            print(f"\nconvergence: worst residual drift {move.max():.3f} sigma;"
-                  f" as a fraction of the measured bias, worst is "
-                  f"{names[worst]} at {frac[worst]:.1%}", flush=True)
-            if frac[worst] > 0.10:
-                print(f"  WARNING: {names[worst]}'s fit is still moving by "
-                      f"{frac[worst]:.0%} of its own bias -- NOT converged. An "
-                      f"under-converged fit sits near its truth start and "
-                      f"reports k too SMALL, which is the direction that "
-                      f"falsely exonerates the linearisation. Raise "
-                      f"--max_iter.", flush=True)
+            delta = mle - truth[None, :]
+            bias_sig = np.abs(delta.mean(0) / sigma_ref)
+            # Judge drift against the bias ONLY for parameters whose bias this
+            # run can actually resolve. For the rest the denominator is
+            # consistent with zero, so the ratio explodes and reports a
+            # spurious emergency -- Cr came out at "1715% of its own bias" off
+            # a 0.021 sigma bias, while its k was never measurable anyway.
+            se_dsig = delta.std(0, ddof=1) / (np.sqrt(delta.shape[0])
+                                              * sigma_ref)
+            resolved = bias_sig > 3.0 * se_dsig
+            print(f"\nconvergence: worst residual drift {move.max():.3f} sigma "
+                  f"(absolute)", flush=True)
+            if not resolved.any():
+                print("  no parameter's bias is resolved above this run's "
+                      "noise, so there is nothing for the drift to be judged "
+                      "against -- add seeds or counts.", flush=True)
+            else:
+                frac = np.where(resolved, move.max(axis=0)
+                                / np.maximum(bias_sig, 1e-12), 0.0)
+                worst = int(np.argmax(frac))
+                print(f"  as a fraction of the measured bias, over the "
+                      f"{int(resolved.sum())} resolved parameters, worst is "
+                      f"{names[worst]} at {frac[worst]:.1%}", flush=True)
+                if frac[worst] > 0.10:
+                    print(f"  WARNING: {names[worst]}'s fit is still moving by "
+                          f"{frac[worst]:.0%} of its own bias -- NOT "
+                          f"converged. An under-converged fit sits near its "
+                          f"truth start and reports k too SMALL, which is the "
+                          f"direction that falsely exonerates the "
+                          f"linearisation. Raise --max_iter.", flush=True)
 
     if p6:
         # always report against the sigma b_sys was computed with, so k is a
