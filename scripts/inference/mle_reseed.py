@@ -76,6 +76,7 @@ solutions do not depend on where they began.
         --point 14 --counts 1e8 --n_seeds 40 --max_iter 200
 """
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -265,9 +266,47 @@ def fisher_scoring(forward, prior, pars, truth, data_batch, n_iter):
                                                     # truth, tiny K-scatter)
 
 
+@contextlib.contextmanager
+def _line_search_hook(records, tol_change=None):
+    """Wrap ``torch.optim.lbfgs._strong_wolfe`` to record it, and to fix it.
+
+    Two things, both because torch's LBFGS gives no other handle on its line
+    search:
+
+    * RECORD ``(t, ls_func_evals)`` for every line search. These are the only
+      numbers that distinguish "the optimiser converged" from "the line search
+      failed and returned a zero step". ``LBFGS.step`` keeps neither.
+    * FORWARD ``tolerance_change``. ``LBFGS.step`` calls ``_strong_wolfe``
+      WITHOUT passing the optimizer's ``tolerance_change`` (torch 2.13,
+      lbfgs.py:471), so the zoom phase's bracket-collapse test at lbfgs.py:110
+      always uses ``_strong_wolfe``'s OWN default of 1e-9 -- and that test is
+      ``|bracket width| * max|d| < tolerance_change``, i.e. absolute in
+      parameter units. This problem's genuine steps are ~1e-9 in those units
+      (sigma(log_norm) ~ 6e-5 at 1e9 counts), which is the identical trap that
+      the optimizer-level ``tolerance_change`` already sprang once. Passing
+      ``--tol_change 0`` did NOT reach here before this hook.
+    """
+    import torch.optim.lbfgs as _lb
+    orig = _lb._strong_wolfe
+
+    def patched(*args, **kwargs):
+        if tol_change is not None:
+            kwargs["tolerance_change"] = tol_change
+        out = orig(*args, **kwargs)
+        records.append((float(out[2]), int(out[3])))     # (t, ls_func_evals)
+        return out
+
+    _lb._strong_wolfe = patched
+    try:
+        yield
+    finally:
+        _lb._strong_wolfe = orig
+
+
 def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
                 n_restarts=1, start=None, sigma_ref=None, objective="mle",
-                tol_change=0.0):
+                tol_change=0.0, precondition=False, max_eval=None,
+                ls_debug=False):
     """K-way batched L-BFGS MLE on the autograd path. GPU only in practice.
 
     Rows are independent (row i's loss depends only on theta_i), so the true
@@ -300,6 +339,34 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
     finishing in 1/5 the time of pass 1. Zero disables both checks and lets
     ``max_iter`` and the restart diagnostic decide, which is what a
     badly-conditioned problem (cond(F) ~ 1e7 here) needs.
+
+    ``precondition`` optimises in units of ``sigma_ref`` instead of the raw
+    unconstrained coordinates. This is the fix for the conditioning, not a
+    workaround for it: sigma spans ~3 decades across these parameters
+    (log_norm ~6e-5 vs sigma_v ~6e-2 at 1e9 counts), curvature goes as
+    sigma^-2, so ~1e6 of the measured cond(F) ~ 1e7 comes from the CHOICE OF
+    UNITS rather than from any degeneracy in the physics. L-BFGS cannot absorb
+    that: its initial inverse-Hessian scaling ``H0 = (s.y)/(y.y) I`` is a
+    single scalar, so the first direction of every fresh pass is preconditioned
+    by one number for coordinates that differ by 1e3 in scale, and one scalar
+    step length ``t`` then has to serve all of them. Rescaling collapses the
+    condition number to that of the correlation matrix, and as a side effect
+    puts every absolute threshold in torch's LBFGS (``tolerance_grad``,
+    ``tolerance_change``, the line search's bracket test) back on a scale where
+    the value it was designed for means what it says.
+
+    ``max_eval`` defaults to torch's ``max_iter * 5 // 4``, which is a trap
+    here for two reasons. It is a cap on FUNCTION EVALUATIONS, and strong-Wolfe
+    typically spends 2-4 per iteration, so ``--max_iter 400`` silently stops
+    after ~150-250 iterations. Worse, ``step`` passes ``max_ls = max_eval -
+    current_evals`` to the line search, so the budget shrinks as the pass
+    proceeds and the last searches get 1-2 evaluations to work with. A line
+    search that exhausts ``max_ls`` during bracketing sets ``bracket = [0, t]``
+    and, if the trial point did not lower the loss, returns ``t = 0`` exactly
+    (lbfgs.py:97-99, 199) -- whereupon ``d.mul(t).abs().max() <=
+    tolerance_change`` is ``0 <= 0`` and the pass breaks immediately. That is
+    the mechanism behind passes that exit in seconds reporting 0.00e+00
+    movement while -logL is still descending across restarts.
     """
     device = forward.device
     K = data_batch.shape[0]
@@ -307,7 +374,35 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
     th0 = truth if start is None else start                  # (ndim,) or (K, ndim)
     th0 = torch.as_tensor(np.atleast_2d(th0), dtype=torch.float64, device=device)
     z0 = prior.to_unconstrained(th0)                      # (1, ndim) or (K, ndim)
-    z = z0.expand(K, z0.shape[-1]).clone().detach().requires_grad_(True)
+    ndim = z0.shape[-1]
+    z_start = z0.expand(K, ndim).clone().detach()         # (K, ndim)
+
+    # The optimiser variable is u, with z = z_anchor + scale * u.
+    # Unpreconditioned, z_anchor = 0 and scale = 1, so z is u BIT FOR BIT
+    # (multiplying by 1.0 and adding 0.0 are exact in IEEE754) and the old
+    # trajectory is reproduced exactly.
+    if precondition:
+        if sigma_ref is None:
+            raise ValueError("precondition=True needs sigma_ref")
+        th_truth = torch.as_tensor(np.atleast_2d(truth), dtype=torch.float64,
+                                   device=device)                 # (1, ndim)
+        sig = torch.as_tensor(np.asarray(sigma_ref)[None, :],
+                              dtype=torch.float64, device=device)  # (1, ndim)
+        # 1 sigma_ref in constrained units -> its length in z. One-sided is
+        # enough: the box transform is smooth and sigma << box width, and only
+        # the scale matters, not its sign.
+        z_p = prior.to_unconstrained(th_truth + sig)
+        z_m = prior.to_unconstrained(th_truth)
+        scale = (z_p - z_m).abs().clamp_min(1e-12)                 # (1, ndim)
+        z_anchor = prior.to_unconstrained(th_truth)                # (1, ndim)
+    else:
+        scale = torch.ones(1, ndim, dtype=torch.float64, device=device)
+        z_anchor = torch.zeros(1, ndim, dtype=torch.float64, device=device)
+
+    u = ((z_start - z_anchor) / scale).clone().detach().requires_grad_(True)
+
+    def z_of(u_):
+        return z_anchor + scale * u_                               # (K, ndim)
 
     # Reference spectrum at the truth, held fixed: the likelihood is only
     # needed up to a constant, and subtracting its value at mu_ref turns a sum
@@ -323,31 +418,50 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
         mu_ref = forward.counts_torch(th_ref, grad=False).double().clamp_min(1e-30)
     log_mu_ref = torch.log(mu_ref)
 
+    def loss_and_grad():
+        theta, logdet = prior.to_constrained(z_of(u).double())
+        mu = forward.counts_torch(theta, grad=True).clamp_min(1e-30)
+        # delta log-likelihood against the fixed reference; the dropped
+        # terms (data*log_mu_ref - mu_ref) are constants in theta
+        ll = (data.double() * (torch.log(mu) - log_mu_ref)
+              - (mu - mu_ref)).sum(-1)
+        if objective == "map":
+            ll = ll + logdet
+        loss = -ll.sum()
+        loss.backward()
+        return loss
+
     def make_closure(opt):
         def closure():
             opt.zero_grad()
-            theta, logdet = prior.to_constrained(z.double())
-            mu = forward.counts_torch(theta, grad=True).clamp_min(1e-30)
-            # delta log-likelihood against the fixed reference; the dropped
-            # terms (data*log_mu_ref - mu_ref) are constants in theta
-            ll = (data.double() * (torch.log(mu) - log_mu_ref)
-                  - (mu - mu_ref)).sum(-1)
-            if objective == "map":
-                ll = ll + logdet
-            loss = -ll.sum()
-            loss.backward()
-            return loss
+            return loss_and_grad()
         return closure
 
-    prev = prior.to_constrained(z.detach().double())[0].cpu().numpy()
+    grad_at_entry = None
+    if ls_debug:
+        # torch's LBFGS returns from step() BEFORE its first iteration if
+        # max|grad| <= tolerance_grad (lbfgs.py:363-367), which looks exactly
+        # like convergence in the movement diagnostic. tolerance_grad is
+        # absolute, so in raw unconstrained units it is a scale trap of the
+        # same family as tolerance_change; this prints the number it is
+        # compared against.
+        u.grad = None
+        loss_and_grad()
+        grad_at_entry = float(u.grad.abs().max())
+        u.grad = None
+
+    prev = prior.to_constrained(z_of(u).detach().double())[0].cpu().numpy()
     move = None
     for r in range(n_restarts):
-        opt = torch.optim.LBFGS([z], max_iter=max_iter,
+        kw = {} if max_eval is None else {"max_eval": max_eval}
+        opt = torch.optim.LBFGS([u], max_iter=max_iter,
                                 tolerance_grad=tol_grad,
                                 tolerance_change=tol_change,
-                                line_search_fn="strong_wolfe")
+                                line_search_fn="strong_wolfe", **kw)
         t0 = time.time()
-        opt.step(make_closure(opt))
+        ls = []
+        with _line_search_hook(ls, tol_change=tol_change):
+            opt.step(make_closure(opt))
         # torch's LBFGS.step returns the loss at the START of the pass, not the
         # end, so printing it made a pass look like it had achieved its own
         # starting value. Re-evaluate. Two identical evaluations here will
@@ -357,11 +471,11 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
         # why a pass can report zero movement and still hand the next pass a
         # different loss.
         with torch.no_grad():
-            theta_f, _ = prior.to_constrained(z.detach().double())
+            theta_f, _ = prior.to_constrained(z_of(u).detach().double())
             mu_f = forward.counts_torch(theta_f, grad=False).double().clamp_min(1e-30)
             loss = -((data.double() * (torch.log(mu_f) - log_mu_ref)
                       - (mu_f - mu_ref)).sum(-1)).sum()
-        cur = prior.to_constrained(z.detach().double())[0].cpu().numpy()
+        cur = prior.to_constrained(z_of(u).detach().double())[0].cpu().numpy()
         move = np.abs(cur - prev)
         if sigma_ref is not None:
             move = move / sigma_ref[None, :]
@@ -369,6 +483,30 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
         print(f"  LBFGS pass {r + 1}/{n_restarts}: {time.time() - t0:.1f}s, "
               f"-logL={loss.item():.6e}, max move this pass "
               f"{move.max():.2e} sigma", flush=True)
+        if ls_debug:
+            # Everything here separates "converged" from "the line search gave
+            # up", which the movement alone cannot: a stalled optimiser and a
+            # converged one both report a small move.
+            st = opt.state[opt._params[0]]
+            n_it = int(st.get("n_iter", 0))
+            n_ev = int(st.get("func_evals", 0))
+            ts = np.array([a for a, _ in ls]) if ls else np.zeros(0)
+            evs = np.array([b for _, b in ls]) if ls else np.zeros(0)
+            g0 = grad_at_entry if r == 0 else None
+            print(f"    ls: {n_it} iterations of {max_iter} requested, "
+                  f"{n_ev} function evals "
+                  f"(torch max_eval={opt.param_groups[0]['max_eval']})",
+                  flush=True)
+            if ts.size:
+                print(f"    ls: {int((ts == 0).sum())}/{ts.size} line searches "
+                      f"returned t=0 exactly; t median {np.median(ts):.3e}, "
+                      f"min {ts.min():.3e}; evals/search mean "
+                      f"{evs.mean():.1f}, max {int(evs.max())}", flush=True)
+            if g0 is not None:
+                print(f"    ls: max|grad| at pass entry {g0:.3e} "
+                      f"(tolerance_grad={tol_grad:.1e}; torch RETURNS "
+                      f"immediately, before any step, when it is below)",
+                      flush=True)
     return prev, move
 
 
@@ -430,6 +568,32 @@ def main():
                          "it; torch's 1e-9 is ABSOLUTE and stops this problem "
                          "prematurely at high counts, where sigma itself is "
                          "~1e-4")
+    ap.add_argument("--tol_grad", type=float, default=1e-6,
+                    help="torch LBFGS tolerance_grad. ABSOLUTE, and torch "
+                         "returns from step() before its first iteration when "
+                         "max|grad| is below it -- indistinguishable from "
+                         "convergence in the movement diagnostic. Use "
+                         "--ls_debug to see the gradient it is compared "
+                         "against; 0 disables it")
+    ap.add_argument("--max_eval", type=int, default=None,
+                    help="torch LBFGS max_eval, a cap on FUNCTION EVALS "
+                         "(default: torch's max_iter*5//4). Strong-Wolfe "
+                         "spends 2-4 evals per iteration, so the default stops "
+                         "the pass well short of --max_iter AND starves the "
+                         "late line searches, since step() passes "
+                         "max_eval - evals_so_far as the line search's budget. "
+                         "Set it to several times --max_iter")
+    ap.add_argument("--precondition", action="store_true",
+                    help="optimise in units of sigma_ref. ~1e6 of the "
+                         "cond(F) ~ 1e7 is the choice of units (sigma spans 3 "
+                         "decades), which one scalar step length and one "
+                         "scalar H0 cannot serve")
+    ap.add_argument("--ls_debug", action="store_true",
+                    help="per-pass line-search trace: iterations actually run, "
+                         "function evals, how many line searches returned "
+                         "t=0, and max|grad| at entry. This is what "
+                         "distinguishes a converged pass from a failed line "
+                         "search -- the movement alone cannot")
     ap.add_argument("--seed_chunk", type=int, default=None,
                     help="seeds per L-BFGS call (--method lbfgs). THE memory "
                          "lever: counts_torch(grad=True) does not chunk "
@@ -502,6 +666,14 @@ def main():
               f"{args.counts:.1e} counts (seeds {args.seed0}.."
               f"{args.seed0 + args.n_seeds - 1}) and running batched "
               f"L-BFGS ({args.max_iter} iterations)...", flush=True)
+        if args.max_eval is None:
+            print(f"  NOTE: --max_eval unset, so torch caps this pass at "
+                  f"{args.max_iter * 5 // 4} FUNCTION EVALS. Strong-Wolfe "
+                  f"spends 2-4 per iteration, so ~{args.max_iter // 3}-"
+                  f"{args.max_iter // 2} of the {args.max_iter} requested "
+                  f"iterations will actually run, and the last line searches "
+                  f"get a 1-2 eval budget. --ls_debug prints what happened.",
+                  flush=True)
         if sigma_jsonl is not None:
             sigma_ref = sigma_jsonl          # the sigma b_sys is paired with
         else:
@@ -537,7 +709,11 @@ def main():
                                 args.max_iter, n_restarts=args.n_restarts,
                                 start=st, sigma_ref=sigma_ref,
                                 objective=args.objective,
-                                tol_change=args.tol_change)
+                                tol_change=args.tol_change,
+                                tol_grad=args.tol_grad,
+                                precondition=args.precondition,
+                                max_eval=args.max_eval,
+                                ls_debug=args.ls_debug)
             mle_parts.append(m)
             move_parts.append(mv)
             if torch.cuda.is_available():

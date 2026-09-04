@@ -66,7 +66,11 @@ def run_point(args, rec, counts_row, forward, keep):
         m, mv = lbfgs_batch(forward, prior, data_batch[lo_k:hi_k], truth,
                             args.max_iter, n_restarts=args.n_restarts,
                             sigma_ref=sigma, objective="mle",
-                            tol_change=args.tol_change)
+                            tol_change=args.tol_change,
+                            tol_grad=args.tol_grad,
+                            precondition=args.precondition,
+                            max_eval=args.max_eval,
+                            ls_debug=args.ls_debug)
         mle_parts.append(m)
         move_parts.append(mv)
         if torch.cuda.is_available():
@@ -163,6 +167,18 @@ def main():
     ap.add_argument("--max_iter", type=int, default=400)
     ap.add_argument("--n_restarts", type=int, default=4)
     ap.add_argument("--tol_change", type=float, default=0.0)
+    # See mle_reseed.lbfgs_batch for why each of these exists; all four target
+    # the same root cause, that torch's LBFGS thresholds are ABSOLUTE and this
+    # problem's coordinates span three decades in sigma.
+    ap.add_argument("--tol_grad", type=float, default=1e-6)
+    ap.add_argument("--max_eval", type=int, default=None,
+                    help="torch's default (max_iter*5//4) caps FUNCTION EVALS "
+                         "and starves the late line searches; set several "
+                         "times --max_iter")
+    ap.add_argument("--precondition", action="store_true",
+                    help="optimise in units of sigma_ref")
+    ap.add_argument("--ls_debug", action="store_true",
+                    help="per-pass line-search trace")
     ap.add_argument("--points", default=None,
                     help="comma-separated subset, e.g. 0,5,9; default all")
     ap.add_argument("--chunk", type=int, default=32)
