@@ -1,0 +1,63 @@
+#!/bin/bash
+# P6: the linearisation factor k = (real MLE bias) / (linearised b_sys), at one
+# Tier B sweep point, on a GPU.
+#
+#     scripts/inference/p6_cluster.sh [POINT] [SEED_CHUNK]
+#
+# Needs an EXCLUSIVE card. Check before launching:
+#     nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+#
+# MEMORY: counts_torch(grad=True) does not chunk walkers, so the L-BFGS graph
+# scales with the seeds in ONE call. 40 seeds in one call OOMed a 22 GB card at
+# 20.84 GB; --seed_chunk 2 runs comfortably (measured 2026-09-03, and it
+# matches the 2-4 row ceiling the batched-HMC work found for the same call).
+# Rows are independent optimisations, so the split changes no result. Size a
+# different card with p6_probe.py.
+#
+# PRECISION: SE(k) scales as 1/sqrt(K * N) and the Poisson likelihood costs the
+# same at any N, so counts buy precision for free where seeds cost memory and
+# wall-clock.
+#
+# CONVERGENCE: --tol_change 0 is essential, not decorative. Torch's 1e-9
+# default is an ABSOLUTE threshold on the step size and on |loss - prev_loss|,
+# and at high counts sigma itself is ~1e-4, so real steps sit near the
+# threshold and L-BFGS quits early. An under-converged fit sits at its truth
+# start and reports k too SMALL -- the direction that falsely exonerates the
+# linearisation. Read the "convergence:" line (drift as a fraction of the
+# measured bias) before reading any k.
+set -e
+export MKL_THREADING_LAYER=GNU          # or torch import dies on the cluster
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
+cd "$REPO"
+
+# Mirrors spexai.config: $SPEXAI_RESULTS if set, else the cluster layout. Done
+# in shell rather than by importing spexai, so resolving a path costs nothing
+# and does not drag torch (or macOS's duplicate-libomp abort) into it.
+RESULTS=${SPEXAI_RESULTS:-$HOME/data/spexai_data/results}
+R=$RESULTS/bias_sweep
+
+POINT=${1:-14}         # 14 = worst by |b_sys|/sigma_ref in the single-T sweep
+CHUNK=${2:-2}
+
+# Inputs: the UNMASKED jsonl (its b_sys is what P6 calibrates -- the Fe XXV cut
+# deletes the channels the emulator is worst at) and the STAMPED truth (the
+# original predates rmf/arf recording and check_truth_response will refuse it,
+# though its contents were verified identical).
+BIAS=$R/bias_single_n20_s3.jsonl
+TRUTH=$R/truth_single_n20_s3_stamped.npz
+
+# Both count levels at the same point: k should be count-independent, since
+# b_sys is and the MLE bias tends to a fixed pseudo-true offset. If the two
+# disagree, P7's correction has to be count-aware -- cheap to learn now.
+for N in 1e7 1e9; do
+    echo "=== point $POINT, $N counts ==="
+    python -u scripts/inference/mle_reseed.py \
+        --method lbfgs --device cuda \
+        --bias_jsonl "$BIAS" --truth_npz "$TRUTH" \
+        --point "$POINT" --counts $N --n_seeds 8 --seed_chunk "$CHUNK" \
+        --max_iter 400 --n_restarts 3 --tol_change 0 \
+        --out "$RESULTS/mle_reseed/p6_single_pt${POINT}_N${N}.npz"
+done
