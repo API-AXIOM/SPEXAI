@@ -194,6 +194,43 @@ def tierb_point(args, rec, counts_row, keep, verbose=True):
     return pars, names, np.array([p.truth for p in pars]), mu_true
 
 
+def bsys_starts(truth, b_sys, pars, n_starts, seed, scale=1.0):
+    """Multi-start block for the noiseless fit: (n_starts, ndim), inside the box.
+
+    Row 0 is ``truth + b_sys`` -- the linearisation's OWN prediction. Two
+    reasons, and the second is the better one:
+
+    * Error direction. An under-converged fit sits near its start, so starting
+      at the truth drives ``k`` toward 0 -- the direction that falsely
+      exonerates the linearisation, which is how every silent failure in this
+      estimator has pointed so far. Starting at the prediction makes
+      under-convergence report ``k -> 1`` (neutral) instead.
+    * Conditioning. From the truth the optimiser travels the full ``b_sys``
+      (~18 sigma at 1e9 counts) and the endpoint is needed to ~0.1 sigma. From
+      the prediction the remaining trip is ``(k - 1) * b_sys``, typically ~10x
+      shorter: the small correction is measured directly rather than as the
+      difference of two large numbers.
+
+    The remaining rows are drawn from ``N(truth, scale * |b_sys|)``
+    COMPONENT-WISE -- ``b_sys`` is an offset in parameter units, so it is a
+    standard deviation here, not a variance. Their purpose is different from
+    row 0's: agreement among independent starts is a real convergence
+    certificate, unlike restart-from-the-same-point. In the 2026-09-05 sweep
+    point 10 seed-group 2 sat in a stall for four passes reporting 2e-4 sigma
+    of movement while 3.4 sigma from the optimum; a second start would have
+    landed elsewhere and said so immediately.
+    """
+    lo = np.array([p.low for p in pars])
+    hi = np.array([p.high for p in pars])
+    b = np.abs(np.asarray(b_sys, dtype=float))
+    rng = np.random.default_rng(seed)
+    rows = [np.asarray(truth, dtype=float) + np.asarray(b_sys, dtype=float)]
+    rows += [truth + rng.normal(0.0, scale * b) for _ in range(n_starts - 1)]
+    # 1e-9 inside: to_unconstrained clamps at the bound and a start exactly on
+    # it would begin at a saturated sigmoid with no gradient.
+    return np.clip(np.stack(rows), lo + 1e-9, hi - 1e-9)
+
+
 def build_tierb_problem(args, rec, counts_row, tz):
     """Forward/prior/truth for one Tier B point, matching the sweep exactly."""
     response, keep, rmf, arf = tierb_response(tz)
@@ -509,6 +546,18 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
             # Everything here separates "converged" from "the line search gave
             # up", which the movement alone cannot: a stalled optimiser and a
             # converged one both report a small move.
+            #
+            # max|grad| AT EXIT is the only stationarity test available, and
+            # it is one-sided in the useful direction: grad -> 0 is necessary
+            # at the MLE, so a large exit gradient PROVES the pass did not
+            # converge no matter how little it moved. Movement cannot do this.
+            # Point 10 seed-group 2 of the 2026-09-05 sweep moved 2e-4 sigma in
+            # two consecutive passes and was then 3.4 sigma / 18 logL units
+            # from the optimum; its exit gradient would have said so.
+            u.grad = None
+            loss_and_grad()
+            g_exit = float(u.grad.abs().max())
+            u.grad = None
             st = opt.state[opt._params[0]]
             n_it = int(st.get("n_iter", 0))
             n_ev = int(st.get("func_evals", 0))
@@ -517,8 +566,8 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
             g0 = grad_at_entry if r == 0 else None
             print(f"    ls: {n_it} iterations of {max_iter} requested, "
                   f"{n_ev} function evals "
-                  f"(torch max_eval={opt.param_groups[0]['max_eval']})",
-                  flush=True)
+                  f"(torch max_eval={opt.param_groups[0]['max_eval']}); "
+                  f"max|grad| at EXIT {g_exit:.3e}", flush=True)
             if ts.size:
                 print(f"    ls: {int((ts == 0).sum())}/{ts.size} line searches "
                       f"returned t=0 exactly; t median {np.median(ts):.3e}, "

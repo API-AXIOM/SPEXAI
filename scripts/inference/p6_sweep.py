@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "experiments", "hot_floor"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from mle_reseed import (                                          # noqa: E402
-    lbfgs_batch, tierb_forward, tierb_point, tierb_response, worst_ratio)
+    bsys_starts, lbfgs_batch, tierb_forward, tierb_point, tierb_response,
+    worst_ratio)
 from spexai.config import RESULTS, STORE                          # noqa: E402
 from spexai.inference.posterior import BoxPrior                   # noqa: E402
 
@@ -102,15 +103,39 @@ def run_point(args, rec, counts_row, forward, keep):
     pars, names, truth, mu_true = tierb_point(args, rec, counts_row, keep)
     prior = BoxPrior.from_params(pars, device=args.device)
 
-    data_batch = np.stack([
-        np.random.default_rng(args.seed0 + i).poisson(mu_true)
-        for i in range(args.n_seeds)]).astype(np.float64)
-
     b_sys = np.asarray(rec["b_sys"])
     # b_sys is count-independent (F and the residual term both scale with N);
     # sigma ~ N^-1/2. Verified empirically: k agrees at 1e7/1e8/1e9.
     sigma = np.asarray(rec["sigma_ref"]) * np.sqrt(
         float(rec["n_ref"]) / args.counts)
+
+    if args.noiseless:
+        # Fit the emulator to the SPEX truth ITSELF, no Poisson draw. b_sys
+        # models a SYSTEMATIC offset -- the parameters you would infer with
+        # infinite data -- so the object it approximates is the pseudo-true
+        # theta*, and theta* is what a noiseless fit returns. Three
+        # consequences:
+        #   * no seed scatter, so the K rows become independent STARTS on one
+        #     objective instead of one start on K noisy objectives, and their
+        #     disagreement is a convergence certificate rather than statistics;
+        #   * the detectability rule (|b_sys| > 3 se_d with se_d = sigma/sqrt K)
+        #     disappears, so every parameter becomes measurable rather than the
+        #     5-13 of 12 the noisy runs could resolve;
+        #   * k is count-independent BY CONSTRUCTION -- rescaling the counts
+        #     shifts only log_norm, by exactly the log_norm_truth definition --
+        #     rather than by the empirical check the 1e7/1e8/1e9 runs did.
+        # The likelihood does NOT sharpen: its curvature is sum (d/mu^2) dmu
+        # dmu -> F at the optimum either way, so sigma is unchanged. What is
+        # lost is any interaction between Poisson noise and emulator error;
+        # keep a noisy point or two as the cross-check.
+        data_batch = np.repeat(mu_true[None, :], args.n_seeds, axis=0)
+        start = bsys_starts(truth, b_sys, pars, args.n_seeds, args.seed0,
+                            scale=args.start_bsys_scale)
+    else:
+        data_batch = np.stack([
+            np.random.default_rng(args.seed0 + i).poisson(mu_true)
+            for i in range(args.n_seeds)]).astype(np.float64)
+        start = None
 
     sc = args.seed_chunk or args.n_seeds
     mle_parts, move_parts = [], []
@@ -118,6 +143,7 @@ def run_point(args, rec, counts_row, forward, keep):
         hi_k = min(lo_k + sc, args.n_seeds)
         m, mv = lbfgs_batch(forward, prior, data_batch[lo_k:hi_k], truth,
                             args.max_iter, n_restarts=args.n_restarts,
+                            start=None if start is None else start[lo_k:hi_k],
                             sigma_ref=sigma, objective="mle",
                             tol_change=args.tol_change,
                             tol_grad=args.tol_grad,
@@ -143,7 +169,22 @@ def run_point(args, rec, counts_row, forward, keep):
     resolved = bias_sig > 3.0 * (se_d / sigma)
     frac = np.where(resolved, move.max(axis=0) / np.maximum(bias_sig, 1e-12), 0.0)
 
+    # In noiseless mode the K rows are the SAME objective from different
+    # starts, so their disagreement is pure numerics -- a real convergence
+    # certificate, unlike the last pass's movement, which point 10 showed can
+    # be 2e-4 sigma while the fit is 3.4 sigma out. Judged on the same
+    # 10%-of-bias convention so the two modes stay comparable.
+    spread_sig = (mle.max(axis=0) - mle.min(axis=0)) / sigma
+    spread_frac = float(np.where(
+        resolved, spread_sig / np.maximum(bias_sig, 1e-12), 0.0).max())
+    converged = bool(frac.max() <= 0.10)
+    if args.noiseless:
+        converged = converged and spread_frac <= 0.10
+
     return {
+        "noiseless": bool(args.noiseless),
+        "start_spread_sigma": float(spread_sig.max()),
+        "start_spread_frac_of_bias": spread_frac,
         "point": int(rec["point"]), "params": rec["params"], "names": names,
         "counts": args.counts, "n_seeds": args.n_seeds,
         "truth": truth.tolist(), "b_sys": b_sys.tolist(),
@@ -153,7 +194,7 @@ def run_point(args, rec, counts_row, forward, keep):
         "cond_F": rec["cond_F"], "worst_b_over_sig": worst_ratio(rec),
         "drift_sigma": float(move.max()),
         "drift_frac_of_bias": float(frac.max()),
-        "converged": bool(frac.max() <= 0.10),
+        "converged": converged,
     }
 
 
@@ -244,6 +285,16 @@ def main():
                          "went from 2.63 sigma drift to 0.021 sigma with it)")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--summarise", action="store_true")
+    ap.add_argument("--noiseless", action="store_true",
+                    help="fit the SPEX truth itself instead of Poisson draws "
+                         "of it, measuring the pseudo-true theta* that b_sys "
+                         "actually models. --n_seeds then counts independent "
+                         "STARTS, not noise realisations: row 0 at "
+                         "truth + b_sys, the rest scattered N(truth, |b_sys|)")
+    ap.add_argument("--start_bsys_scale", type=float, default=1.0,
+                    help="multiplier on the |b_sys| start scatter "
+                         "(--noiseless). b_sys is a parameter offset, so it is "
+                         "a STANDARD DEVIATION here, not a variance")
     ap.add_argument("--check_only", action="store_true",
                     help="build the forward, run the reproducibility repeat "
                          "check, and exit without fitting anything")
@@ -280,8 +331,9 @@ def main():
     if not todo:
         print("nothing to do")
         return summarise(args.out)
+    kind = "starts (NOISELESS)" if args.noiseless else "seeds"
     print(f"{len(todo)} points to run at {args.counts:.1e} counts, "
-          f"{args.n_seeds} seeds each", flush=True)
+          f"{args.n_seeds} {kind} each", flush=True)
 
     response, keep, rmf, arf = tierb_response(tz)
     # Built once: every single-T point shares the emulator, response, band and
@@ -303,8 +355,12 @@ def main():
             f.flush()
             os.fsync(f.fileno())          # a long GPU run must not lose points
         flag = "" if out["converged"] else "  !! NOT CONVERGED"
+        extra = ""
+        if args.noiseless:
+            extra = (f"  start spread {out['start_spread_sigma']:.3f} sigma "
+                     f"({out['start_spread_frac_of_bias']:.1%} of bias)")
         print(f"  {out['runtime_s']:.0f}s  drift {out['drift_sigma']:.3f} "
-              f"sigma ({out['drift_frac_of_bias']:.1%} of bias)  "
+              f"sigma ({out['drift_frac_of_bias']:.1%} of bias){extra}  "
               f"{int(np.sum(out['measurable']))}/{len(out['names'])} "
               f"measurable{flag}", flush=True)
 
