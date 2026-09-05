@@ -18,13 +18,32 @@
 # same at any N, so counts buy precision for free where seeds cost memory and
 # wall-clock.
 #
-# CONVERGENCE: --tol_change 0 is essential, not decorative. Torch's 1e-9
-# default is an ABSOLUTE threshold on the step size and on |loss - prev_loss|,
-# and at high counts sigma itself is ~1e-4, so real steps sit near the
-# threshold and L-BFGS quits early. An under-converged fit sits at its truth
-# start and reports k too SMALL -- the direction that falsely exonerates the
-# linearisation. Read the "convergence:" line (drift as a fraction of the
-# measured bias) before reading any k.
+# CONVERGENCE: an under-converged fit sits at its truth start and reports k too
+# SMALL -- the direction that falsely exonerates the linearisation. Read the
+# "convergence:" line (drift as a fraction of the measured bias) before reading
+# any k. FOUR flags below serve that, and they all address ONE root cause:
+# every threshold in torch's LBFGS is ABSOLUTE, while these parameters span
+# three decades in sigma (log_norm ~6e-5 vs sigma_v ~6e-2 at 1e9 counts), which
+# is where ~1e6 of the measured cond(F) ~ 1e7 comes from.
+#
+#   --precondition  optimise in units of sigma_ref. THE fix; the rest are
+#                   safety nets that stop mattering once this is on.
+#   --tol_change 0  torch's 1e-9 is absolute, applied to the step size and to
+#                   |loss - prev_loss|; real steps here sit at ~1e-9.
+#   --max_eval      torch's default is max_iter*5//4 and caps FUNCTION EVALS,
+#                   not iterations; step() also hands the line search
+#                   max_eval-minus-evals-so-far as its own budget, so the late
+#                   searches are starved. Raised here as insurance. NOTE it has
+#                   never been observed to bind -- the "instant pass, 0.00e+00
+#                   movement, -logL still descending" signature is the line
+#                   search returning t = 0 exactly, whereupon d*t <=
+#                   tolerance_change is 0 <= 0 and the pass breaks. Do NOT
+#                   raise it much further: a big line-search budget plus a
+#                   zeroed bracket guard is what produced NaN steps (see
+#                   _line_search_hook in mle_reseed.py).
+#   --ls_debug      prints iterations actually run, evals per line search, how
+#                   many searches returned t=0, and max|grad| at entry. Without
+#                   it a stalled optimiser and a converged one look identical.
 set -e
 export MKL_THREADING_LAYER=GNU          # or torch import dies on the cluster
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -68,5 +87,6 @@ for N in $LEVELS; do
         --bias_jsonl "$BIAS" --truth_npz "$TRUTH" \
         --point "$POINT" --counts $N --n_seeds 8 --seed_chunk "$CHUNK" \
         --max_iter 400 --n_restarts 3 --tol_change 0 \
+        --precondition --max_eval 4000 --ls_debug \
         --out "$RESULTS/mle_reseed/p6_single_pt${POINT}_N${N}.npz"
 done

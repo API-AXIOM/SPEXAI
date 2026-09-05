@@ -270,21 +270,27 @@ def fisher_scoring(forward, prior, pars, truth, data_batch, n_iter):
 def _line_search_hook(records, tol_change=None):
     """Wrap ``torch.optim.lbfgs._strong_wolfe`` to record it, and to fix it.
 
-    Two things, both because torch's LBFGS gives no other handle on its line
-    search:
+    RECORD ``(t, ls_func_evals)`` for every line search. These are the only
+    numbers that distinguish "the optimiser converged" from "the line search
+    failed and returned a zero step", and ``LBFGS.step`` keeps neither.
 
-    * RECORD ``(t, ls_func_evals)`` for every line search. These are the only
-      numbers that distinguish "the optimiser converged" from "the line search
-      failed and returned a zero step". ``LBFGS.step`` keeps neither.
-    * FORWARD ``tolerance_change``. ``LBFGS.step`` calls ``_strong_wolfe``
-      WITHOUT passing the optimizer's ``tolerance_change`` (torch 2.13,
-      lbfgs.py:471), so the zoom phase's bracket-collapse test at lbfgs.py:110
-      always uses ``_strong_wolfe``'s OWN default of 1e-9 -- and that test is
-      ``|bracket width| * max|d| < tolerance_change``, i.e. absolute in
-      parameter units. This problem's genuine steps are ~1e-9 in those units
-      (sigma(log_norm) ~ 6e-5 at 1e9 counts), which is the identical trap that
-      the optimizer-level ``tolerance_change`` already sprang once. Passing
-      ``--tol_change 0`` did NOT reach here before this hook.
+    ``tol_change`` overrides ``_strong_wolfe``'s own ``tolerance_change``, which
+    ``LBFGS.step`` does not forward (torch 2.13, lbfgs.py:471). **Leave it None.**
+    That parameter looks like the optimizer-level ``tolerance_change`` and is
+    not the same thing: at lbfgs.py:110 it guards the ZOOM BRACKET, and it is
+    load-bearing, because ``_cubic_interpolate`` divides by ``x1 - x2``
+    (lbfgs.py:27) and the zoom loop calls it with the two bracket ends. Setting
+    it to 0 lets the bracket grind to exactly zero width, at which point the
+    interpolation is 0/0, ``t`` comes back NaN, and every parameter follows --
+    surfacing far away as ``cannot convert float NaN to integer`` inside
+    ``fft_broaden``. A large ``max_eval`` makes it likelier, by giving the zoom
+    loop thousands of iterations to get there.
+
+    It was worth overriding only while the raw coordinates were badly scaled,
+    where genuine steps really were ~1e-9 in parameter units and the default
+    stopped the search early. ``precondition=True`` removes that: in units of
+    sigma_ref a 1e-9 bracket IS negligible, so torch's default is correct as it
+    stands and the right fix is the scaling, not the threshold.
     """
     import torch.optim.lbfgs as _lb
     orig = _lb._strong_wolfe
@@ -293,7 +299,17 @@ def _line_search_hook(records, tol_change=None):
         if tol_change is not None:
             kwargs["tolerance_change"] = tol_change
         out = orig(*args, **kwargs)
-        records.append((float(out[2]), int(out[3])))     # (t, ls_func_evals)
+        t = float(out[2])
+        if not np.isfinite(t):
+            # Fail here rather than let NaN parameters travel into the forward,
+            # where the traceback names a broadening kernel and says nothing
+            # about the optimiser.
+            raise FloatingPointError(
+                f"strong-Wolfe returned t={t}: the zoom bracket collapsed to "
+                f"zero width and _cubic_interpolate divided 0/0. Do not set "
+                f"the line search's tolerance_change to 0 (see "
+                f"_line_search_hook); use precondition=True instead.")
+        records.append((t, int(out[3])))                 # (t, ls_func_evals)
         return out
 
     _lb._strong_wolfe = patched
@@ -306,7 +322,7 @@ def _line_search_hook(records, tol_change=None):
 def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
                 n_restarts=1, start=None, sigma_ref=None, objective="mle",
                 tol_change=0.0, precondition=False, max_eval=None,
-                ls_debug=False):
+                ls_debug=False, ls_tol_change=None):
     """K-way batched L-BFGS MLE on the autograd path. GPU only in practice.
 
     Rows are independent (row i's loss depends only on theta_i), so the true
@@ -353,7 +369,10 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
     condition number to that of the correlation matrix, and as a side effect
     puts every absolute threshold in torch's LBFGS (``tolerance_grad``,
     ``tolerance_change``, the line search's bracket test) back on a scale where
-    the value it was designed for means what it says.
+    the value it was designed for means what it says. That last point is the
+    reason to prefer this over overriding those thresholds one at a time: the
+    line search's bracket test in particular MUST stay non-zero (see
+    ``_line_search_hook``), so it can only be made safe by fixing the units.
 
     ``max_eval`` defaults to torch's ``max_iter * 5 // 4``, which is a trap
     here for two reasons. It is a cap on FUNCTION EVALUATIONS, and strong-Wolfe
@@ -460,7 +479,10 @@ def lbfgs_batch(forward, prior, data_batch, truth, max_iter, tol_grad=1e-6,
                                 line_search_fn="strong_wolfe", **kw)
         t0 = time.time()
         ls = []
-        with _line_search_hook(ls, tol_change=tol_change):
+        # NOT tol_change: the line search's tolerance_change is a guard against
+        # a degenerate zoom bracket, not a convergence criterion. See
+        # _line_search_hook.
+        with _line_search_hook(ls, tol_change=ls_tol_change):
             opt.step(make_closure(opt))
         # torch's LBFGS.step returns the loss at the START of the pass, not the
         # end, so printing it made a pass look like it had achieved its own
