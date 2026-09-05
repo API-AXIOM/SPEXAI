@@ -225,6 +225,9 @@ def main():
                          "went from 2.63 sigma drift to 0.021 sigma with it)")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--summarise", action="store_true")
+    ap.add_argument("--check_only", action="store_true",
+                    help="build the forward, run the reproducibility repeat "
+                         "check, and exit without fitting anything")
     args = ap.parse_args()
 
     if args.summarise:
@@ -267,6 +270,8 @@ def main():
     forward = tierb_forward(args, recs[todo[0]]["names"], response, keep)
     _, _, truth0, _ = tierb_point(args, recs[todo[0]], counts[todo[0]], keep)
     repeat_check(forward, truth0)
+    if args.check_only:
+        return
 
     for i, p in enumerate(todo):
         t0 = time.time()
