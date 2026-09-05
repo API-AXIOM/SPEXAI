@@ -44,6 +44,40 @@ from spexai.config import RESULTS, STORE                          # noqa: E402
 from spexai.inference.posterior import BoxPrior                   # noqa: E402
 
 
+def repeat_check(forward, truth, n=3):
+    """Evaluate the forward repeatedly at ONE fixed theta and report the spread.
+
+    ``--deterministic`` is necessary but cannot be sufficient:
+    ``torch.use_deterministic_algorithms`` only governs the ops torch KNOWS are
+    nondeterministic (``index_add`` on CUDA is on that list, so the line
+    deposit is covered). It says nothing about cuFFT plan selection, and
+    nothing at all about the forward being float32 internally. So the flag
+    being ON is not evidence that identical parameters give identical
+    likelihoods -- and P6's L-BFGS assumes exactly that, since a line search
+    comparing two evaluations of the same point is what decides every step.
+
+    Symptom this exists to catch: a pass reporting 0.00e+00 movement whose
+    -logL still differs from the previous pass's. That is only possible if the
+    forward is not reproducible, and it silently sets a floor on how far any
+    optimiser can converge.
+    """
+    th = torch.as_tensor(np.atleast_2d(truth), dtype=torch.float64,
+                         device=forward.device)
+    with torch.no_grad():
+        mus = [forward.counts_torch(th, grad=False).double() for _ in range(n)]
+    spread = max(float((m - mus[0]).abs().max()) for m in mus[1:])
+    rel = spread / float(mus[0].abs().max())
+    print(f"repeat check: {n} evaluations at one fixed theta differ by at most "
+          f"{spread:.3e} counts ({rel:.2e} relative)", flush=True)
+    if spread > 0.0:
+        print("  WARNING: the forward is NOT reproducible. Every L-BFGS line "
+              "search compares evaluations of the same objective, so this is "
+              "a floor on convergence and it will show up as passes that move "
+              "0.00e+00 yet report a changed -logL. --deterministic does not "
+              "cover it.", flush=True)
+    return spread
+
+
 def run_point(args, rec, counts_row, forward, keep):
     """One point: K reseeded MLEs -> k per parameter, plus diagnostics."""
     pars, names, truth, mu_true = tierb_point(args, rec, counts_row, keep)
@@ -231,6 +265,8 @@ def main():
     # Built once: every single-T point shares the emulator, response, band and
     # abundance scheme. Only the truth vector and prior box differ.
     forward = tierb_forward(args, recs[todo[0]]["names"], response, keep)
+    _, _, truth0, _ = tierb_point(args, recs[todo[0]], counts[todo[0]], keep)
+    repeat_check(forward, truth0)
 
     for i, p in enumerate(todo):
         t0 = time.time()
