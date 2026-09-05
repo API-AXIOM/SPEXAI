@@ -66,15 +66,34 @@ def repeat_check(forward, truth, n=3):
     with torch.no_grad():
         mus = [forward.counts_torch(th, grad=False).double() for _ in range(n)]
     spread = max(float((m - mus[0]).abs().max()) for m in mus[1:])
-    rel = spread / float(mus[0].abs().max())
+    scale = float(mus[0].abs().max())
+    rel = spread / scale
     print(f"repeat check: {n} evaluations at one fixed theta differ by at most "
           f"{spread:.3e} counts ({rel:.2e} relative)", flush=True)
     if spread > 0.0:
-        print("  WARNING: the forward is NOT reproducible. Every L-BFGS line "
-              "search compares evaluations of the same objective, so this is "
-              "a floor on convergence and it will show up as passes that move "
-              "0.00e+00 yet report a changed -logL. --deterministic does not "
-              "cover it.", flush=True)
+        print("  the forward is not bit-reproducible. Every L-BFGS line search "
+              "compares evaluations of the same objective, so this is a floor "
+              "on convergence: it shows up as passes that move 0.00e+00 yet "
+              "report a changed -logL. --deterministic does not cover it "
+              "(index_add IS covered; this is elsewhere). At ~1 float32 ulp "
+              "(1.2e-07) it is the forward's own precision and there is "
+              "nothing to fix -- float64 would not help, since the emulator's "
+              "accuracy is ~1e-3. Much above that, look at cuFFT.", flush=True)
+
+    # Is the objective L-BFGS minimises the same one the pass line prints?
+    # The closure uses grad=True -> fold(flux(th)) inside grad_enabled(); the
+    # printed -logL uses grad=False -> _counts_chunked(th). Same math on paper.
+    # If they differ by more than the jitter above, the -logL trace is NOT the
+    # optimised objective and its non-monotonicity across passes means nothing.
+    mu_g = forward.counts_torch(th, grad=True).detach().double()
+    path = float((mu_g - mus[0]).abs().max())
+    print(f"  grad=True vs grad=False at the same theta: {path:.3e} counts "
+          f"({path / scale:.2e} relative)", flush=True)
+    if path > 5.0 * max(spread, 1e-30):
+        print("  WARNING: the two paths disagree by more than run-to-run "
+              "jitter, so the printed -logL is not the quantity being "
+              "minimised. Read the drift diagnostic, not the -logL trace.",
+              flush=True)
     return spread
 
 
