@@ -107,21 +107,30 @@ def main() -> None:
         d_sig = np.asarray(r["mean_delta"]) / sig
         meas = np.asarray(r["measurable"], dtype=bool)
         spread = float(r.get("start_spread_sigma", np.nan))
+        b_sig = np.abs(np.asarray(r["b_sys"])) / sig
         idx = [j for j in np.argsort(-np.abs(d_sig))
                if meas[j] and abs(d_sig[j]) > args.big_sigma]
         for j in idx:
             frac = spread / max(abs(d_sig[j]), 1e-30)
+            # A big MEASURED bias does not make k trustworthy: k = delta/b_sys,
+            # so it is the DENOMINATOR that has to be thick. Ar at point 8 has
+            # |delta| = 1.23 sigma (passes this table's filter) on |b_sys| =
+            # 0.067 sigma, and reports k = 18.5. Filtering on the numerator
+            # alone let that set the headline at 342x.
+            thin = b_sig[j] < args.b_min_sigma
             print(f"{r['point']:>5} {names[j]:>9} {d_sig[j]:>10.2f} "
-                  f"{k[j]:>+8.3f} {frac * abs(k[j]):>6.3f}")
-            if abs(k[j] - 1.0) > worst_big[0]:
+                  f"{k[j]:>+8.3f} {frac * abs(k[j]):>6.3f}"
+                  f"{'   THIN b_sys' if thin else ''}")
+            if not thin and abs(k[j] - 1.0) > worst_big[0]:
                 worst_big = (abs(k[j] - 1.0), (r["point"], names[j], k[j]))
         if not idx:
             print(f"{r['point']:>5} {'--':>9} {'':>10} "
                   f"{'(no bias above threshold)':>8}")
     if worst_big[1] is not None:
         pt, nm, kv = worst_big[1]
-        print(f"\nlargest departure from k=1 among these: {kv:+.3f} "
-              f"({nm} at point {pt})  =>  N* optimistic by {kv ** 2:.2f}x")
+        print(f"\nlargest departure from k=1, thin denominators excluded: "
+              f"{kv:+.3f} ({nm} at point {pt})  =>  that parameter's N* is "
+              f"off by {kv ** 2:.2f}x")
 
     # N* is a PER-POINT quantity -- each point is a different source model --
     # so a single global binding parameter is the wrong summary. It answers
