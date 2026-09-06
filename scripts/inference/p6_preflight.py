@@ -65,7 +65,7 @@ def main() -> int:
             "(conda-MKL numpy vs libgomp)")
         fails += 1
 
-    print("\n== SPEX caches (truth stage reads these on CPU) ==")
+    print("\n== emulator model store ==")
     store = args.store or None
     if store is None:
         try:
@@ -79,6 +79,52 @@ def main() -> int:
         ok(f"store {store} ({n} .pt model files)")
     elif store:
         bad(f"store {store} does not exist")
+        fails += 1
+
+    # THE path bug that cost a night's run. SpexTruthModel does not use
+    # SPEXAI_PROCESSED directly: without an explicit datadir it derives the
+    # cache location from manifest["runroot"], an ABSOLUTE path recorded on the
+    # machine that TRAINED the model. The shipped manifest points at a laptop
+    # directory, so on the cluster the truth stage looked for 40 GB of caches
+    # under a path that does not exist. Resolve it exactly as the code will and
+    # confirm the caches are actually there.
+    print("\n== SPEX per-element caches (truth stage, CPU) ==")
+    datadir = None
+    if store and os.path.isdir(store):
+        try:
+            import json
+            from spexai.eval import _default_datadir
+            with open(os.path.join(store, "manifest.json")) as f:
+                manifest = json.load(f)
+            datadir = _default_datadir(store, manifest)
+            src = ("SPEXAI_PROCESSED" if os.environ.get("SPEXAI_PROCESSED")
+                   else f"manifest runroot {manifest.get('runroot', '')!r}")
+            print(f"        resolved from {src}")
+        except Exception as e:                               # noqa: BLE001
+            bad(f"could not resolve the cache dir: {e}")
+            fails += 1
+    if datadir and os.path.isdir(datadir):
+        els = [d for d in os.listdir(datadir) if d.startswith("element")]
+        if els:
+            ok(f"{datadir} ({len(els)} element caches)")
+        else:
+            bad(f"{datadir} exists but holds no element* caches")
+            fails += 1
+    elif datadir:
+        bad(f"{datadir} does not exist. Set SPEXAI_PROCESSED (or pass "
+            f"--datadir to bias_sweep) to this machine's processed/ dir")
+        fails += 1
+
+    print("\n== responses ==")
+    try:
+        from spexai.config import RESP_DIR
+        if os.path.isdir(RESP_DIR):
+            ok(f"{RESP_DIR}")
+        else:
+            bad(f"{RESP_DIR} does not exist; set SPEXAI_RESPONSES")
+            fails += 1
+    except Exception as e:                                   # noqa: BLE001
+        bad(f"cannot import spexai.config.RESP_DIR: {e}")
         fails += 1
 
     # The question that would silently invalidate the whole run: p6_sweep

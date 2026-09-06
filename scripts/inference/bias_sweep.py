@@ -40,6 +40,11 @@ Two stages, because they want different machines:
 
 Both stages checkpoint per unit of work and skip what is already on disk.
 
+    # cluster (matches the package defaults, so the exports are optional there)
+    SPEXAI_PROCESSED=~/data/spexai_data/processed \\
+    SPEXAI_RESPONSES=~/data/spexai_data/responses \\
+        python -u scripts/bias_sweep.py --stage truth --n_points 200 --mode both
+    # laptop, where the data lives elsewhere and the exports ARE required
     SPEXAI_PROCESSED=~/work/data/spexai/processed \\
     SPEXAI_RESPONSES=~/work/data/spexai/responses \\
         python -u scripts/bias_sweep.py --stage truth --n_points 200 --mode both
@@ -159,7 +164,12 @@ def stage_truth(args, points, outp):
         if z_el in done:
             continue
         t0 = time.time()
-        m = SpexTruthModel(models_dir=args.store, elements=[z_el], device="cpu")
+        # datadir explicitly: without it SpexTruthModel derives the cache path
+        # from the manifest's TRAINING runroot, which is an absolute path on
+        # whichever machine trained the model. None keeps the old behaviour
+        # (SPEXAI_PROCESSED, then the manifest).
+        m = SpexTruthModel(models_dir=args.store, elements=[z_el],
+                           datadir=args.datadir or None, device="cpu")
         load_s = time.time() - t0
         t0 = time.time()
         for i, pt in enumerate(points):
@@ -340,6 +350,14 @@ def main():
     ap.add_argument("--n_points", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--store", default=STORE)
+    ap.add_argument("--datadir", default="",
+                    help="preprocessed per-element caches (processed/elementZ) "
+                         "for --stage truth. Default: SPEXAI_PROCESSED, else "
+                         "the sibling of the manifest's TRAINING runroot -- "
+                         "which is an absolute path on the training machine "
+                         "and will not exist elsewhere. Set this (or "
+                         "SPEXAI_PROCESSED) when store and caches come from "
+                         "different machines")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default=os.path.join(RESULTS, "bias_sweep"))
     ap.add_argument("--resume", action="store_true")

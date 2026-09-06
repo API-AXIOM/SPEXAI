@@ -32,9 +32,22 @@ from spexai.metrics import spectrum_metrics
 def _default_datadir(models_dir: str, manifest: dict) -> str:
     """Locate the preprocessed per-element caches (``processed/elementZ``).
 
-    The manifest records the training ``runroot`` (``.../<data>/runs``); the
-    caches live in the sibling ``.../<data>/processed``.
+    ``SPEXAI_PROCESSED`` wins when it is set. The manifest's ``runroot`` is an
+    ABSOLUTE path recorded on the machine that trained the model, so a model
+    trained on a laptop and run on a cluster resolves to a directory that does
+    not exist there -- and it did: the shipped manifest carries
+    ``/Users/.../work/data/spexai/runs_production``, which made every caller
+    that omits ``datadir`` (``bias_sweep --stage truth`` among them) look for
+    caches under a laptop path on the cluster. The env var is already the
+    documented override for the same directory in ``spexai.config.DATADIR``;
+    this makes the two agree instead of silently disagreeing.
+
+    Otherwise: the caches live in the sibling ``.../<data>/processed`` of the
+    training ``runroot``, falling back to the sibling of ``models_dir``.
     """
+    env = os.environ.get("SPEXAI_PROCESSED")
+    if env:
+        return env
     runroot = manifest.get("runroot", "")
     if runroot:
         return os.path.join(os.path.dirname(runroot.rstrip("/")), "processed")

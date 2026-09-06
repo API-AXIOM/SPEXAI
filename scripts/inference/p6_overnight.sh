@@ -42,6 +42,13 @@ P6_JSONL="$MLE_DIR/p6_gn_${TAG}.jsonl"
 
 # Without this torch import dies on the cluster (conda-MKL numpy vs libgomp).
 export MKL_THREADING_LAYER=GNU
+# REQUIRED, not cosmetic. SpexTruthModel derives the per-element cache path
+# from manifest["runroot"] -- an absolute path on the machine that TRAINED the
+# model -- so without this the truth stage hunts for 40 GB of caches under
+# /Users/.../work/data/spexai/processed, which does not exist on the cluster.
+# These defaults are the remote layout; override for any other machine.
+export SPEXAI_PROCESSED="${SPEXAI_PROCESSED:-$HOME/data/spexai_data/processed}"
+export SPEXAI_RESPONSES="${SPEXAI_RESPONSES:-$HOME/data/spexai_data/responses}"
 # p6_sweep sets this itself under --deterministic, but the bias stage does not.
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 export PYTHONUNBUFFERED=1
