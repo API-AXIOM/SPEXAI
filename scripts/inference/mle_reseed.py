@@ -303,6 +303,144 @@ def fisher_scoring(forward, prior, pars, truth, data_batch, n_iter):
                                                     # truth, tiny K-scatter)
 
 
+def gn_score(forward, theta, data, mu_ref, log_mu_ref):
+    """Exact score dL/dtheta for all K rows in ONE reverse-mode pass.
+
+    ``theta`` (K, ndim) ndarray -> (score (K, ndim) ndarray, -logL float).
+
+    The score is ``s_i = sum_c (d_c/mu_c - 1) dmu_c/dtheta_i``, which is just
+    the gradient of the log-likelihood, so reverse mode delivers it in a single
+    backward -- no differencing, and no dependence on a step size. This is the
+    whole reason Gauss-Newton is worth building here: the FIXED POINT of the
+    iteration is ``s = 0``, so this quantity, and only this quantity, decides
+    the answer. F merely preconditions the path to it.
+
+    The K rows are independent likelihoods, so the gradient of their SUM gives
+    each row its own score with no cross-talk. Unlike ``lbfgs_batch``, where
+    one strong-Wolfe step length ``t`` is shared across the whole chunk (and a
+    single t=0 killed every row at once), batching here cannot couple the
+    starts -- which is what makes the multi-start spread a clean diagnostic.
+
+    ``counts_torch`` casts to float32 internally but the cast is
+    differentiable, so the float64 gradient comes back intact.
+    """
+    device = forward.device
+    th = torch.tensor(np.atleast_2d(theta), dtype=torch.float64,
+                      device=device, requires_grad=True)          # (K, ndim)
+    mu = forward.counts_torch(th, grad=True).double().clamp_min(1e-30)
+    # (K, n_keep); the mu_ref subtraction is a constant in theta and so does
+    # not touch the gradient -- it is kept only so the printed -logL is on the
+    # same O(1e2) scale as lbfgs_batch's and the two are comparable.
+    ll = (data * (torch.log(mu) - log_mu_ref) - (mu - mu_ref)).sum()
+    ll.backward()
+    return th.grad.detach().cpu().numpy(), -float(ll.detach())
+
+
+def gauss_newton_batch(forward, prior, data_batch, truth, pars, n_iter=8,
+                       start=None, sigma_ref=None, tol_decrement=1e-3,
+                       max_step_sigma=5.0, ridge=0.0, verbose=True):
+    """Batched Fisher scoring: theta <- theta + F^-1 s, with an autograd score.
+
+    Returns ``(theta (K, ndim), move (K, ndim) in sigma units)`` -- the same
+    contract as ``lbfgs_batch``, so ``p6_sweep.run_point`` can swap them.
+
+    Why this exists: L-BFGS on this problem stalled with max|grad| ~ O(1) while
+    reporting tiny movement, because it has to LEARN curvature by differencing
+    function values it cannot fully trust (the forward is reproducible to only
+    ~2e-7 relative), and one failed line search discarded the history. Fisher
+    scoring never differences values and never line-searches:
+
+    * F = J diag(1/mu) J^T is positive definite BY CONSTRUCTION (a Gram
+      matrix), so the step is always an ascent direction. The indefinite-
+      Hessian failure that makes strong Wolfe return t=0 cannot arise.
+    * The iteration is affine invariant, so cond(F) -- 5e6 to 5e8 across the
+      sweep -- cannot affect the path, only the final linear solve.
+    * Convergence is tested on the NEWTON DECREMENT, below, which is the
+      stationarity test L-BFGS never had.
+
+    ``tol_decrement`` is in NATS. lambda^2 = s^T F^-1 s is dimensionless and
+    affine invariant, and lambda^2/2 estimates the log-likelihood still on the
+    table, so it is directly comparable to the ~1e-4 nat reproducibility floor
+    measured between passes. Default 1e-3 sits an order of magnitude above it.
+
+    ``max_step_sigma`` caps |delta| in units of ``sigma_ref``. Gauss-Newton is
+    exact only to the extent the residual term it drops is small (~1e-3 of the
+    kept term here), so a first step from a bad start can overshoot; the cap is
+    a trust region, not a line search -- it never compares two loss values.
+
+    ``ridge`` adds ``ridge * diag(F)`` before the solve (Levenberg-style).
+    Default 0. At cond(F) ~ 5e8 float64 still leaves ~7 digits, but this is the
+    valve if a point turns out to be worse conditioned than that.
+    """
+    device = forward.device
+    K = data_batch.shape[0]
+    ndim = len(pars)
+    lo = np.array([p.low for p in pars])                          # (ndim,)
+    hi = np.array([p.high for p in pars])                         # (ndim,)
+    data = torch.as_tensor(data_batch, dtype=torch.float64, device=device)
+    if sigma_ref is None:
+        sigma_ref = np.ones(ndim)
+    sig = np.asarray(sigma_ref)                                   # (ndim,)
+
+    # Same fixed reference spectrum as lbfgs_batch: at 1e9 counts the raw
+    # log-likelihood is ~2e10, where float64 spacing is ~5e-6, so genuine
+    # improvements underflow. Constant in theta, so the gradient is untouched.
+    with torch.no_grad():
+        th_ref = torch.as_tensor(np.atleast_2d(truth), dtype=torch.float64,
+                                 device=device)
+        mu_ref = forward.counts_torch(th_ref, grad=False).double().clamp_min(1e-30)
+    log_mu_ref = torch.log(mu_ref)                                # (1, n_keep)
+
+    theta = np.tile(np.asarray(truth, dtype=np.float64), (K, 1)) \
+        if start is None else np.array(start, dtype=np.float64).reshape(K, ndim)
+    move = np.zeros((K, ndim))
+
+    for it in range(n_iter):
+        t0 = time.time()
+        score, negll = gn_score(forward, theta, data, mu_ref, log_mu_ref)
+        mu0, J = batched_jacobian(forward, pars, theta)     # (K,n_keep),(K,ndim,n_keep)
+        deltas = np.zeros((K, ndim))
+        lam2 = np.zeros(K)
+        conds = np.zeros(K)
+        for k in range(K):
+            F = (J[k] / mu0[k]) @ J[k].T                          # (ndim, ndim)
+            if ridge > 0:
+                F = F + ridge * np.diag(np.diag(F))
+            conds[k] = np.linalg.cond(F)
+            # solve, not inv: at cond ~ 5e8 an explicit inverse throws away
+            # digits for nothing, and lambda^2 needs only the solution vector.
+            d = np.linalg.solve(F, score[k])                      # (ndim,)
+            lam2[k] = float(score[k] @ d)      # = s^T F^-1 s >= 0, F is PD
+            over = np.abs(d / sig).max() / max_step_sigma
+            if over > 1.0:
+                d = d / over                   # trust region, in sigma units
+            deltas[k] = d
+        new = np.clip(theta + deltas, lo[None, :], hi[None, :])
+        move = np.abs(new - theta) / sig[None, :]                 # (K, ndim)
+        theta = new
+        # max|score| in sigma units: dL per sigma, the one stationarity number
+        # that is comparable across parameters with different physical units.
+        g_sig = np.abs(score * sig[None, :]).max()
+        if verbose:
+            print(f"  GN iter {it + 1}/{n_iter}: {time.time() - t0:.1f}s, "
+                  f"-logL={negll:.6e}, max move {move.max():.2e} sigma, "
+                  f"max|grad*sigma| {g_sig:.3e}, "
+                  f"lambda^2/2 {lam2.max() / 2:.3e} nats "
+                  f"(tol {tol_decrement:.1e}), cond(F) {conds.max():.1e}",
+                  flush=True)
+        if lam2.max() / 2 < tol_decrement:
+            if verbose:
+                print(f"  GN converged: Newton decrement below tolerance at "
+                      f"iteration {it + 1}", flush=True)
+            break
+    else:
+        if verbose:
+            print(f"  GN did NOT reach the decrement tolerance in {n_iter} "
+                  f"iterations -- max lambda^2/2 = {lam2.max() / 2:.3e} nats",
+                  flush=True)
+    return theta, move
+
+
 @contextlib.contextmanager
 def _line_search_hook(records, tol_change=None):
     """Wrap ``torch.optim.lbfgs._strong_wolfe`` to record it, and to fix it.

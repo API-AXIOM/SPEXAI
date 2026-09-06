@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "experiments", "hot_floor"))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from mle_reseed import (                                          # noqa: E402
-    bsys_starts, lbfgs_batch, tierb_forward, tierb_point, tierb_response,
+    bsys_starts, gauss_newton_batch, lbfgs_batch, tierb_forward, tierb_point,
+    tierb_response,
     worst_ratio)
 from spexai.config import RESULTS, STORE                          # noqa: E402
 from spexai.inference.posterior import BoxPrior                   # noqa: E402
@@ -141,15 +142,23 @@ def run_point(args, rec, counts_row, forward, keep):
     mle_parts, move_parts = [], []
     for lo_k in range(0, args.n_seeds, sc):
         hi_k = min(lo_k + sc, args.n_seeds)
-        m, mv = lbfgs_batch(forward, prior, data_batch[lo_k:hi_k], truth,
-                            args.max_iter, n_restarts=args.n_restarts,
-                            start=None if start is None else start[lo_k:hi_k],
-                            sigma_ref=sigma, objective="mle",
-                            tol_change=args.tol_change,
-                            tol_grad=args.tol_grad,
-                            precondition=args.precondition,
-                            max_eval=args.max_eval,
-                            ls_debug=args.ls_debug)
+        if args.method == "gn":
+            m, mv = gauss_newton_batch(
+                forward, prior, data_batch[lo_k:hi_k], truth, pars,
+                n_iter=args.gn_iter,
+                start=None if start is None else start[lo_k:hi_k],
+                sigma_ref=sigma, tol_decrement=args.gn_tol,
+                max_step_sigma=args.gn_max_step, ridge=args.gn_ridge)
+        else:
+            m, mv = lbfgs_batch(forward, prior, data_batch[lo_k:hi_k], truth,
+                                args.max_iter, n_restarts=args.n_restarts,
+                                start=None if start is None else start[lo_k:hi_k],
+                                sigma_ref=sigma, objective="mle",
+                                tol_change=args.tol_change,
+                                tol_grad=args.tol_grad,
+                                precondition=args.precondition,
+                                max_eval=args.max_eval,
+                                ls_debug=args.ls_debug)
         mle_parts.append(m)
         move_parts.append(mv)
         if torch.cuda.is_available():
@@ -273,6 +282,25 @@ def main():
                     help="optimise in units of sigma_ref")
     ap.add_argument("--ls_debug", action="store_true",
                     help="per-pass line-search trace")
+    ap.add_argument("--method", choices=["lbfgs", "gn"], default="lbfgs",
+                    help="gn = Fisher scoring with an autograd score "
+                         "(mle_reseed.gauss_newton_batch). No line search and "
+                         "no learned curvature, which is what stalled L-BFGS; "
+                         "its convergence test is the Newton decrement, so "
+                         "--gn_tol replaces --tol_change/--tol_grad and the "
+                         "line-search flags are ignored")
+    ap.add_argument("--gn_iter", type=int, default=8,
+                    help="max Fisher-scoring rounds (--method gn)")
+    ap.add_argument("--gn_tol", type=float, default=1e-3,
+                    help="Newton-decrement tolerance in NATS (--method gn). "
+                         "lambda^2/2 is the log-likelihood still on the table; "
+                         "the measured inter-pass reproducibility floor is "
+                         "~1e-4 nats, so do not go below that")
+    ap.add_argument("--gn_max_step", type=float, default=5.0,
+                    help="trust region on |delta| in sigma units (--method gn)")
+    ap.add_argument("--gn_ridge", type=float, default=0.0,
+                    help="Levenberg ridge * diag(F) before the solve "
+                         "(--method gn); the valve for a badly conditioned F")
     ap.add_argument("--points", default=None,
                     help="comma-separated subset, e.g. 0,5,9; default all")
     ap.add_argument("--chunk", type=int, default=32)
