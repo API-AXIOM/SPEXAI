@@ -229,6 +229,68 @@ def test_more_iterations_do_not_move_the_answer(gtoy):
     assert (np.abs(a - b) / sigma[None, :]).max() < 1e-3
 
 
+class _JitteryToy(_GNToy):
+    """``_GNToy`` with a relative jitter, mimicking the real forward.
+
+    The real emulator is float32 and not bit-reproducible (~2e-7 relative), so
+    the Newton decrement does not go to zero -- it bottoms out in a limit cycle
+    (point 0 of the 2026-09-06 GN run: move stuck at 1.87e-2 sigma while
+    lambda^2/2 oscillated 5.2e-3 / 2.5e-3 / 3.1e-3 nats). The exact float64 toy
+    cannot show that, so the stall detector needs this to be tested at all.
+
+    The jitter is seeded from a call counter: deterministic for a given test
+    run, but different between calls, which is exactly the property that breaks
+    a line search and puts a floor under the decrement.
+    """
+
+    def __init__(self, truth, rel=3e-6, device="cpu"):
+        super().__init__(truth, device=device)
+        self.rel, self.n_calls = rel, 0
+
+    def counts_torch(self, theta, grad=False):
+        out = super().counts_torch(theta, grad=grad)
+        self.n_calls += 1
+        g = torch.Generator().manual_seed(20260906 + self.n_calls)
+        eps = torch.randn(out.shape, generator=g, dtype=torch.float64)
+        return out * (1.0 + self.rel * eps.to(out.device))
+
+
+def test_stall_detector_ends_a_limit_cycle(capsys):
+    """A decrement that stops improving must end the run, not burn Jacobians.
+
+    Guards the 2026-09-06 point-0 waste: --gn_tol was set below the achievable
+    floor, so the tolerance could never be met and three iterations ran past
+    the point of any progress.
+    """
+    truth = np.zeros(NDIM)
+    fwd = _JitteryToy(truth)
+    sigma = fwd.sigma_at_truth()
+    prior = BoxPrior(truth - 1e4 * sigma, truth + 1e4 * sigma)
+    pars = [_P(truth[j] - 1e4 * sigma[j], truth[j] + 1e4 * sigma[j],
+               0.1 * sigma[j]) for j in range(NDIM)]
+    theta_star, data, start = _planted(fwd, truth, sigma, K=2, seed=31)
+
+    mle, _ = gauss_newton_batch(fwd, prior, data, truth, pars, n_iter=40,
+                                start=start, sigma_ref=sigma,
+                                tol_decrement=1e-12, verbose=True)
+    out = capsys.readouterr().out
+    assert "GN stalled" in out, out
+    n_ran = sum("GN iter" in ln for ln in out.splitlines())
+    assert n_ran < 40, "stall detector never fired"
+    # and it stalls AT the answer, not somewhere else
+    assert (np.abs(mle - theta_star[None, :]) / sigma[None, :]).max() < 0.2
+
+
+def test_unreachable_tolerance_still_returns_the_answer(gtoy):
+    """An impossible --gn_tol must not corrupt the result, only the message."""
+    fwd, prior, truth, sigma, pars = gtoy
+    theta_star, data, start = _planted(fwd, truth, sigma, K=2, seed=37)
+    mle, _ = gauss_newton_batch(fwd, prior, data, truth, pars, n_iter=10,
+                                start=start, sigma_ref=sigma,
+                                tol_decrement=1e-300, verbose=False)
+    assert (np.abs(mle - theta_star[None, :]) / sigma[None, :]).max() < 0.02
+
+
 # --------------------------------------------------------------------------
 # structural properties that L-BFGS did not have
 # --------------------------------------------------------------------------
