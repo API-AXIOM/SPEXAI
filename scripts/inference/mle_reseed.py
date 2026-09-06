@@ -394,6 +394,7 @@ def gauss_newton_batch(forward, prior, data_batch, truth, pars, n_iter=8,
     theta = np.tile(np.asarray(truth, dtype=np.float64), (K, 1)) \
         if start is None else np.array(start, dtype=np.float64).reshape(K, ndim)
     move = np.zeros((K, ndim))
+    best, stall = np.inf, 0
 
     for it in range(n_iter):
         t0 = time.time()
@@ -428,16 +429,44 @@ def gauss_newton_batch(forward, prior, data_batch, truth, pars, n_iter=8,
                   f"lambda^2/2 {lam2.max() / 2:.3e} nats "
                   f"(tol {tol_decrement:.1e}), cond(F) {conds.max():.1e}",
                   flush=True)
-        if lam2.max() / 2 < tol_decrement:
+        now = lam2.max() / 2
+        if now < tol_decrement:
             if verbose:
                 print(f"  GN converged: Newton decrement below tolerance at "
                       f"iteration {it + 1}", flush=True)
             break
+        # Stall detector. The decrement does not go to zero: it bottoms out in
+        # a limit cycle a few 1e-3 nats up, where the step stops shrinking
+        # (point 0 of the 2026-09-06 GN run sat at move = 1.87e-2, 1.87e-2,
+        # 1.89e-2 sigma while lambda^2/2 oscillated 5.2e-3 / 2.5e-3 / 3.1e-3).
+        # Iterating past that buys nothing and costs a full Jacobian each
+        # round, so stop -- but report the floor reached rather than calling it
+        # convergence, because whether it is GOOD ENOUGH is not this function's
+        # call: it depends on the floor against b_sys, which the sweep judges.
+        #
+        # Progress must be MEANINGFUL, not merely a new minimum. A plain
+        # "no new best" test is defeated by the cycle itself: point 7 of the
+        # same run oscillated 6.07 / 7.56 / 4.32 / 3.47 / 3.80 / 3.46 / 3.81
+        # e-3 and kept setting marginal new bests, so it never fired and ran
+        # all 10 iterations. Requiring a 20% improvement stops it.
+        if now < best / 1.2:
+            stall = 0
+        else:
+            stall += 1
+        best = min(best, now)
+        if stall >= 2:
+            if verbose:
+                print(f"  GN stalled at iteration {it + 1}: lambda^2/2 floor "
+                      f"~{best:.3e} nats, above the {tol_decrement:.1e} "
+                      f"tolerance. Judge this on the sweep's spread/drift "
+                      f"lines, not here.", flush=True)
+            break
     else:
         if verbose:
-            print(f"  GN did NOT reach the decrement tolerance in {n_iter} "
-                  f"iterations -- max lambda^2/2 = {lam2.max() / 2:.3e} nats",
-                  flush=True)
+            print(f"  GN used all {n_iter} iterations without reaching the "
+                  f"{tol_decrement:.1e} tolerance or stalling -- best "
+                  f"lambda^2/2 = {best:.3e} nats. If it was still descending, "
+                  f"raise --gn_iter.", flush=True)
     return theta, move
 
 

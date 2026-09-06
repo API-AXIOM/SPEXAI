@@ -291,13 +291,21 @@ def main():
                          "line-search flags are ignored")
     ap.add_argument("--gn_iter", type=int, default=8,
                     help="max Fisher-scoring rounds (--method gn)")
-    ap.add_argument("--gn_tol", type=float, default=1e-3,
+    ap.add_argument("--gn_tol", type=float, default=1e-2,
                     help="Newton-decrement tolerance in NATS (--method gn). "
-                         "lambda^2/2 is the log-likelihood still on the table; "
-                         "the measured inter-pass reproducibility floor is "
-                         "~1e-4 nats, so do not go below that")
-    ap.add_argument("--gn_max_step", type=float, default=5.0,
-                    help="trust region on |delta| in sigma units (--method gn)")
+                         "lambda^2/2 is the log-likelihood still on the table. "
+                         "MEASURED floor is ~3e-3 nats (point 0, 2026-09-06), "
+                         "where the iteration enters a limit cycle, so 1e-3 "
+                         "can never be met; 1e-2 is ~0.14 sigma in the worst "
+                         "direction, comfortably inside the 10%-of-bias "
+                         "criterion. Below ~5e-3 you are just paying for "
+                         "Jacobians the stall detector will end anyway")
+    ap.add_argument("--gn_max_step", type=float, default=20.0,
+                    help="trust region on |delta| in sigma units (--method gn). "
+                         "The noiseless starts scatter by |b_sys| (~18 sigma at "
+                         "1e9 counts) and the first full Newton step wants ~74 "
+                         "sigma, so a cap of 5 spent 6 of 10 iterations just "
+                         "walking in. Box clipping is the real safety net")
     ap.add_argument("--gn_ridge", type=float, default=0.0,
                     help="Levenberg ridge * diag(F) before the solve "
                          "(--method gn); the valve for a badly conditioned F")
