@@ -37,12 +37,27 @@ def main() -> None:
                     help="call a denominator THIN below this many sigma")
     ap.add_argument("--max_frac_err", type=float, default=0.2,
                     help="flag k whose fractional error exceeds this")
+    ap.add_argument("--max_spread", type=float, default=0.10,
+                    help="drop points whose multi-start spread exceeds this "
+                         "fraction of the bias (0 disables). Matches "
+                         "p6_trends.py so the two agree on which points count")
     ap.add_argument("--big_sigma", type=float, default=1.0,
                     help="a bias this many sigma or more is big enough to "
                          "move N*; k is reported for every such parameter")
     args = ap.parse_args()
 
-    rows = [json.loads(ln) for ln in open(args.jsonl) if ln.strip()]
+    allrows = [json.loads(ln) for ln in open(args.jsonl) if ln.strip()]
+    rows = allrows
+    if args.max_spread > 0:
+        rows = [r for r in allrows
+                if float(r.get("start_spread_frac_of_bias", 0.0))
+                <= args.max_spread]
+        drop = sorted(int(r["point"]) for r in allrows if r not in rows)
+        if drop:
+            print(f"EXCLUDED {len(drop)} of {len(allrows)} points on start "
+                  f"spread > {args.max_spread:.0%} of bias: {drop}\n  (the "
+                  f"spread is the only real convergence certificate; an "
+                  f"unconverged fit biases k LOW)\n")
     print(f"{len(rows)} points from {args.jsonl}\n")
     print("== large k, and whether each is a measurement ==")
     print(f"{'point':>5} {'param':>9} {'k':>8} {'+-':>6} {'|b|/sig':>9} "

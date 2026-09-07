@@ -1172,6 +1172,215 @@ $\log(\text{norm})$ & 0.133 & 0.508 & $5.7\times10^{7}$ & 0.168 & 0.508 & $3.6\t
 \end{tabular}
 \end{table}
 
+\section{Is the linearised bias trustworthy? The factor $k$}\label{sec:linfactor}
+Everything in Sec.~\ref{sec:fisherbias} and Sec.~\ref{sec:biassweep} rests on a
+first-order expansion: $b_{\rm sys}=F^{-1}J^{\mathsf T}\!\operatorname{diag}
+(1/\mu)\,r$ is one Newton step of the expected log-likelihood, not a fit. It is
+what makes a sweep of hundreds of points affordable --- $2n{+}1$ emulator
+evaluations per point instead of a posterior --- but it is an approximation,
+and $N_\star\propto b_{\rm sys}^{-2}$ inherits its error squared. This section
+measures that error directly.
+
+\subsection{Definitions}\label{sec:kdefs}
+Three quantities, all carried in each parameter's own physical units
+($\kev$ for $kT$, $\kms$ for $\sigma_v$, $10^{21}\,\mathrm{cm^{-2}}$ for $\nh$,
+$\zsun$ for the abundances, dex for $\log_{10}$(norm)):
+
+\begin{description}
+\item[$\sigma_j$] the \emph{statistical} $1\sigma$ error on parameter $j$,
+$\sigma_j=\sqrt{(F^{-1})_{jj}}$, quoted at the exposure of interest. It is the
+error bar a fit with that much data would report.
+\item[$b_{{\rm sys},j}$] the \emph{predicted} systematic offset, from the
+linearisation above. What Sec.~\ref{sec:biassweep} tabulates.
+\item[$\delta_j \equiv \theta^\star_j-\theta_{0,j}$] the \emph{measured}
+systematic offset. Here $\theta^\star$ is the pseudo-true parameter vector: the
+maximum-likelihood point obtained by fitting the emulator to the
+\emph{noise-free} SPEX truth spectrum $d_c$, i.e.\ the answer an observer would
+converge to with infinite exposure. Measuring $\delta$ therefore requires an
+actual fit, but no Monte Carlo and no noise realisations.
+\end{description}
+
+\noindent The linearisation factor is their ratio,
+\begin{equation}
+  k_j \;\equiv\; \delta_j\,/\,b_{{\rm sys},j},
+  \label{eq:kdef}
+\end{equation}
+dimensionless, with $k=1$ meaning the first-order prediction was exact. Since
+$b_{\rm sys}/\sigma\propto\sqrt{N}$, a true bias $k$ times the predicted one
+makes the crossover arrive $k^2$ times sooner:
+\begin{equation}
+  N_\star^{\rm true} \;=\; N_\star^{\rm linear}\,/\,k^2 .
+  \label{eq:nstarfactor}
+\end{equation}
+Two derived quantities are also reported below: $|\delta|/\sigma$, the size of
+the systematic in units of the statistical error bar (dimensionless; below
+unity the bias is invisible, above it the bias dominates), and
+$|\delta-b_{\rm sys}|$ expressed in units of $\sigma$, the absolute miss of the
+prediction.
+
+Because $k$ is a ratio, it is meaningless where its denominator is small. A
+parameter with $|b_{\rm sys}|\lesssim0.1\sigma$ can return $|k|$ in the tens,
+or a negative $k$ --- the predicted and measured offsets pointing in opposite
+directions --- purely because the sign of a $0.01\sigma$ prediction is not
+determined. Such entries are excluded throughout by requiring
+$|b_{\rm sys}|\ge0.5\sigma$, and should be reported as limits rather than
+measurements. This is not a marginal bookkeeping choice: the largest $|k|$
+anywhere in the sweep below is $40.8$ (Ca at one point), on a denominator of
+$0.01\sigma$, and it moves no $N_\star$ whatsoever.
+
+\subsection{Method}
+$\theta^\star$ is obtained by Fisher scoring (Gauss--Newton),
+$\theta\leftarrow\theta+F^{-1}s$, with the score $s$ evaluated by automatic
+differentiation of the emulator and $F$ from the same finite-difference
+Jacobian used for $b_{\rm sys}$. The choice matters: the fixed point of the
+iteration is $s=0$, so only the score determines the answer, while $F$ merely
+preconditions the path to it. $F=J\operatorname{diag}(1/\mu)J^{\mathsf T}$ is a
+Gram matrix and therefore positive definite by construction, so every step is
+an ascent direction and no line search is required --- which matters because
+the forward model is reproducible only to ${\sim}2\times10^{-7}$ relative
+(float32), a floor that defeats line-search-based methods on this problem.
+Convergence is tested on the Newton decrement $\lambda^2=s^{\mathsf T}F^{-1}s$,
+which is affine invariant and whose half is the log-likelihood still available.
+
+Each point is fitted from eight independent starts --- one at
+$\theta_0+b_{\rm sys}$, the rest scattered by $|b_{\rm sys}|$ component-wise.
+Agreement among independent starts is the convergence certificate; the
+movement of the final step is not, and was shown during development to be
+arbitrarily small while the fit was several $\sigma$ from the optimum. Points
+whose start-to-start spread exceeds $10\%$ of the bias are excluded.
+
+\subsection{Results: single-temperature}
+The sweep is 100 Latin-hypercube points over the ranges of
+Sec.~\ref{sec:biassweep}, at $10^9$ in-band counts. Twelve points failed the
+multi-start criterion and are excluded, leaving 88.
+
+\emph{The linearisation is accurate where it matters.} The per-point $N_\star$
+factor $k^2$, evaluated at each point's \emph{binding} parameter (the one with
+the largest $|\delta|/\sigma$, which is the parameter whose systematic
+overtakes its statistics first and therefore sets that point's $N_\star$), is
+distributed as
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+& min & median & 90th pct & max \\
+\midrule
+$k^2$ at the binding parameter & 0.69 & 0.98 & 1.10 & 2.75 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent so Table~\ref{tab:biassweep}'s $N_\star$ values are correct to
+${\sim}2\%$ at the median point and to $10\%$ for nine points in ten. The worst
+case is a factor $2.75$, at a hot ($kT=7.9\kev$), heavily absorbed
+($\nh=2.9$), very narrow-lined ($\sigma_v=30\kms$) point whose $kT$ bias is
+predicted at $21.2\sigma$ and measured at $35.2\sigma$.
+
+Table~\ref{tab:linfactor} gives the per-parameter breakdown. The two columns
+answer different questions and do not order the same way: $\sigma_v$ carries a
+modest typical bias but is by far the best-linearised parameter, while $kT$
+carries the largest biases and a middling \emph{fractional} error whose
+\emph{absolute} miss ($0.34\sigma$) is among the largest.
+
+\begin{table}[htbp]
+\centering
+\caption{Bias and linearisation quality per parameter, single-temperature,
+88 converged sweep points at $10^9$ in-band counts. $n$ is the number of
+points at which that parameter's bias exceeds $1\sigma$; linearisation
+statistics additionally require $|b_{\rm sys}|\ge0.5\sigma$.}
+\label{tab:linfactor}
+\begin{tabular}{lrrr|rrr}
+\toprule
+& \multicolumn{3}{c|}{bias, $|\delta|/\sigma$}
+& \multicolumn{3}{c}{linearisation} \\
+param & $n$ & median & max & median $|k{-}1|$ & max $|k{-}1|$
+& median $|\delta-b_{\rm sys}|/\sigma$ \\
+\midrule
+$kT$      & 83 &  9.99 & 35.19 & 0.045 & 0.659 & 0.341 \\
+Fe        & 86 &  7.93 & 26.98 & 0.048 & 0.363 & 0.367 \\
+$\log(\text{norm})$ & 78 & 4.80 & 22.99 & 0.085 & 0.716 & 0.395 \\
+$\nh$     & 71 &  3.80 & 12.34 & 0.061 & 0.675 & 0.191 \\
+Ni        & 84 &  3.64 & 10.14 & 0.026 & 0.471 & 0.089 \\
+Ca        & 61 &  3.36 &  7.82 & 0.041 & 0.475 & 0.128 \\
+$\sigma_v$ & 62 &  3.28 & 26.66 & 0.010 & 0.426 & 0.033 \\
+Ar        & 46 &  2.21 & 19.50 & 0.036 & 0.547 & 0.112 \\
+S         & 42 &  1.96 & 11.37 & 0.079 & 0.695 & 0.179 \\
+Cr        & 50 &  1.85 &  2.85 & 0.024 & 0.384 & 0.042 \\
+Mn        & 35 &  1.83 &  5.23 & 0.043 & 0.190 & 0.086 \\
+Si        & 19 &  1.42 &  8.74 & 0.028 & 0.178 & 0.048 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Where in parameter space?}
+Aggregating to one number per point (rows within a point share that point's
+$kT$, $\sigma_v$ and $\nh$, so row-level significance would be badly
+overstated) and correlating against the point's physical parameters gives
+Table~\ref{tab:linregions}. At $n=88$ a Spearman $|\rho|>0.21$ is required for
+$p<0.05$.
+
+Two results. First, \textbf{the bias is systematically larger for
+narrow-lined sources}: $\rho=-0.29$ against $\sigma_v$ ($p=0.005$). This
+replicates on an independent Latin hypercube --- a preliminary 20-point sweep
+gave $\rho=-0.62$ --- and the correlation with $\mathrm{cond}(F)$ is the same
+effect, since broad lines carry less information and worsen the conditioning
+while enlarging $\sigma$. Second, and more usefully, \textbf{the
+\emph{linearisation} shows no regional dependence at all}: every $|\rho|$ is
+below $0.18$ with $p\ge0.10$. There is no region of the parameter space where
+the first-order screen is systematically less trustworthy than elsewhere,
+which is what licenses applying it uniformly across the sweep.
+
+\begin{table}[htbp]
+\centering
+\caption{Spearman rank correlations, one point per row of the sample ($n=88$).
+The bias column uses each point's largest $|\delta|/\sigma$; the linearisation
+column uses its median $|k-1|$. $|\rho|>0.21$ is needed for $p<0.05$.}
+\label{tab:linregions}
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{bias} & \multicolumn{2}{c}{linearisation $|k-1|$} \\
+against & $\rho$ & $p$ & $\rho$ & $p$ \\
+\midrule
+$kT$              & $+0.078$ & 0.469 & $+0.056$ & 0.605 \\
+$\sigma_v$        & $-0.294$ & 0.005 & $+0.177$ & 0.099 \\
+$\nh$             & $-0.115$ & 0.284 & $-0.125$ & 0.246 \\
+$\mathrm{cond}(F)$ & $-0.359$ & 0.001 & $+0.093$ & 0.388 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why the binding parameter is the well-behaved one}
+The absolute miss $|\delta-b_{\rm sys}|$ grows with the bias, but sublinearly:
+a log--log fit over the 713 qualifying rows gives
+$|\delta-b_{\rm sys}|\propto|b_{\rm sys}|^{0.59}$
+($\rho=+0.35$, $p<10^{-4}$), with a median miss of $0.14\sigma$ and a 90th
+percentile of $0.69\sigma$. An exponent between the additive ($0$) and
+multiplicative ($1$) limits means
+$|k-1|\propto|b_{\rm sys}|^{-0.41}$: the fractional error shrinks as the bias
+grows. This is the structural reason the results above are benign. The
+parameter that sets a point's $N_\star$ is by definition the one with the
+largest bias, and that is precisely the regime in which the linearisation is
+most accurate; the large values of $k$ occur on parameters whose bias is too
+small to threaten anything.
+
+\subsection{Caveats}\label{sec:kcaveats}
+\begin{enumerate}
+\item \textbf{Single-temperature only.} The factor has not been measured for
+the DEM flavour, whose binding parameter is $T_{\rm sigma}$ rather than Fe and
+which has no single-temperature analogue. The DEM margin against a deep
+stacked cluster core is roughly an order of magnitude, so it has less headroom
+than the single-$T$ case; carrying the numbers above across is an assumption,
+not a measurement.
+\item \textbf{Twelve of 100 points are excluded} for failing the multi-start
+criterion. They are not enriched in high bias as a set (Mann--Whitney
+$p=0.40$), so the distribution above is not flattered; however the two
+\emph{largest-bias} points in the sweep ($33.4\sigma$ and $25.0\sigma$) are
+among them, so the worst-case factor of $2.75$ should be read as the worst
+\emph{measured} value rather than a bound.
+\item \textbf{The emulator error $r_c$ is deterministic}, so this measurement
+cannot see any interaction between counting noise and emulator error --- for
+instance noise pushing a fit into a different mode. That is a separate
+question, addressed by the MCMC cross-checks.
+\end{enumerate}
+
 \section{Sampling the velocity dispersion}\label{sec:sigmav}
 The line-of-sight velocity dispersion $\sigma_v$ is a free, sampled parameter.
 It was previously pinned in the walker-batched runs for an implementation

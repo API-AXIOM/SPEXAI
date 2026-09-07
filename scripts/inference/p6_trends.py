@@ -36,9 +36,26 @@ def main() -> None:
     ap.add_argument("--b_min_sigma", type=float, default=0.5,
                     help="|b_sys|/sigma below this makes k a thin ratio and is "
                          "excluded from every linearisation statistic")
+    ap.add_argument("--max_spread", type=float, default=0.10,
+                    help="drop points whose multi-start spread exceeds this "
+                         "fraction of the bias. The spread is the only real "
+                         "convergence certificate (drift is not), and an "
+                         "unconverged fit biases k LOW -- the direction that "
+                         "falsely exonerates. Set to 0 to disable the cut")
     args = ap.parse_args()
 
-    rows = [json.loads(ln) for ln in open(args.jsonl) if ln.strip()]
+    allrows = [json.loads(ln) for ln in open(args.jsonl) if ln.strip()]
+    rows = allrows
+    if args.max_spread > 0:
+        rows = [r for r in allrows
+                if float(r.get("start_spread_frac_of_bias", 0.0))
+                <= args.max_spread]
+        drop = sorted(int(r["point"]) for r in allrows if r not in rows)
+        if drop:
+            print(f"EXCLUDED {len(drop)} of {len(allrows)} points on "
+                  f"start spread > {args.max_spread:.0%} of bias: {drop}")
+            print("  (their k is biased LOW; rerun them before quoting any "
+                  "number that depends on them)\n")
     pt, nm, d, k, b = [], [], [], [], []
     phys = {}
     for r in rows:
@@ -98,6 +115,16 @@ def main() -> None:
     print(f"  |delta - b_sys|: median {np.median(off[thick]):.3f}, "
           f"90th {np.percentile(off[thick], 90):.3f}, "
           f"max {off[thick].max():.3f} sigma")
+    # A sign test on rho only says "not zero". The exponent says how much:
+    # |delta - b| ~ |b|^alpha, with alpha = 0 a fixed additive offset (k -> 1
+    # for large bias, the safe case) and alpha = 1 a fixed FRACTIONAL error
+    # (k constant, so a big bias stays proportionally wrong). Anything in
+    # between means the error grows sublinearly and k still improves with
+    # bias, just more slowly than a pure offset would give.
+    m = thick & (off > 0) & (np.abs(b) > 0)
+    alpha, c = np.polyfit(np.log(np.abs(b[m])), np.log(off[m]), 1)
+    print(f"  log-log slope alpha = {alpha:+.2f}   "
+          f"(0 = purely additive, 1 = purely multiplicative)")
 
     # Cluster-aware regional trends: collapse to ONE number per point first,
     # so n = number of points rather than number of rows.
@@ -121,8 +148,8 @@ def main() -> None:
         rl, pl = spearmanr(x[ok], yk[ok])
         print(f"{label:>10} {rb:>+15.3f} p={pb:>5.3f} "
               f"{rl:>+16.3f} p={pl:>5.3f}")
-    print(f"  n = {len(pts)} points. At n=20 a Spearman rho needs |rho| > "
-          f"~0.44 to clear p < 0.05.")
+    print(f"  n = {len(pts)} points; |rho| > ~{1.96 / np.sqrt(len(pts) - 1):.2f}"
+          f" is needed to clear p < 0.05 at this n.")
 
     print("\n== worst linearisation, thick denominators only ==")
     for i in np.argsort(-kerr)[:15]:

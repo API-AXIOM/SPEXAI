@@ -94,7 +94,7 @@ from bake_off import build_problem                                # noqa: E402
 from bias_sweep import NORM_REF, build_pars                       # noqa: E402
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, find_xrism_response, band_mask, EXCLUDE_NONE,
-    check_truth_response)
+    check_truth_response, gaussian_dem)
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -150,9 +150,27 @@ def tierb_response(tz):
     return response, band_mask(response, exclude=EXCLUDE_NONE), rmf, arf
 
 
+def tierb_mode(names):
+    """'dem' or 'single', read off the sweep's own parameter names.
+
+    The jsonl records the fitted-parameter names, and the two modes differ
+    exactly there (``kT`` vs ``T_mean``/``T_sigma``), so the mode is a property
+    of the file rather than a flag the caller can set inconsistently with it.
+    """
+    return "dem" if "T_mean" in list(names) else "single"
+
+
 def tierb_forward(args, names, response, keep):
-    """The emulator forward. Identical for every single-T sweep point, so the
-    sweep builds it ONCE -- only the truth vector and the prior box vary."""
+    """The emulator forward. Identical for every sweep point of a given mode,
+    so the sweep builds it ONCE -- only the truth vector and the prior box vary.
+
+    In DEM mode the temperature is not a fit parameter: the DEM's shape
+    parameters are, and the model object carries only the (fixed) grid and the
+    shape FAMILY, so the same instance serves every point -- unlike
+    ``bias_sweep``'s Fisher stage, which pins the shape per point and therefore
+    has to rebuild it.
+    """
+    dem = gaussian_dem()[0] if tierb_mode(names) == "dem" else None
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
     ab = AbundanceModel(emu.elements)
@@ -165,7 +183,7 @@ def tierb_forward(args, names, response, keep):
         redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
         velocity=None, device=args.device, chunk=args.chunk,
         batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
-        echunk=args.echunk)
+        echunk=args.echunk, dem=dem)
 
 
 def tierb_point(args, rec, counts_row, keep, verbose=True):
@@ -178,13 +196,17 @@ def tierb_point(args, rec, counts_row, keep, verbose=True):
     log_norm_truth = float(np.log10(NORM_REF * scale))
 
     # identical bounds/steps to the sweep's own Fisher solve
-    pars = build_pars(None, rec["params"], log_norm_truth, "single")
+    mode = tierb_mode(rec["names"])
+    pars = build_pars(None, rec["params"], log_norm_truth, mode)
     names = [p.name for p in pars]
     if names != list(rec["names"]):
         raise SystemExit(f"parameter order changed: jsonl has {rec['names']}, "
                          f"build_pars gives {names}")
     if verbose:
-        print(f"point {rec['point']}: kT={rec['params']['kT']:.3f} "
+        p = rec["params"]
+        temp = (f"kT={p['kT']:.3f}" if mode == "single" else
+                f"T_mean={p['T_mean']:.3f} T_sigma={p['T_sigma']:.3f}")
+        print(f"point {rec['point']}: {temp} "
               f"sigma_v={rec['params']['sigma_v']:.1f} "
               f"n_h={rec['params']['n_h']:.3f}  cond(F)={rec['cond_F']:.1e}  "
               f"worst |b|/sig@{rec['n_ref']:.0e}={worst_ratio(rec):.3f}",
