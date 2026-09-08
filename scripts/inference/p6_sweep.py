@@ -317,6 +317,14 @@ def main():
                          "that same divided chunk now bounds the Gauss-Newton "
                          "score's gradient graph, so it is the memory lever "
                          "for both halves of a GN iteration")
+    ap.add_argument("--gchunk", type=int, default=None,
+                    help="DEM only: temperature-grid points per emulator call. "
+                         "Default sizes a gradient block at "
+                         "VectorForward.DEM_GRAD_ROWS (8) emulator rows, which "
+                         "is what the single-T backward was measured at. Lower "
+                         "it FIRST if a DEM run OOMs: the FFT broadening's "
+                         "graph scales with n_elements * B * G and is what "
+                         "overflows")
     ap.add_argument("--mem_gb", type=float, default=2.0)
     ap.add_argument("--echunk", type=int, default=None)
     ap.add_argument("--compile", action="store_true")

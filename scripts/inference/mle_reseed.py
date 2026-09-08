@@ -183,7 +183,8 @@ def tierb_forward(args, names, response, keep):
         redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
         velocity=None, device=args.device, chunk=args.chunk,
         batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
-        echunk=args.echunk, dem=dem)
+        echunk=args.echunk, dem=dem,
+        dem_grid_chunk=getattr(args, "gchunk", None))
 
 
 def tierb_point(args, rec, counts_row, keep, verbose=True):
@@ -817,6 +818,11 @@ def main():
     ap.add_argument("--chunk", type=int, default=32)
     ap.add_argument("--mem_gb", type=float, default=2.0)
     ap.add_argument("--echunk", type=int, default=None)
+    ap.add_argument("--gchunk", type=int, default=None,
+                    help="DEM only: temperature-grid points per emulator call "
+                         "(default: a gradient block of DEM_GRAD_ROWS=8 rows). "
+                         "The memory lever for a DEM backward; see "
+                         "VectorForward.dem_gchunk")
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile the batched trunk (--method lbfgs, GPU)")
     ap.add_argument("--out", default=os.path.join(RESULTS, "mle_reseed",

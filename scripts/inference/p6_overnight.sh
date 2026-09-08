@@ -26,6 +26,18 @@ COUNTS="${COUNTS:-1e9}"
 NSEEDS="${NSEEDS:-8}"          # independent STARTS in noiseless mode
 GN_ITER="${GN_ITER:-12}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
+# Memory levers for the GN stage, in the order to reach for them. Empty = the
+# script's default. GCHUNK is DEM-only and the one that matters there: a DEM
+# turns each walker into G=48 emulator rows, and the FFT broadening's gradient
+# graph scales with n_elements*B*G, so this is what a DEM backward is bounded
+# by. ECHUNK is the checkpoint segment on the energy axis, the second lever.
+GCHUNK="${GCHUNK:-}"
+ECHUNK="${ECHUNK:-}"
+# if, not `[ -n "$X" ] && ...`: under `set -e` a false test as the last command
+# of the line exits the whole script.
+GN_EXTRA=()
+if [ -n "$GCHUNK" ]; then GN_EXTRA+=(--gchunk "$GCHUNK"); fi
+if [ -n "$ECHUNK" ]; then GN_EXTRA+=(--echunk "$ECHUNK"); fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Mirrors spexai.config.RESULTS exactly, so overriding SPEXAI_RESULTS moves the
@@ -117,7 +129,8 @@ run_stage gn python -u "$REPO/scripts/inference/p6_sweep.py" \
     --counts "$COUNTS" --n_seeds "$NSEEDS" --seed_chunk "$NSEEDS" \
     --method gn --gn_iter "$GN_ITER" \
     --bias_jsonl "$BIAS_JSONL" --truth_npz "$TRUTH_NPZ" \
-    --out "$P6_JSONL" --resume
+    --out "$P6_JSONL" --resume \
+    ${GN_EXTRA[@]+"${GN_EXTRA[@]}"}
 
 # --- 4. Analysis. Cheap, and running it here means the morning starts with
 #        numbers rather than a jsonl. Never fatal: the science data is already
