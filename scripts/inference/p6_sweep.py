@@ -311,7 +311,12 @@ def main():
                          "(--method gn); the valve for a badly conditioned F")
     ap.add_argument("--points", default=None,
                     help="comma-separated subset, e.g. 0,5,9; default all")
-    ap.add_argument("--chunk", type=int, default=32)
+    ap.add_argument("--chunk", type=int, default=32,
+                    help="emulator rows per sub-batch. A DEM divides this by "
+                         "the grid size G=48 (VectorForward.walker_chunk), and "
+                         "that same divided chunk now bounds the Gauss-Newton "
+                         "score's gradient graph, so it is the memory lever "
+                         "for both halves of a GN iteration")
     ap.add_argument("--mem_gb", type=float, default=2.0)
     ap.add_argument("--echunk", type=int, default=None)
     ap.add_argument("--compile", action="store_true")
@@ -340,6 +345,11 @@ def main():
         return summarise(args.out)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    # Must precede the first CUDA allocation. The DEM run cycles between a
+    # large value-only stencil and a large gradient graph every iteration, i.e.
+    # exactly the alternating-size pattern that fragments the caching allocator
+    # (the OOM that killed it reported 1.3 GiB reserved-but-unallocated).
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if args.deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)

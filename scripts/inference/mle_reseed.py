@@ -325,7 +325,7 @@ def fisher_scoring(forward, prior, pars, truth, data_batch, n_iter):
                                                     # truth, tiny K-scatter)
 
 
-def gn_score(forward, theta, data, mu_ref, log_mu_ref):
+def gn_score(forward, theta, data, mu_ref, log_mu_ref, row_chunk=None):
     """Exact score dL/dtheta for all K rows in ONE reverse-mode pass.
 
     ``theta`` (K, ndim) ndarray -> (score (K, ndim) ndarray, -logL float).
@@ -345,17 +345,40 @@ def gn_score(forward, theta, data, mu_ref, log_mu_ref):
 
     ``counts_torch`` casts to float32 internally but the cast is
     differentiable, so the float64 gradient comes back intact.
+
+    ROW CHUNKING. ``counts_torch(grad=True)`` is deliberately unchunked -- one
+    gradient step needs the whole graph anyway -- but that is a statement about
+    ONE row, and here the K rows are independent likelihoods whose scores do
+    not mix. So the sum is accumulated a chunk of rows at a time: each chunk
+    backwards into ``th.grad`` at its own slice and frees its graph before the
+    next is built, which bounds peak memory at one chunk instead of K.
+    Arithmetically identical -- the gradient of a sum is the sum of gradients.
+
+    This is what makes the DEM mode fit on a 22 GB card: a DEM turns each
+    walker into G=48 emulator rows, so the retained graph is ~G times the
+    single-T one and even K=2 rows OOMed. ``row_chunk`` defaults to
+    ``forward.walker_chunk``, which already divides by G, so single-T runs
+    (walker_chunk = chunk = 32 >= K) are unaffected.
     """
     device = forward.device
     th = torch.tensor(np.atleast_2d(theta), dtype=torch.float64,
                       device=device, requires_grad=True)          # (K, ndim)
-    mu = forward.counts_torch(th, grad=True).double().clamp_min(1e-30)
-    # (K, n_keep); the mu_ref subtraction is a constant in theta and so does
-    # not touch the gradient -- it is kept only so the printed -logL is on the
-    # same O(1e2) scale as lbfgs_batch's and the two are comparable.
-    ll = (data * (torch.log(mu) - log_mu_ref) - (mu - mu_ref)).sum()
-    ll.backward()
-    return th.grad.detach().cpu().numpy(), -float(ll.detach())
+    if row_chunk is None:
+        row_chunk = getattr(forward, "walker_chunk", th.shape[0])
+    row_chunk = max(1, int(row_chunk))
+    negll = 0.0
+    for lo in range(0, th.shape[0], row_chunk):
+        hi = min(lo + row_chunk, th.shape[0])
+        mu = forward.counts_torch(th[lo:hi], grad=True).double().clamp_min(1e-30)
+        # (rows, n_keep); the mu_ref subtraction is a constant in theta and so
+        # does not touch the gradient -- it is kept only so the printed -logL is
+        # on the same O(1e2) scale as lbfgs_batch's and the two are comparable.
+        ll = (data[lo:hi] * (torch.log(mu) - log_mu_ref)
+              - (mu - mu_ref)).sum()
+        ll.backward()
+        negll -= float(ll.detach())
+        del mu, ll
+    return th.grad.detach().cpu().numpy(), negll
 
 
 def gauss_newton_batch(forward, prior, data_batch, truth, pars, n_iter=8,
