@@ -33,11 +33,18 @@ SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-0}"
 # by. ECHUNK is the checkpoint segment on the energy axis, the second lever.
 GCHUNK="${GCHUNK:-}"
 ECHUNK="${ECHUNK:-}"
+# Subset of sweep points for the GN stage only (e.g. POINTS=0,1,2). The truth
+# and bias stages still cover all NPOINTS, so the TAG -- and therefore the LHS
+# design -- is unchanged: this runs a tranche of an existing sweep rather than
+# creating a smaller, different one. The jsonl accumulates, so a later run with
+# more points extends the same file under --resume.
+POINTS="${POINTS:-}"
 # if, not `[ -n "$X" ] && ...`: under `set -e` a false test as the last command
 # of the line exits the whole script.
 GN_EXTRA=()
 if [ -n "$GCHUNK" ]; then GN_EXTRA+=(--gchunk "$GCHUNK"); fi
 if [ -n "$ECHUNK" ]; then GN_EXTRA+=(--echunk "$ECHUNK"); fi
+if [ -n "$POINTS" ]; then GN_EXTRA+=(--points "$POINTS"); fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Mirrors spexai.config.RESULTS exactly, so overriding SPEXAI_RESULTS moves the

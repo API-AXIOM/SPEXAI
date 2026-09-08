@@ -359,6 +359,17 @@ class BatchedJointForward:
         numerically transparent. ``compile_trunk`` additionally torch.compiles
         the vmapped group forward (compile ∘ vmap), stacking kernel fusion on top
         of the batching (one-off compile stall on the first call)."""
+        temp_kev, bin_edges, absorb, tfun, echunk = self._prep(
+            temp_kev, bin_edges, absorption, n_h, echunk, mem_gb, compile_trunk)
+        dens, zs = self._density(temp_kev, echunk, compile_trunk)
+        cont = self._continuum(dens, bin_edges, velocity, absorb, tfun, n_h,
+                               redshift, mem_gb)
+        return self._combine(cont, zs, abundances, temp_kev, bin_edges,
+                             velocity, absorb, tfun, n_h, redshift)
+
+    def _prep(self, temp_kev, bin_edges, absorption, n_h, echunk, mem_gb,
+              compile_trunk):
+        """Shared entry work for ``flux`` and ``element_flux``."""
         device = self.device
         temp_kev = torch.as_tensor(temp_kev, dtype=torch.float32,
                                    device=device).view(-1)
@@ -376,12 +387,40 @@ class BatchedJointForward:
             echunk = self._echunk(temp_kev.numel(), mem_gb)
         if compile_trunk:                    # a few chunk shapes per group, +margin
             ensure_recompile_limit(8 * len(self.groups))
+        return temp_kev, bin_edges, absorb, tfun, echunk
 
+    @_grad_aware
+    def element_flux(self, temp_kev, bin_edges, velocity, absorption=None,
+                     n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0,
+                     compile_trunk=False):
+        """Per-element flux ``(zs, (N, B, M))``, BEFORE abundance weighting.
+
+        ``flux`` is ``sum_z abundance_z * element_flux[z]``. Splitting the two
+        exposes the fact that the expensive stages -- the trunk (~83% of the
+        time), the FFT broadening and the line deposit -- depend only on
+        ``(temp_kev, velocity, n_h)``: abundances are a linear weight applied
+        afterwards. A caller evaluating many parameter vectors that share the
+        kinematics can therefore pay for this once. See
+        ``VectorForward._counts_dem_grouped``, which uses it to collapse a
+        27-point Jacobian stencil onto 5 emulator evaluations.
+
+        The line head is included per element, so the result is complete: the
+        only thing left to apply is the abundance.
+        """
+        temp_kev, bin_edges, absorb, tfun, echunk = self._prep(
+            temp_kev, bin_edges, absorption, n_h, echunk, mem_gb, compile_trunk)
         dens, zs = self._density(temp_kev, echunk, compile_trunk)
         cont = self._continuum(dens, bin_edges, velocity, absorb, tfun, n_h,
                                redshift, mem_gb)
-        return self._combine(cont, zs, abundances, temp_kev, bin_edges,
-                             velocity, absorb, tfun, n_h, redshift)
+        out = []
+        for i, z in enumerate(zs):
+            out_e = cont[i]
+            model = self.joint.models[z]
+            if model.line_head is not None:
+                out_e = out_e + self._lines(model, temp_kev, bin_edges,
+                                            velocity, absorb, tfun, n_h, redshift)
+            out.append(out_e)
+        return zs, torch.stack(out, dim=0)                       # (N, B, M)
 
     def _lines(self, model, temp_kev, bin_edges, velocity, absorb, tfun,
                n_h, redshift):

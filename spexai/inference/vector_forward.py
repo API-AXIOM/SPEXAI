@@ -45,6 +45,10 @@ from spexai.inference.units import D_REF_M, FLUX_M2_TO_CM2, distance_factor
 # not. The value-only budget is `chunk` (32) and unrelated.
 DEM_GRAD_ROWS = 8
 
+# Rows per grouped DEM sub-batch. Bounds only the (rows, M) accumulator -- the
+# emulator work in a group is per GRID POINT and independent of the row count.
+ROW_CAP = 1024
+
 
 class VectorForward:
     """theta ``(B, ndim)`` -> in-band counts ``(B, n_keep)`` on ``device``.
@@ -421,12 +425,99 @@ class VectorForward:
         return max(1, self.chunk // max(1, g))
 
     def _counts_chunked(self, th: torch.Tensor) -> torch.Tensor:
+        if self.dem is not None and self.use_batched:
+            return self._counts_dem_grouped(th)
         chunk = self.walker_chunk
         if th.shape[0] <= chunk:
             return self.fold(self.flux(th), th)
         parts = [self.fold(self.flux(th[i:i + chunk]), th[i:i + chunk])
                  for i in range(0, th.shape[0], chunk)]
         return torch.cat(parts, dim=0)
+
+    def _counts_dem_grouped(self, th: torch.Tensor) -> torch.Tensor:
+        """Value-only DEM counts, sharing the emulator across rows that agree
+        on ``(sigma_v, n_h)`` -> (B, n_keep).
+
+        The DEM's temperature grid is FIXED, and everything expensive --
+        trunk, broadening, line deposit -- depends on theta only through the
+        grid and those two kinematic parameters. The DEM weights, the
+        abundances and the normalisation all apply afterwards, linearly. So
+        rows that share ``(sigma_v, n_h)`` can share ONE emulator evaluation of
+        G grid points, however many rows there are.
+
+        This is what makes a DEM Jacobian affordable. Of the 2*ndim+1 = 27
+        stencil points around one theta, only 5 differ in ``(sigma_v, n_h)``;
+        the other 22 are pure re-weightings of an identical emulator output and
+        used to be recomputed in full.
+
+        Peak memory is unchanged: a group costs one group's ``(N, G, M)``,
+        which is what a single walker already cost at ``walker_chunk``.
+
+        Value path only. Under gradients rows must NOT share a computation --
+        two rows with equal sigma_v are still different theta ENTRIES, and
+        sharing would deliver the gradient to only one of them. ``counts_torch``
+        routes the grad path to ``flux`` instead, and there the DEM's B is 1.
+        """
+        B = th.shape[0]
+        _, vel, n_h, abund, _ = self.unpack(th)
+        p = {n: th[:, i] for n, i in self.col.items()}
+        w = self.dem.weights_batch(p).to(self.device)              # (B, G)
+        velv = (vel if torch.is_tensor(vel)
+                else torch.full((B,), float(vel), device=self.device))
+        velv = velv.reshape(-1).expand(B) if velv.numel() == 1 else velv
+
+        # Exact float equality is the right test: the stencil offsets rows by
+        # construction, so rows that share kinematics share them bit for bit.
+        # Rows that merely happen to be close are correctly NOT grouped.
+        keys = np.stack([velv.detach().cpu().numpy().astype(np.float64),
+                         n_h.detach().cpu().numpy().astype(np.float64)], axis=1)
+        _, inv = np.unique(keys, axis=0, return_inverse=True)
+        inv = np.asarray(inv).reshape(-1)
+
+        gc = self.dem_gchunk(1)
+        out = None
+        for gi in range(int(inv.max()) + 1 if inv.size else 0):
+            rows = np.where(inv == gi)[0]
+            idx = torch.as_tensor(rows, device=self.device)
+            # ROW_CAP bounds the (rows, M) accumulator; the emulator work is
+            # per group and does not grow with the row count.
+            for lo in range(0, len(rows), ROW_CAP):
+                sub = idx[lo:lo + ROW_CAP]
+                fl = self._dem_group_flux(
+                    w.index_select(0, sub), velv[sub[0]], n_h[sub[0]],
+                    {z: (a.index_select(0, sub) if torch.is_tensor(a) else a)
+                     for z, a in abund.items()}, gc)
+                cts = self.fold(fl, th.index_select(0, sub))
+                if out is None:
+                    out = th.new_zeros((B, cts.shape[1]))
+                out.index_copy_(0, sub, cts)
+        return out
+
+    def _dem_group_flux(self, w_rows, vel_s, nh_s, abund_rows, gc):
+        """One kinematic group -> (rows, M).
+
+        ``w_rows`` is (rows, G); ``vel_s``/``nh_s`` are that group's shared
+        scalars; ``abund_rows`` holds each element's (rows,) abundance. The
+        grid is walked in blocks of ``gc`` so peak memory matches the ungrouped
+        path.
+        """
+        grid = torch.as_tensor(self.dem.temp_grid, dtype=torch.float32,
+                               device=self.device).reshape(-1)
+        G = grid.numel()
+        total = None
+        for lo in range(0, G, gc):
+            hi = min(lo + gc, G)
+            zs, ef = self.emu.batched.element_flux(          # (N, hi-lo, M)
+                grid[lo:hi], self.edges_rest, vel_s, absorption=self.absn,
+                n_h=nh_s, redshift=self.z, mem_gb=self.mem_gb,
+                echunk=self.echunk, compile_trunk=self.compile_trunk)
+            wb = w_rows[:, lo:hi]                            # (rows, hi-lo)
+            for i, z in enumerate(zs):
+                a = abund_rows.get(z, 1.0)
+                part = wb @ ef[i]                            # (rows, M)
+                part = part * (a[:, None] if torch.is_tensor(a) else a)
+                total = part if total is None else total + part
+        return total
 
     def __call__(self, theta) -> np.ndarray:
         """theta ``(B, ndim)`` array-like -> counts ``(B, n_keep)`` ndarray.

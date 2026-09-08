@@ -226,6 +226,58 @@ def test_dem_chunking_is_numerically_transparent(model, obs):
     assert np.allclose(together, apart, rtol=1e-5)
 
 
+def test_dem_grouping_matches_ungrouped(model, obs):
+    """Rows sharing (sigma_v, n_h) share one emulator evaluation. That is the
+    5.4x behind an affordable DEM Jacobian, and it is invisible when wrong --
+    it would quietly hand every row the first row's kinematics.
+
+    Built as a real Jacobian stencil, because that is the shape it exists for
+    and the shape where sharing actually happens: the centre plus a +/- pair
+    per parameter, so all but four rows agree on the kinematics.
+    """
+    post = build_posterior(obs, model, _dem_params(), FIXED, dem=_dem())
+    fwd = post.forward
+    base = np.array([3.5, 0.8, 200.0, 10.0])           # T_mean T_sigma sig_v norm
+    steps = np.array([5e-3, 5e-3, 1.0, 2e-3])
+    ndim = len(base)
+    stencil = np.repeat(base[None, :], 2 * ndim + 1, axis=0)
+    for i in range(ndim):
+        stencil[2 * i + 1, i] += steps[i]
+        stencil[2 * i + 2, i] -= steps[i]
+
+    th = torch.as_tensor(stencil, dtype=torch.float32)
+    c = fwd.walker_chunk                                # the ungrouped path
+    ref = torch.cat([fwd.fold(fwd.flux(th[i:i + c]), th[i:i + c])
+                     for i in range(0, th.shape[0], c)], 0).detach().numpy()
+    got = fwd(stencil)
+    assert np.allclose(got, ref, rtol=1e-4), (
+        np.abs(got - ref).max() / np.abs(ref).max())
+
+    # and the derived Jacobian, which is what actually reaches the Fisher solve
+    for mu in (ref, got):
+        assert (mu[0] > 0).any()
+    j_ref, j_got = [np.stack([(m[2 * i + 1] - m[2 * i + 2]) / (2 * steps[i])
+                              for i in range(ndim)]) for m in (ref, got)]
+    # log_norm is analytic -- fold multiplies by 10**log_norm -- so this column
+    # has a ground truth, not just a reference implementation
+    k = ndim - 1
+    for j, m in ((j_ref, ref), (j_got, got)):
+        assert np.allclose(j[k], m[0] * np.log(10.0), rtol=1e-3)
+
+
+def test_dem_grouping_gives_each_row_its_own_kinematics(model, obs):
+    """Positive control for the grouping key: rows that differ ONLY in sigma_v
+    must give different spectra. If the group key were dropped, they would all
+    collapse onto the first row's velocity and this passes silently in every
+    other test, since equal-kinematics rows are exactly the ones that agree."""
+    post = build_posterior(obs, model, _dem_params(), FIXED, dem=_dem())
+    theta = np.array([[3.5, 0.8, 100.0, 10.0],
+                      [3.5, 0.8, 600.0, 10.0]])
+    mu = post.forward(theta)
+    rel = np.abs(mu[0] - mu[1]).max() / np.abs(mu).max()
+    assert rel > 1e-3, f"sigma_v 100 vs 600 changed the spectrum by only {rel:.1e}"
+
+
 def test_dem_run_emcee_does_not_warn(model, obs):
     import warnings
     with warnings.catch_warnings():
