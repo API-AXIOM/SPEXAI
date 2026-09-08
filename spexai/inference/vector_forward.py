@@ -28,6 +28,7 @@ Correctness is checked against the serial reference forward in
 ``tests/test_vector_forward.py`` and, for the hot-floor configuration, by
 ``inference_demo/hot_floor/gpu_forward.py``.
 """
+import contextlib
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
@@ -36,6 +37,13 @@ import torch
 from spexai.inference.operator_model import (element_broadened_flux,
                                              ensure_recompile_limit)
 from spexai.inference.units import D_REF_M, FLUX_M2_TO_CM2, distance_factor
+
+# Emulator rows per DEM block UNDER GRADIENTS (see VectorForward.dem_gchunk).
+# Anchored on measurement, not taste: the single-T P6 backward at 8 rows cost
+# 11-15 GB, because a row retains its (n_elements, K~2e5) FFT broadening
+# intermediates -- `batched._density` checkpoints the trunk, `_continuum` does
+# not. The value-only budget is `chunk` (32) and unrelated.
+DEM_GRAD_ROWS = 8
 
 
 class VectorForward:
@@ -80,6 +88,11 @@ class VectorForward:
     chunk : int
         Walkers are processed in sub-batches of this size so peak device memory
         is bounded and the ensemble size stays independent of it.
+    dem_grid_chunk : int or None
+        DEM only: temperature-grid points per emulator call. ``None`` sizes it
+        so one call is ~``chunk`` rows (see ``dem_gchunk``). Under gradients
+        each block is checkpointed, so this -- not ``chunk`` -- is what bounds
+        a DEM backward.
     """
 
     def __init__(self, emu, response, keep, param_names: Sequence[str],
@@ -92,12 +105,13 @@ class VectorForward:
                  exposure: float = 1.0,
                  temp_name: str = "kT", norm_name: str = "log_norm",
                  velocity_name: str = "sigma_v", nh_name: str = "n_h",
-                 dem=None):
+                 dem=None, dem_grid_chunk: Optional[int] = None):
         self.emu, self.absn, self.device = emu, absorption, device
         # DEM: the emulator is evaluated on a whole temperature grid per walker
         # and the fluxes summed with the walker's own weights. Requires the
         # batched `weights_batch` contract (see spexai.inference.tempdist).
         self.dem = dem
+        self.dem_grid_chunk = dem_grid_chunk
         if dem is not None and not hasattr(dem, "weights_batch"):
             raise ValueError(
                 f"{type(dem).__name__} has no weights_batch(), so it cannot be "
@@ -235,6 +249,27 @@ class VectorForward:
             total = a * ef if total is None else total + a * ef
         return total
 
+    def dem_gchunk(self, B: int, grad: bool = False) -> int:
+        """Grid points per emulator call, for ``B`` walkers at a time.
+
+        The budget is in EMULATOR ROWS (``B * gchunk``), because that is what
+        both the trunk and the broadening scale with; the DEM's G is a
+        multiplier on the row count, not a separate budget.
+
+        The two budgets differ by a lot, and deliberately. Value-only rows are
+        freed as they are computed, so ``chunk`` (32) is fine. A row under
+        gradients also retains its FFT broadening intermediates -- ``(N*B, K)``
+        with K ~ 2e5 -- and ``DEM_GRAD_ROWS`` is anchored on the measurement
+        that the single-T P6 run's backward at 8 rows cost 11-15 GB. Four times
+        that is a 22 GB card, which is exactly what the first DEM attempt hit.
+
+        ``dem_grid_chunk`` overrides both.
+        """
+        if self.dem_grid_chunk is not None:
+            return max(1, int(self.dem_grid_chunk))
+        rows = DEM_GRAD_ROWS if grad else self.chunk
+        return max(1, rows // max(1, int(B)))
+
     def _flux_dem(self, th, vel, n_h, abund) -> torch.Tensor:
         """Emission-measure-weighted flux over a temperature grid -> (B, M).
 
@@ -247,6 +282,19 @@ class VectorForward:
 
         Summing over the grid *before* folding is exact and G times cheaper,
         since the fold is linear -- the same trick ``predict_counts_dem`` uses.
+
+        GRID CHUNKING (memory). That sum is also what lets the grid be walked in
+        blocks: each block contributes its own weighted partial sum, and the
+        blocks are added. Under gradients each block is CHECKPOINTED, so only
+        one block's activations are alive at a time instead of all G.
+
+        This is not a micro-optimisation. ``batched._density`` already
+        checkpoints over the energy axis, but the FFT broadening does not, and
+        its graph scales with ``n_elements * B * G`` rows -- so a 48-point grid
+        made even a SINGLE walker's backward larger than an 8-walker single-T
+        one, and no amount of walker chunking could bring it down. Peak memory
+        is now set by ``dem_gchunk`` rows -- ``DEM_GRAD_ROWS`` under gradients
+        -- at the cost of one recomputed forward per block.
         """
         B = th.shape[0]
         grid = torch.as_tensor(self.dem.temp_grid, dtype=torch.float32,
@@ -258,28 +306,70 @@ class VectorForward:
             raise ValueError(f"weights_batch returned {tuple(w.shape)}, "
                              f"expected {(B, G)}")
 
-        temps = grid.unsqueeze(0).expand(B, G).reshape(-1)     # (B*G,)
-        rep = (lambda t: t.repeat_interleave(G, dim=0)
+        # Captured OUTSIDE the block, restored INSIDE it. Checkpoint recomputes
+        # during backward, by which time the caller's `grad_enabled()` context
+        # has long exited and `batched.track_grad` is False again -- so
+        # `_grad_aware` would run the recomputation under no_grad and save
+        # nothing, which torch reports as "158 tensors saved during forward, 1
+        # during recomputation". Re-entering the flag makes the recompute match
+        # the forward. On the value path `track` is False, so this is a no-op
+        # and cannot switch grad back on inside a no_grad region.
+        bt = getattr(self.emu, "batched", None)
+        track = bool(getattr(bt, "track_grad", False))
+
+        def block(lo: int, hi: int) -> torch.Tensor:
+            """Grid points [lo, hi) -> that block's (B, M) weighted flux."""
+            with (bt.grad_enabled(track) if bt is not None
+                  else contextlib.nullcontext()):
+                return self._dem_block(lo, hi, grid, w, vel, n_h, abund, B)
+
+        # use_reentrant=False so the closure's tensors (w, vel, n_h, abund --
+        # all downstream of th) get their gradients, not just explicit args.
+        ckpt = bool(torch.is_grad_enabled() and th.requires_grad)
+        gc = self.dem_gchunk(B, grad=ckpt)
+        if gc >= G:
+            return block(0, G)
+        total = None
+        for lo in range(0, G, gc):
+            hi = min(lo + gc, G)
+            part = (torch.utils.checkpoint.checkpoint(
+                        block, lo, hi, use_reentrant=False)
+                    if ckpt else block(lo, hi))
+            total = part if total is None else total + part
+        return total
+
+    def _dem_block(self, lo, hi, grid, w, vel, n_h, abund, B) -> torch.Tensor:
+        """Grid points [lo, hi) -> that block's (B, M) weighted flux.
+
+        The per-walker quantities are ``repeat_interleave``d by the block's
+        width, matching the ``row = b*g + gi`` flattening; a plain ``repeat``
+        would tile them in the wrong order and silently pair each walker's
+        abundances with another walker's temperatures.
+        """
+        g = hi - lo
+        temps = grid[lo:hi].unsqueeze(0).expand(B, g).reshape(-1)  # (B*g,)
+        rep = (lambda t: t.repeat_interleave(g, dim=0)
                if torch.is_tensor(t) and t.numel() > 1 else t)
         vel_f, nh_f = rep(vel), rep(n_h)
         abund_f = {z: rep(a) for z, a in abund.items()}
-
         if self.use_batched:
             flux = self.emu.batched.flux(
-                temps, abund_f, vel_f, self.edges_rest, absorption=self.absn,
-                n_h=nh_f, redshift=self.z, mem_gb=self.mem_gb,
-                echunk=self.echunk,
-                compile_trunk=self.compile_trunk)              # (B*G, M)
+                temps, abund_f, vel_f, self.edges_rest,
+                absorption=self.absn, n_h=nh_f, redshift=self.z,
+                mem_gb=self.mem_gb, echunk=self.echunk,
+                compile_trunk=self.compile_trunk)              # (B*g, M)
         else:
             flux = None
             for z, model in self.emu.models.items():
                 ef = element_broadened_flux(
-                    model, temps, vel_f, self.edges_rest, absorption=self.absn,
-                    n_h=nh_f, redshift=self.z, use_torch_absorption=True)
+                    model, temps, vel_f, self.edges_rest,
+                    absorption=self.absn, n_h=nh_f, redshift=self.z,
+                    use_torch_absorption=True)
                 a = abund_f.get(z, 1.0)
                 a = a[:, None] if torch.is_tensor(a) else a
                 flux = a * ef if flux is None else flux + a * ef
-        return (w.unsqueeze(-1) * flux.reshape(B, G, -1)).sum(dim=1)   # (B, M)
+        return (w[:, lo:hi].unsqueeze(-1)
+                * flux.reshape(B, g, -1)).sum(dim=1)           # (B, M)
 
     def fold(self, flux: torch.Tensor, th: torch.Tensor) -> torch.Tensor:
         """Fold flux (B, M) through ARF+RMF on-device, scale by the norm."""
