@@ -203,10 +203,14 @@ def test_vectorised_dem_matches_scalar_with_absorption(model, obs):
 
 
 def test_dem_walker_chunk_shrinks_by_grid_size(model, obs):
-    # a G-point grid makes each walker G emulator rows; the walker chunk must
-    # shrink accordingly or peak memory is G times what `chunk` promised
+    # On the element-stacked path a G-point grid makes each walker G emulator
+    # rows, so the walker chunk must shrink accordingly or peak memory is G
+    # times what `chunk` promised. (The contracted path evaluates the grid once
+    # for the whole batch and has no such factor -- see
+    # tests/test_contracted.py, which asserts the other half of this.)
     dem = _dem()
-    post = build_posterior(obs, model, _dem_params(), FIXED, dem=dem)
+    post = build_posterior(obs, model, _dem_params(), FIXED, dem=dem,
+                           contract_first=False)
     g = dem.temp_grid.numel()
     assert post.forward.walker_chunk == max(1, post.forward.chunk // g)
     plain = build_posterior(obs, model, _params(), FIXED)
