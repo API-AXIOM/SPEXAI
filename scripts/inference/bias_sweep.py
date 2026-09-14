@@ -67,7 +67,8 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, HOT_SCIENCE, HOT_WEAK, find_xrism_response,
-    band_mask, EXCLUDE_NONE, gaussian_dem, N_REF, Par, Forward)
+    band_mask, EXCLUDE_NONE, gaussian_dem, N_REF, Par, Forward,
+    restrict_to_band)
 from fisher_bias import linear_bias_fisher, COND_F_WARN           # noqa: E402
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import SYMBOL                    # noqa: E402
@@ -250,6 +251,7 @@ def stage_bias(args, points, truth_path, outp):
     absorption = Absorption.default()
     keep = band_mask(response, exclude=EXCLUDE_NONE)
     emu = JointOperatorModel(models_dir=args.store, device=args.device)
+    restrict_to_band(emu)
     dem = gaussian_dem()[0] if args.mode == "dem" else None
     fwd = Forward(emu, response, absorption, keep, args.mode, dem=dem)
 

@@ -29,21 +29,49 @@ def test_abundance_global_only_scales_all_metals():
 
 # --- DEM weights ------------------------------------------------------------
 
-def test_gaussian_logt_weights_normalised_and_peaked():
+def test_gaussian_logt_weights_quadrature_and_peaked():
+    """Parametric weights are pdf*dx, NOT renormalised: their sum is the
+    fraction of the distribution the grid contains, so it should track the
+    analytic CDF difference rather than being forced to 1."""
+    from scipy.stats import norm as _norm
     grid = td.TempGrid(0.2, 10.0, n=80)
     dem = td.gaussian_logT(grid)
-    w = dem.weights({"logT_mean": np.log10(4.0), "logT_sigma": 0.1})
-    assert float(w.sum()) == pytest.approx(1.0, abs=1e-5)
+    mu, sig = np.log10(4.0), 0.1
+    w = dem.weights({"logT_mean": mu, "logT_sigma": sig})
+    d = _norm(mu, sig)
+    contained = d.cdf(grid.logtemps[-1]) - d.cdf(grid.logtemps[0])
+    assert float(w.sum()) == pytest.approx(contained, abs=1e-3)
+    assert contained == pytest.approx(1.0, abs=1e-3)     # this one IS contained
     peak_T = float(grid.temp_grid[int(torch.argmax(w))])
     assert 3.0 < peak_T < 5.0                  # peak near 4 keV
+
+
+def test_parametric_weights_not_renormalised_when_truncated():
+    """A DEM running off the top of the grid must produce LESS emission
+    measure, not the same amount redistributed."""
+    from scipy.stats import norm as _norm
+    grid = td.TempGrid(0.7, 10.0, n=48)        # campaign grid
+    dem = td.gaussian_logT(grid)
+    mu, sig = np.log10(8.0), 0.4               # hot and wide -> truncated
+    w = dem.weights({"logT_mean": mu, "logT_sigma": sig})
+    d = _norm(mu, sig)
+    # dlogt is uniform at the endpoints too, so the quadrature is a MIDPOINT
+    # rule over bins centred on the nodes: it covers half a cell beyond each
+    # end, and that is the reference the sum should reproduce.
+    h = 0.5 * float(grid.dlogt[0])
+    contained = (d.cdf(grid.logtemps[-1] + h) - d.cdf(grid.logtemps[0] - h))
+    assert contained < 0.8                     # genuinely truncated
+    assert float(w.sum()) == pytest.approx(contained, abs=1e-3)
+    assert float(w.sum()) < 0.95               # NOT forced back to 1
 
 
 def test_gaussian_T_matches_thesis_params():
     grid = td.TempGrid(0.2, 10.0, n=120)
     dem = td.gaussian_T(grid)
     w = dem.weights({"T_mean": 4.5, "T_sigma": 0.794})
-    assert float(w.sum()) == pytest.approx(1.0, abs=1e-5)
-    mean_T = float((grid.temp_grid * w).sum())
+    # contained on this grid, so the un-renormalised quadrature is ~1
+    assert float(w.sum()) == pytest.approx(1.0, abs=1e-3)
+    mean_T = float((grid.temp_grid * w).sum() / w.sum())
     assert mean_T == pytest.approx(4.5, abs=0.2)
 
 
@@ -103,12 +131,19 @@ def test_weights_batch_matches_scalar(factory):
         assert _torch.allclose(got[i], ref, atol=1e-6), f"walker {i}"
 
 
-def test_weights_batch_rows_sum_to_one():
+def test_weights_batch_rows_are_not_renormalised():
+    """Batched parametric weights must carry the same contained-fraction
+    semantics as the scalar path -- a truncated row stays short."""
     dem = _td.gaussian_logT(_grid())
     n = dem.param_names
     w = dem.weights_batch({n[0]: _torch.tensor([0.3, 0.7]),
                            n[1]: _torch.tensor([0.2, 0.4])})
-    assert _torch.allclose(w.sum(-1), _torch.ones(2), atol=1e-6)
+    sums = w.sum(-1)
+    assert float(sums[0]) == pytest.approx(1.0, abs=5e-3)   # contained
+    assert float(sums[1]) < 0.8                             # truncated, kept short
+    for i, (m, sg) in enumerate(((0.3, 0.2), (0.7, 0.4))):
+        ref = dem.weights({n[0]: m, n[1]: sg})
+        assert _torch.allclose(w[i], ref, atol=1e-6), f"row {i}"
 
 
 def test_two_gaussian_weights_batch_matches_scalar():

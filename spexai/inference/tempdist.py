@@ -5,8 +5,12 @@ a discrete temperature grid is the weighted sum ``predict_counts_dem`` takes.
 Each model here exposes the contract that ``fitting.make_loglike`` expects:
 
 * ``temp_grid`` -- a 1-D tensor of temperatures (keV) to evaluate the emulator at
-* ``weights(params)`` -- a 1-D tensor of non-negative weights that **sum to 1**
-  (the total emission measure is carried separately by ``norm``)
+* ``weights(params)`` -- a 1-D tensor of non-negative weights (the total
+  emission measure is carried separately by ``norm``). Free-weight shapes
+  (``BinnedDEM``) renormalise these to sum to 1, because their weights are
+  otherwise exactly degenerate with ``norm``. Parametric shapes do **not**:
+  their weights are ``pdf * quadrature``, whose sum is the fraction of the
+  distribution the grid contains and is meant to be read as such.
 * ``param_names`` -- the fit parameters the DEM consumes
 * ``suggested_bounds()`` -- default ``{name: (low, high)}`` for building Params
 
@@ -43,6 +47,15 @@ import torch
 # and can blow up (e.g. Ar -> inf at 0.5 keV). A grid meant to feed a truth
 # model, not just the emulator, should stay above this with a safety margin.
 PCHIP_TRUTH_SAFE_LO_KEV = 0.7
+
+# Top of the emulator's trained TEMPERATURE range -- the intersection over the
+# 30 element checkpoints, which are not bit-identical (min t_hi = 19.9415007
+# keV). Truncated downward so a grid endpoint sits strictly inside it. This is
+# the plasma kT axis, NOT the photon-energy axis (which runs 0.1-12 keV); the
+# two share a unit and nothing else. A stale value fails loudly rather than
+# silently: JointOperatorModel.check_temperature raises on any grid point
+# outside the trained range.
+EMULATOR_T_HI_KEV = 19.9415
 
 
 def _normalise(raw: torch.Tensor) -> torch.Tensor:
@@ -87,7 +100,22 @@ class ParametricDEM:
     ``dist_factory(values)`` returns a frozen distribution given the sampled
     parameter values (in order of ``param_names``); ``variable`` selects whether
     the distribution lives in ``"logT"`` (log10 keV) or ``"T"`` (keV). Weights
-    are ``pdf(x_g) * quadrature_g`` renormalised to sum to 1 on the grid.
+    are ``pdf(x_g) * quadrature_g``, **not** renormalised.
+
+    Renormalising would be wrong here. Writing the emission-measure
+    distribution as ``Y(T) = Y_tot p(T)`` with ``p`` a normalised pdf, the
+    observable spectrum is ``Y_tot * sum_g p(T_g) dx_g f(T_g)``, and
+    ``sum_g p(T_g) dx_g`` is the fraction of the distribution lying inside the
+    grid. For a contained, resolved DEM that quadrature is 1 to four decimals
+    and the division was a no-op; the only case where it did anything was a
+    distribution running off the grid, and there it asserted that all of
+    ``Y_tot`` sits on the grid when it does not -- silently redistributing the
+    missing emission measure across the temperatures that remain. The sum is
+    now left alone, so it doubles as a diagnostic: a value below 1 says this
+    much of the DEM lies outside the representable temperature range.
+
+    ``BinnedDEM`` still renormalises, and must: its free per-bin weights are
+    otherwise exactly degenerate with ``norm``.
     """
 
     def __init__(self, grid: TempGrid, dist_factory: Callable[[Sequence[float]], object],
@@ -109,11 +137,12 @@ class ParametricDEM:
             self._quadt = torch.as_tensor(self._quad, dtype=torch.float32)
 
     def weights(self, params: Dict[str, float]) -> torch.Tensor:
+        """``pdf(x_g) * quadrature_g``, NOT renormalised -- see the class
+        docstring. The sum is the fraction of the distribution the grid
+        contains, and callers may read it as exactly that."""
         dist = self._factory([float(params[n]) for n in self.param_names])
         raw = np.asarray(dist.pdf(self._x), dtype=np.float64) * self._quad
-        s = raw.sum()
-        w = raw / s if s > 0 else raw
-        return torch.as_tensor(w, dtype=torch.float32)
+        return torch.as_tensor(raw, dtype=torch.float32)
 
     def weights_batch(self, params: Dict[str, torch.Tensor]) -> torch.Tensor:
         """``{name: (B,)}`` -> ``(B, G)``. Only for closed-form shapes."""
@@ -126,7 +155,7 @@ class ParametricDEM:
                 for n in self.param_names]                    # each (B, 1)
         x = self._xt.to(vals[0].device)
         raw = self._torch_pdf(x, *vals) * self._quadt.to(vals[0].device)
-        return _normalise(raw)                                # (B, G)
+        return raw                                            # (B, G), NOT normalised
 
     def suggested_bounds(self) -> Dict[str, Tuple[float, float]]:
         return dict(self._bounds)

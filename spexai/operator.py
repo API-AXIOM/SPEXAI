@@ -442,6 +442,13 @@ class SpectralOperator(nn.Module):
             out = out * self.bn_sigma[bins] + self.bn_mu[bins]
 
         if self.line_head is not None and add_lines:
+            if getattr(self, "_band_restricted", None) is not None:
+                raise RuntimeError(
+                    "add_lines=True is invalid on a band-restricted model: "
+                    "line_head indexes lines by their position on the ORIGINAL "
+                    "training grid (line_ids), which restrict_band deliberately "
+                    "leaves stale. The inference path deposits lines from their "
+                    "absolute energies instead and does not need this.")
             if bins is None:
                 bins = torch.arange(x.shape[1], device=x.device)
             out = self.line_head(tnorm, bins, out)
@@ -462,6 +469,10 @@ class SpectralOperator(nn.Module):
 
     def forward_on_grid(self, temp_kev, bin_edges):
         """Evaluate the emulator as an X-ray model on an instrument grid.
+
+        Not valid on a band-restricted model (see
+        ``operator_model.restrict_band``): this path deposits lines via the
+        line head's grid indices, which restriction leaves stale.
 
         temp_kev: (B,) temperatures in keV; bin_edges: (M+1,) ascending
         bin edges in keV. Returns the INTEGRATED flux per bin (linear, not
@@ -487,6 +498,10 @@ class SpectralOperator(nn.Module):
 
         # integrated flux on the training bins
         x = self.norm_energy(self.train_energy).view(1, -1, 1).expand(B, -1, -1)
+        if getattr(self, "_band_restricted", None) is not None:
+            raise RuntimeError(
+                "forward_on_grid is invalid on a band-restricted model; see "
+                "operator_model.restrict_band")
         dens = torch.pow(10.0, self.forward_norm(tnorm, x, add_lines=False))
         widths = self.train_edges[1:] - self.train_edges[:-1]
         f_train = dens * widths                                     # (B, K)

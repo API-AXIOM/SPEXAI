@@ -109,13 +109,24 @@ class VectorForward:
                  exposure: float = 1.0,
                  temp_name: str = "kT", norm_name: str = "log_norm",
                  velocity_name: str = "sigma_v", nh_name: str = "n_h",
-                 dem=None, dem_grid_chunk: Optional[int] = None):
+                 dem=None, dem_grid_chunk: Optional[int] = None,
+                 dem_fast: bool = True, contract_first: bool = True):
         self.emu, self.absn, self.device = emu, absorption, device
         # DEM: the emulator is evaluated on a whole temperature grid per walker
         # and the fluxes summed with the walker's own weights. Requires the
         # batched `weights_batch` contract (see spexai.inference.tempdist).
         self.dem = dem
         self.dem_grid_chunk = dem_grid_chunk
+        # Fixed-grid trunk/line table (see BatchedJointForward.build_temp_table).
+        # On by default for a DEM; dem_fast=False restores the uncached forward,
+        # which is the numerical reference the table is validated against.
+        self.dem_fast = bool(dem_fast)
+        # Sum over elements (and over the DEM grid) BEFORE the fine-grid
+        # broadening tail rather than after -- the same arithmetic in a
+        # different order, B tail rows instead of N*B (N*B*G for a DEM). See
+        # BatchedJointForward._contracted_flux. contract_first=False restores
+        # the element-stacked path, which is the numerical reference.
+        self.contract_first = bool(contract_first)
         if dem is not None and not hasattr(dem, "weights_batch"):
             raise ValueError(
                 f"{type(dem).__name__} has no weights_batch(), so it cannot be "
@@ -241,7 +252,7 @@ class VectorForward:
             return self.emu.batched.flux(
                 temps, abund, vel, self.edges_rest, absorption=self.absn,
                 n_h=n_h, redshift=self.z, mem_gb=self.mem_gb,
-                echunk=self.echunk,
+                echunk=self.echunk, contract=self.contract_first,
                 compile_trunk=self.compile_trunk)                  # (B, M)
         total = None
         for z, model in self.emu.models.items():
@@ -252,6 +263,37 @@ class VectorForward:
             a = a[:, None] if torch.is_tensor(a) else a
             total = a * ef if total is None else total + a * ef
         return total
+
+    def _ensure_temp_table(self):
+        """Build the fixed-grid trunk/line table once, for the DEM fast path.
+
+        Lazy rather than done in ``__init__`` so the table is built on the
+        final model: ``restrict_band`` must already have been applied (it
+        drops ``joint._batched``, taking any earlier table with it), and the
+        emulator must already be on its device. Rebuilt if the DEM's grid is
+        not the one the table was built on -- a fixed grid is an assumption of
+        the cache, and this is where a change to it is caught.
+
+        ``dem_fast=False`` DROPS any existing table rather than merely not
+        building one. The table lives on the shared ``BatchedJointForward``, so
+        a forward that has been asked not to use the cache would otherwise
+        still be served from one built by a sibling forward -- which is exactly
+        the situation in which the uncached path is wanted, namely as the
+        numerical reference. The fast path rebuilds on its next call.
+        """
+        if self.dem is None or not self.use_batched:
+            return
+        if not self.dem_fast:
+            bt = getattr(self.emu, "_batched", None)
+            if bt is not None:
+                bt.temp_table = None
+            return
+        bt = self.emu.batched
+        tab = getattr(bt, "temp_table", None)
+        if tab is None or not tab.matches(self.dem.temp_grid):
+            bt.build_temp_table(self.dem.temp_grid, echunk=self.echunk,
+                                mem_gb=self.mem_gb,
+                                compile_trunk=self.compile_trunk)
 
     def dem_gchunk(self, B: int, grad: bool = False) -> int:
         """Grid points per emulator call, for ``B`` walkers at a time.
@@ -300,6 +342,7 @@ class VectorForward:
         is now set by ``dem_gchunk`` rows -- ``DEM_GRAD_ROWS`` under gradients
         -- at the cost of one recomputed forward per block.
         """
+        self._ensure_temp_table()
         B = th.shape[0]
         grid = torch.as_tensor(self.dem.temp_grid, dtype=torch.float32,
                                device=self.device).reshape(-1)
@@ -309,6 +352,18 @@ class VectorForward:
         if w.shape != (B, G):
             raise ValueError(f"weights_batch returned {tuple(w.shape)}, "
                              f"expected {(B, G)}")
+
+        # Contracted path: the grid is evaluated once (a lookup, with the
+        # table) and the weights, abundances and elements are summed before the
+        # broadening, so there is nothing left to block over -- no grid chunk
+        # and no checkpointing, because the graph no longer scales with G. The
+        # whole apparatus below exists to survive B*G broadening rows, and
+        # there are now B of them.
+        if self.contract_first and self.use_batched:
+            return self.emu.batched.flux_dem(
+                grid, w, abund, vel, self.edges_rest, absorption=self.absn,
+                n_h=n_h, redshift=self.z, mem_gb=self.mem_gb,
+                echunk=self.echunk, compile_trunk=self.compile_trunk)
 
         # Captured OUTSIDE the block, restored INSIDE it. Checkpoint recomputes
         # during backward, by which time the caller's `grad_enabled()` context
@@ -419,13 +474,22 @@ class VectorForward:
         has to shrink by ``G`` to keep peak memory where ``chunk`` intended it
         -- otherwise a 60-point grid quietly makes the batch 60x larger and
         OOMs the GPU."""
-        if self.dem is None:
+        if self.dem is None or (self.contract_first and self.use_batched):
+            # contracted: the emulator is evaluated on the grid once for the
+            # whole batch and the tail is one row per walker, so the walker
+            # budget no longer has to absorb G
             return self.chunk
         g = int(torch.as_tensor(self.dem.temp_grid).reshape(-1).numel())
         return max(1, self.chunk // max(1, g))
 
     def _counts_chunked(self, th: torch.Tensor) -> torch.Tensor:
-        if self.dem is not None and self.use_batched:
+        if (self.dem is not None and self.use_batched
+                and not self.contract_first):
+            # Sharing one emulator evaluation between rows that agree on
+            # (sigma_v, n_h) is what made the ungrouped DEM Jacobian
+            # affordable. Contracted, the emulator is already evaluated once
+            # for the whole batch and the per-row cost is a GEMM column, so
+            # the grouping has nothing left to save.
             return self._counts_dem_grouped(th)
         chunk = self.walker_chunk
         if th.shape[0] <= chunk:
@@ -458,6 +522,7 @@ class VectorForward:
         sharing would deliver the gradient to only one of them. ``counts_torch``
         routes the grad path to ``flux`` instead, and there the DEM's B is 1.
         """
+        self._ensure_temp_table()
         B = th.shape[0]
         _, vel, n_h, abund, _ = self.unpack(th)
         p = {n: th[:, i] for n, i in self.col.items()}

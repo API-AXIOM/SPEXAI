@@ -94,7 +94,7 @@ from bake_off import build_problem                                # noqa: E402
 from bias_sweep import NORM_REF, build_pars                       # noqa: E402
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, find_xrism_response, band_mask, EXCLUDE_NONE,
-    check_truth_response, gaussian_dem)
+    check_truth_response, gaussian_dem, restrict_to_band)
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -173,6 +173,7 @@ def tierb_forward(args, names, response, keep):
     dem = gaussian_dem()[0] if tierb_mode(names) == "dem" else None
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
+    restrict_to_band(emu)
     ab = AbundanceModel(emu.elements)
     for z in FREE_Z:
         ab.free_element(z, SYMBOL[z])
@@ -184,7 +185,9 @@ def tierb_forward(args, names, response, keep):
         velocity=None, device=args.device, chunk=args.chunk,
         batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
         echunk=args.echunk, dem=dem,
-        dem_grid_chunk=getattr(args, "gchunk", None))
+        dem_grid_chunk=getattr(args, "gchunk", None),
+        dem_fast=not getattr(args, "no_table", False),
+        contract_first=not getattr(args, "no_contract", False))
 
 
 def tierb_point(args, rec, counts_row, keep, verbose=True):
@@ -818,6 +821,14 @@ def main():
     ap.add_argument("--chunk", type=int, default=32)
     ap.add_argument("--mem_gb", type=float, default=2.0)
     ap.add_argument("--echunk", type=int, default=None)
+    # A/B switches for the two forward accelerations, so a timing or an
+    # agreement check on the GPU can be run against the old path without
+    # editing code. Both default ON; --gchunk only bites with --no_contract,
+    # since the contracted path has no grid blocking to size.
+    ap.add_argument("--no_table", action="store_true",
+                    help="do not tabulate the trunk on the fixed DEM grid")
+    ap.add_argument("--no_contract", action="store_true",
+                    help="sum elements/grid after the broadening, not before")
     ap.add_argument("--gchunk", type=int, default=None,
                     help="DEM only: temperature-grid points per emulator call "
                          "(default: a gradient block of DEM_GRAD_ROWS=8 rows). "

@@ -80,6 +80,70 @@ the line head and for the unbroadened path (\code{forward\_on\_grid}); the exact
 matrix route even broadens directly on the instrument grid with no fine grid,
 and is kept as the reference.
 
+\paragraph{How big the fine grid is, and why.} Two constraints set it, and they
+compound. First, FFT convolution requires \emph{uniform} spacing in $u=\ln E$,
+while the native SPEX grid is adaptive: its spacing in $\log_{10}E$ runs from
+$6.1\times10^{-6}$ to $2.2\times10^{-3}$, a factor of $355$. A uniform grid must
+everywhere be as fine as the sharpest region demands, so it is over-sampled by
+up to $216\times$ at the coarse end---most of the size. Second, the cell width
+is pinned by the \emph{narrowest} kernel the prior allows, not by the
+instrument: $\Delta\log_{10}E=10^{-5}$ is $6.90\kms$ per cell, only $4.35$ cells
+per $\sigma$ at the $30\kms$ prior floor (and a lavish $87$ at $600\kms$). The
+result is $207\,919$ points over $0.1$--$12\kev$, $8.6\times$ the native grid.
+
+\paragraph{Restricting to the analysis band.} Both the trunk and that fine grid
+ran over the full $0.1$--$12\kev$ training range irrespective of the fit band,
+so with $\mathrm{BAND}=(1.9,12.0)\kev$ a sixth of the trunk evaluations and
+nearly two-thirds of the broadening grid produced flux that the channel mask
+then discarded. \code{operator\_model.restrict\_band} slices the training grid
+once after loading, so every downstream path---serial, batched and
+grouped---inherits it without signature changes. The cut energy comes from
+\code{campaign.band\_low\_cut}, which composes four margins: the RMF's
+$12\,\mathrm{eV}$ upward reach below the band edge, the $8\sigma$ zero-padding reach of
+the broadening at the widest sampled $\sigma_v$, the $(1+z)$ conversion to the
+rest frame in which the model grid lives, and a $1\%$ empirical margin for the
+grid-edge losses of the delta-at-centre scatter and the rebin. At the campaign
+defaults these nearly cancel: $1.9 \to 1.888$ (RMF) $\to 1.858$ (broadening)
+$\to 1.890$ (rest frame) $\to 1.871\kev$.
+
+Two couplings make this less trivial than slicing an array. The per-bin
+normalisation buffers \code{bn\_mu}/\code{bn\_sigma} are indexed
+\emph{positionally} by the bin indices derived from the grid length, so they
+must be sliced in step or every retained bin is denormalised with another bin's
+statistics---an error of order unity, not a subtlety. And the uniform-log
+lattice must keep its original origin: \code{scatter\_to\_grid} deposits each
+native bin at its centre, so a lattice shifted by a fraction of a cell moves
+sharp trunk features between cells and perturbs the folded spectrum at
+${\sim}10^{-3}$, precisely the level the bias campaign measures. With both
+handled, the restriction is lossless in-band. Comparing the \emph{folded}
+spectrum channel by channel against an untruncated reference, over the full
+30-element store at $kT=1.5$--$8\kev$, $\sigma_v=30$--$600\kms$ and
+$\nh=0$--$3\times10^{21}\,\mathrm{cm^{-2}}$:
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+region & channels & max $|\Delta/f|$ & $\sum$ rel. \\
+\midrule
+below the cut ($<1.839\kev$ observed) & 3679 & $1.0$ & $0.71$ \\
+cut to band edge ($1.839$--$1.9\kev$) & 121 & $0.87$ & $0.07$ \\
+in band ($1.9$--$12\kev$) & 20200 & $2.5\times10^{-7}$ & $0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The in-band median difference is exactly zero---most channels are
+bit-identical---and the worst cases are float32 noise on channels carrying
+${\sim}10^{-14}$ of the flux. No channel changes between zero and nonzero.
+
+\paragraph{Scope, and a trap for later.} The guarantee is identical
+\emph{in band}, not identical above the cut. The 121 channels between the cut
+and the band edge are wrong by up to $87\%$, deliberately: they are the buffer
+that absorbs the broadening and RMF edge effects, and \code{band\_mask}
+discards them before the likelihood sees them. The cut is therefore tied to
+\code{BAND}---\code{band\_low\_cut} derives it, so changing the band in one
+place propagates---but a restricted model reused for a \emph{wider} fit range
+would return silently corrupted channels at its new low edge. Restriction is a
+property of a model built for one band, not of the model store.
+
 \section{Galactic absorption}
 Photoelectric absorption multiplies the source flux by
 $T(E)=e^{-\nh\sigma(E)}$ in the \emph{observed} frame. The cross-section per
@@ -284,6 +348,28 @@ model's band limit acts similarly in energy: response bins outside the trained
 range fold to zero flux. The guard immediately caught a DEM grid in the Perseus
 showcase that started $0.3\%$ below the training floor.
 
+\paragraph{The upper band limit and the RMF tail (recorded, not fixed).}
+The training grid stops at $12\kev$, and for in-band channels that is not quite
+free. The Resolve RMF is strongly asymmetric: its redistribution reaches only
+$10$--$12\,\mathrm{eV}$ \emph{above} an incident energy (the Gaussian core's upper side)
+but thousands of eV \emph{below} it---$4943\,\mathrm{eV}$ at $6\kev$ incident,
+$9273\,\mathrm{eV}$ at $11\kev$---because energy-loss processes scatter photons down in
+recorded energy, never up. Roughly $0.5\%$ of each photon's response sits in
+that downward tail. Incident photons above $12\kev$ therefore land in-band,
+and the model cannot produce them. Weighting by a bremsstrahlung continuum and
+the real ARF, the share of in-band counts originating above $12\kev$ is
+$2.7\times10^{-5}$ at $kT=2\kev$, $4.3\times10^{-4}$ at $5\kev$,
+$8.6\times10^{-4}$ at $8\kev$ and $1.2\times10^{-3}$ at $12\kev$---at the hot
+end, the same order as the emulator's own accuracy.
+
+This does \emph{not} contaminate the bias campaign. \code{SpexTruthModel} rebins
+from the same SPEX native grid, so truth and emulator both produce zero above
+$12\kev$ and the deficit is common-mode in $b_{\rm sys}$, cancelling in the
+residual exactly as the DEM weights do. It is a limit on absolute fidelity to a
+real observation, not on the emulator-error measurement, and we record it here
+rather than acting on it: no analysis in this work fits real data over a band
+where it matters.
+
 \section{Temperature distributions and abundances}\label{sec:dem}
 A DEM is a weighted sum $\sum_g w_g\, f(T_g)$ over a temperature grid, evaluated
 by \code{predict\_counts\_dem} (folding once, after the sum). Shapes are drawn
@@ -294,6 +380,106 @@ bin with no smoothness prior. Abundances use \code{AbundanceModel}: a global
 metallicity scaling all metals, with individual elements freed or tied to a
 fraction of iron (an $[X/\mathrm{Fe}]$ ratio), reproducing the thesis scheme
 (global $Z$ with free N/Fe, O/Fe) in a reusable object.
+
+\subsection{Parametrisation: Gaussian in $T$ or in $\log T$?}\label{sec:demparam}
+The campaign originally used the Gaussian in \emph{linear} $T$
+(\code{gaussian\_T}), matching the thesis parametrisation. SPEX itself does not:
+its \code{gdem} is a Gaussian in $\log T$,
+\begin{equation}
+\frac{\mathrm{d}\,\mathrm{EM}(x)}{\mathrm{d}x}
+  = \frac{\mathrm{EM}_0}{\sqrt{2\pi}\,\sigma_x}
+    \exp\!\left[-\frac{(x-x_0)^2}{2\sigma_x^2}\right],
+  \qquad x = \log(k_BT),
+\end{equation}
+with $\sigma_x$ in dex. The choice is available either way---SPEX's \code{cie}
+carries a \code{logt} switch---but logarithmic is its default, and the
+distinction is not cosmetic here.
+
+The DEM is evaluated on a fixed grid of $48$ nodes spaced uniformly in
+$\log_{10}T$ over $0.7$--$10\kev$, i.e.\ $0.0246$ dex per cell. A width defined
+in $\log T$ therefore has \emph{constant} resolution: $\sigma_x/\Delta x$ is the
+same at every temperature, and SPEX-typical $\sigma_x\simeq0.1$--$0.4$ dex spans
+$4$--$16$ cells everywhere. A width defined in keV does not. Converting the
+sampled design to dex, the same $T_{\rm sigma}$ spans $6.7$ cells at
+$1\kev$ but only $0.91$ at $7.4\kev$, and across the 50 pooled sweep points the
+resolution varies by a factor of $34$, from $0.60$ to $20.3$ cells per $\sigma$.
+
+Three of those 50 points fall below one cell, and they are exactly the three
+largest outliers in $\sigma_{\rm ref}(T_{\rm sigma})$ against a trend fit in
+$(T_{\rm mean}, T_{\rm sigma}, \log\sigma_v, \nh)$ and quadratics
+($R^2=0.83$): leave-one-out standardised residuals of $-6.45$, $+3.13$ and
+$+3.28$. The sign scatters both ways, which is the signature of a sub-cell
+Gaussian landing at different phases relative to the nodes---the weights are
+renormalised on the grid, so widening an unresolved Gaussian either shuttles
+mass between two adjacent nodes (apparent sensitivity inflated, error bar too
+tight) or leaves it pinned on one (sensitivity collapses). The numerator is
+untouched: $|b_{\rm sys}|$ at the worst point is entirely ordinary ($z=-0.45$).
+This is \emph{not} the near-singular-$F$ failure of Sec.~\ref{sec:fisherbias}:
+that point's $\mathrm{cond}(F)$ is $1.6\times10^7$, below the design median and
+far below the $10^{10}$ warning threshold. The Fisher inverts cleanly; the
+model it describes is the one that is unresolved.
+
+The effect on the screen is confined to the affected entries but sets the
+headline. At $N_{\rm ref}=10^5$:
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+DEM screen & max $|b|/\sigma$ & $N_\star^{\rm min}$ & points $>1\sigma$ \\
+\midrule
+as run (linear $T$)               & $1.642$ & $3.7\times10^{4}$ & 1 \\
+unresolved $T_{\rm sigma}$ dropped & $0.999$ & $1.0\times10^{5}$ & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The median is unmoved at $0.241$ either way. So the single point above
+$1\sigma$ anywhere in the DEM campaign---the point that alone sets the exposure
+limit---is a grid-resolution artefact rather than a physical result.
+
+\paragraph{The grid was also too narrow.} The $10\kev$ ceiling was an
+unrevisited default, not a derived limit: the emulator's trained
+\emph{temperature} range reaches $19.94\kev$ (the intersection over the 30
+element checkpoints), an axis entirely separate from the $0.1$--$12\kev$
+photon-energy grid despite the shared unit. The old grid therefore discarded
+the hot $28\%$ of the usable span, exactly where a Gaussian DEM runs off the
+end. The grid is now $70$ nodes over $0.7$--$19.94\kev$ ($0.0211$ dex per
+cell), and the fraction of the DEM it contains improves accordingly:
+\begin{center}
+\begin{tabular}{rrrr}
+\toprule
+$T_{\rm mean}$ & $\sigma_x$ & old ($0.7$--$10$, $n{=}48$) & new ($0.7$--$19.94$, $n{=}70$) \\
+\midrule
+ 8 & 0.10 & 0.863 & 1.000 \\
+ 8 & 0.20 & 0.708 & 0.979 \\
+ 8 & 0.40 & 0.604 & 0.842 \\
+10 & 0.20 & 0.525 & 0.940 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The largest $\sigma_x$ keeping $99\%$ of the distribution on-grid rises from
+$0.045$ to $0.175$ dex at $8\kev$, and from $0$ to $0.130$ at $10\kev$: on the
+old grid, no width at $10\kev$ was simultaneously contained and resolved.
+
+\paragraph{Decision.} Future DEM work uses \code{gaussian\_logT}, which already
+exists and is tested, with $\sigma_x$ floored at the grid's resolution limit of
+${\sim}0.056$ dex ($16$ nodes across $\pm3\sigma$, SPEX's own standard; the
+declared lower bound of $0.02$ dex is itself sub-cell). This removes the
+artefact and puts the campaign on SPEX's definition, at the cost of
+invalidating the existing DEM truth files, since the weights feed the injected
+spectrum directly. We retain the fixed grid rather than adopting an adaptive
+$\sigma$-scaled window: a shared grid is what lets rows with common kinematics
+share one emulator evaluation, and what makes the trunk output cacheable at all
+(Sec.~\ref{sec:forwardcost}).
+
+That choice has a cost worth stating as a domain limit rather than leaving
+implicit. SPEX reproduces the isothermal case \emph{exactly}---$\sigma_T=0$
+gives \code{cie}---because its evaluation points are positioned relative to
+$T_0$ and collapse onto it as the width vanishes. A grid anchored in absolute
+temperature cannot: as $\sigma_x\to0$ the weight lands on nodes displaced from
+$T_{\rm mean}$ by up to half a cell, with the displacement depending on where
+$T_{\rm mean}$ falls relative to the lattice. That is the mechanism behind the
+$\pm$ scatter in the residuals above. Adding nodes shrinks the displacement but
+never removes it, so near-isothermal DEMs lie outside what this forward can
+represent at any resolution.
 
 \section{Bias testing}
 Two distinct questions are easily conflated here, and we separate them
@@ -1369,6 +1555,27 @@ which has no single-temperature analogue. The DEM margin against a deep
 stacked cluster core is roughly an order of magnitude, so it has less headroom
 than the single-$T$ case; carrying the numbers above across is an assumption,
 not a measurement.
+
+A DEM sweep was attempted and yielded nothing usable, which is worth recording
+because the failure was silent. Of 30 points, 16 completed in ${\sim}2.9$ days
+of A10 time before the run was stopped; six reported \code{converged}, and all
+six are spurious. The convergence test is
+\code{frac = np.where(resolved, move/bias\_sig, 0.0)} followed by
+\code{frac.max() <= 0.10}: when \emph{no} parameter is resolved, \code{frac} is
+identically zero and the test passes vacuously. The noiseless start-spread test
+has the same \code{np.where(resolved, ..., 0.0)} shape and does not catch it
+either. Every one of the six has \code{drift\_sigma} pinned at the $20\sigma$
+trust-region clamp and stalled at Gauss--Newton iteration 3, so the seven
+$k$ values they contribute---and the $1.69\times$ inflation they imply---are
+artefacts of a fit that never moved. The single-temperature results above are
+unaffected: auditing \code{resolved.any()} across the $n{=}100$ sweep and the
+earlier 20-point sweep finds zero vacuous points in either. Two further
+symptoms should be fixed before the DEM sweep is rerun: $-\log L$ \emph{rises}
+monotonically across iterations at several points while the Newton decrement
+falls to tolerance, so the Gauss--Newton step is not a descent direction; and
+the start spread ($60$--$280\sigma$) exceeds what $12$ iterations at a
+$20\sigma$ clamp can close, making the spread criterion unreachable by
+construction rather than informative.
 \item \textbf{Twelve of 100 points are excluded} for failing the multi-start
 criterion. They are not enriched in high bias as a set (Mann--Whitney
 $p=0.40$), so the distribution above is not flattered; however the two
@@ -1455,6 +1662,39 @@ $63.6\%$ of GPU time to \code{bmm} (executing as the TF32 tensor-core
 \code{cutlass\_80\_tensorop\_s1688gemm} kernel) and ${\sim}18\%$ to the
 bandwidth-bound activation kernels. The trunk is therefore GEMM-bound and
 already on tensor cores.
+
+\paragraph{Why a DEM costs $G$ times a single temperature.} It is tempting to
+read the DEM's cost as a property of the DEM. It is not: it is a property of the
+coordinate-operator architecture, and the contrast with a conventional network
+is stark. \code{forward\_norm} takes the energies as an \emph{input axis}, so
+the trunk (three layers, width $128$, input $257$) runs at every
+(row, energy) pair over the $P=24\,212$ native bins: $3.18$ GFLOP per element
+per temperature. A plain feed-forward net with the energy axis in its output
+layer costs $0.006$ GFLOP for the same row---$510\times$ less. A fixed-grid
+predecessor of this emulator integrated a Gaussian DEM over $200$ temperatures
+for ${\sim}20\%$ overhead, because at that per-row cost the GPU simply absorbed
+the batch; here the device is already saturated at $G=1$, so every additional
+temperature costs linearly. At $G=48$ over 30 elements one forward is
+$4.58$ TFLOP, against $0.037$ TFLOP for the old network at $G=200$: the current
+DEM forward is ${\sim}124\times$ the arithmetic of its predecessor despite using
+four times \emph{fewer} temperature nodes. The memory pressure is the same fact
+in another guise---one trunk layer's activations at $G=48$ across all elements
+are $17.9$ GB, which is why the energy axis is chunked.
+
+The structural escape is that the trunk depends on temperature alone---not on
+velocity, abundance, $\nh$ or redshift---and \code{forward\_on\_grid} evaluates
+it only ever at the training-grid energies. With the DEM grid fixed and
+independent of $(T_{\rm mean}, T_{\rm sigma})$, the trunk output over that grid
+is a constant $(48, 30, 20\,416)$ table of ${\sim}120$ MB, recomputed
+identically on every call. Caching it would return the inference path to the
+tabulated fixed-grid behaviour the predecessor had, and gradients survive
+detached, since $\partial\mu/\partial T_{\rm mean}$ flows through the DEM
+weights and $\partial\mu/\partial\sigma_v$ through the broadening downstream.
+Single-temperature fits cannot use it, because $kT$ moves every iteration---so
+a cached DEM forward would be \emph{cheaper} than a single-temperature one.
+This is measured as a cost model rather than implemented, and the band
+restriction of Sec.~\ref{sec:demparam} composes with it: the two act on
+different stages, the trunk and the broadening respectively.
 
 That leaves little room, and we record two optimisations that were implemented,
 measured and \emph{rejected}, because both failures are informative.

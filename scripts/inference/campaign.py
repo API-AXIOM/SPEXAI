@@ -28,6 +28,7 @@ inference_demo/hot_floor/. Those are gone: everything importing this now does
 this directory to ``sys.path`` once) with the dependency direction strictly
 scripts/ -> spexai/, never the reverse.
 """
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -35,6 +36,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
+from spexai.broadening import C_KMS
 from spexai.config import RESP_DIR
 from spexai.inference.abundances import AbundanceModel, SYMBOL
 from spexai.inference.fitting import SIGMA_V_PRIOR
@@ -177,6 +179,77 @@ def check_truth_response(tz, rmf, arf):
             f"$SPEXAI_RESOLVE_RMF / $SPEXAI_RESOLVE_ARF to match it.")
 
 
+# Reach of the RMF's UPWARD redistribution above the incident energy, keV.
+# Measured on rsl_Hp_L_2025.rmf: 10-12 eV at every incident energy from 1.5 to
+# 11 keV (the Gaussian core's upper side). The RMF's long tail runs the other
+# way -- thousands of eV DOWNWARD -- which is why the cut below is safe at all:
+# energy-loss processes scatter photons down in recorded energy, never up.
+RMF_UP_REACH_KEV = 0.012
+# fft_broaden zero-pads to 8 sigma, so that is the reach the continuum can be
+# lifted by velocity broadening.
+FFT_SIGMA_REACH = 8.0
+# The three physical margins alone land ~10 eV short: scatter_to_grid's
+# delta-at-centre deposit and rebin_flux both lose a little at the very first
+# cells of the truncated grid. Measured against an untruncated reference (Fe,
+# kT=5 keV, sigma_v=600 km/s, all 20200 in-band channels): the physical cut of
+# 1.8901 keV leaves 10 channels above 1e-4 with a worst of 7.9e-3, while
+# 1.88 keV and below sit at 2.4e-7, i.e. float noise. 1% buys ~19 eV of margin
+# for ~20 extra grid bins out of 24212.
+EDGE_SAFETY_FRAC = 0.01
+
+
+def band_low_cut(band=BAND, sigma_v_max=None, z=None,
+                 rmf_up_reach=RMF_UP_REACH_KEV):
+    """Lowest REST-frame energy the emulator must still produce, in keV.
+
+    Below this, continuum flux cannot reach an in-band channel by any route,
+    so evaluating the trunk and broadening there is wasted work (see
+    ``operator_model.restrict_band``). Three margins, applied in order:
+
+    1. ``band[0]`` is a channel (observed-frame) edge. Incident photons as low
+       as ``band[0] - rmf_up_reach`` can still be redistributed into it.
+    2. Velocity broadening can lift continuum from lower still, by up to
+       ``FFT_SIGMA_REACH`` sigma at the widest sigma_v the prior allows.
+    3. The model grid is the RESPONSE grid redshifted, ``edges * (1 + z)``, so
+       the threshold converts to the rest frame by the same factor.
+
+    A fourth, ``EDGE_SAFETY_FRAC``, covers the grid-edge losses the first three
+    do not describe; see the constant for the measurement that sets it.
+
+    At the campaign defaults the margins nearly cancel: 1.9 keV -> 1.888 (RMF)
+    -> 1.858 (broadening) -> 1.890 (rest frame at Perseus's z) -> 1.871 keV.
+    """
+    if sigma_v_max is None:
+        sigma_v_max = SIGMA_V_PRIOR[1]
+    if z is None:
+        z = PERSEUS["z"]
+    e_rmf = band[0] - rmf_up_reach
+    e_broad = e_rmf * math.exp(-FFT_SIGMA_REACH * sigma_v_max / C_KMS)
+    return e_broad * (1.0 + z) * (1.0 - EDGE_SAFETY_FRAC)
+
+
+def restrict_to_band(emu, band=BAND, verbose=True, **kw):
+    """Apply ``band_low_cut`` to a freshly built ``JointOperatorModel``.
+
+    Call once, immediately after construction and before anything touches
+    ``emu.batched`` (which caches the grid). Verified lossless in-band: worst
+    relative change 4.9e-6 over H/He/Si/Fe at kT = 1-9 keV, sigma_v = 30-600
+    km/s, n_H = 0-5e21, against an untruncated reference.
+    """
+    from spexai.inference.operator_model import restrict_band
+    e_lo = band_low_cut(band=band, **kw)
+    cut = restrict_band(emu, e_lo)
+    if verbose:
+        if cut is None:
+            print(f"band restriction: nothing below {e_lo:.4f} keV to cut",
+                  flush=True)
+        else:
+            print(f"band restriction: e_lo={e_lo:.4f} keV rest frame, "
+                  f"training grid {cut[0]:,} -> {cut[1]:,} bins "
+                  f"({1 - cut[1] / cut[0]:.1%} dropped)", flush=True)
+    return e_lo
+
+
 def band_mask(response, band=BAND, *, exclude) -> np.ndarray:
     """Boolean channel mask: within ``band`` and outside ``exclude`` (keV).
 
@@ -204,14 +277,31 @@ class TruthConfig:
 
 
 def gaussian_dem(mean=None, sigma=None, lo=td.PCHIP_TRUTH_SAFE_LO_KEV,
-                 hi=10.0, n=48):
+                 hi=td.EMULATOR_T_HI_KEV, n=70):
     """Gaussian-in-T DEM model + its (mean,sigma) params, on a fixed grid.
 
     ``lo`` defaults to the package's PCHIP-safe floor (see
     ``spexai.inference.tempdist.PCHIP_TRUTH_SAFE_LO_KEV``): a grid point below
     the per-element training minimum (~0.501 keV) makes the PCHIP SPEX truth
     extrapolate and blow up (Ar -> inf at 0.5 keV), and the Gaussian carries
-    negligible weight there anyway."""
+    negligible weight there anyway.
+
+    ``hi`` is the top of the emulator's trained temperature range. It was
+    previously 10 keV, which was an unrevisited default rather than a derived
+    limit, and it threw away the hot 28% of the usable span -- precisely where
+    a Gaussian DEM runs off the grid. At T_mean = 8 keV and sigma = 0.2 dex the
+    old grid contained only 71% of the emission measure; since the weights are
+    no longer renormalised (see ``tempdist.ParametricDEM``) that truncation is
+    now visible in the spectrum instead of being silently redistributed.
+
+    ``n`` sets the resolution. Over 0.7-19.94 keV, 70 nodes give 0.0211 dex per
+    cell, which resolves any DEM down to sigma ~ 0.056 dex at SPEX's own
+    standard of 16 nodes across the distribution. Note this is a FLOOR, not a
+    limit that more nodes remove: the grid is anchored in absolute temperature
+    rather than to T_mean, so as sigma -> 0 the weight lands on nodes offset
+    from T_mean by up to half a cell instead of collapsing onto it. Near-
+    isothermal DEMs are outside what a fixed grid can represent, however fine.
+    """
     grid = td.TempGrid(lo, hi, n=n)
     model = td.gaussian_T(grid)
     p = {"T_mean": PERSEUS["dem_mean"] if mean is None else mean,

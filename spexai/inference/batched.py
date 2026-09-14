@@ -132,6 +132,57 @@ class _TrunkGroup:
         return self._fwd(compile_trunk)(self.params, self.buffers, tnorm, x, bins)
 
 
+class _TempTable:
+    """Trunk continuum + line amplitudes tabulated at a FIXED set of temperatures.
+
+    Both quantities depend on theta ONLY through the temperature: the trunk is
+    ``10**forward_norm(tnorm, x)`` over the training grid, and the line head's
+    ``all_line_amplitudes(tnorm)`` likewise. Everything that follows -- velocity
+    broadening, absorption, rebinning, the line deposit, abundance weighting,
+    the DEM weights, the norm -- is applied downstream. So for a DEM, whose
+    temperature grid is fixed and independent of the sampled shape parameters,
+    these are constants for the whole run and are evaluated once instead of on
+    every forward. That is the ~83% of the DEM forward the trunk was costing
+    (docs: dem-cost-is-coordinate-operator).
+
+    The lookup is EXACT float equality against the tabulated temperatures, and
+    that is deliberate. It makes the table a pure cache rather than an
+    approximation: a hit can only return the value the trunk would have
+    returned at that same temperature, and anything else -- a single-T fit's
+    moving kT, a grid that has changed -- simply misses and is computed. The
+    DEM path passes the grid tensor itself, so its rows match bit for bit.
+
+    Size is ``n_elements x n_temps x n_train_bins`` float32: 171 MB for 30
+    elements on a 70-node grid over the band-restricted grid. It is held on the
+    forward device and dies with the ``BatchedJointForward`` that owns it --
+    which is what makes ``restrict_band`` safe, since that drops
+    ``joint._batched`` and so cannot leave a table built on the untruncated
+    grid in place.
+    """
+
+    def __init__(self, temps, dens, zs, line_amp):
+        self.temps = temps                 # (G,) float32, on device
+        self.dens = dens                   # (N, G, P) float32, detached
+        self.zs = list(zs)                 # element order of the N axis
+        self.line_amp = dict(line_amp)     # z -> (G, L_z), pre-absorption
+
+    def matches(self, temps) -> bool:
+        """True if this table was built on exactly ``temps``."""
+        t = torch.as_tensor(temps, dtype=self.temps.dtype,
+                            device=self.temps.device).reshape(-1)
+        return t.shape == self.temps.shape and bool(torch.equal(t, self.temps))
+
+    def lookup(self, temp_kev):
+        """(B,) temperatures -> (B,) table indices, or None if any row misses."""
+        t = temp_kev.reshape(-1)
+        if t.numel() == 0:
+            return None
+        eq = t.unsqueeze(1) == self.temps.unsqueeze(0)       # (B, G)
+        if not bool(eq.any(dim=1).all()):
+            return None
+        return eq.to(torch.int64).argmax(dim=1)              # (B,)
+
+
 class BatchedJointForward:
     """Element-batched analogue of ``JointOperatorModel.flux``.
 
@@ -144,6 +195,7 @@ class BatchedJointForward:
         self.joint = joint
         self.device = joint.device
         self.track_grad = False        # see grad_enabled / _grad_aware
+        self.temp_table = None         # see build_temp_table / _TempTable
         # this path drives long runs of large FFTs whose shapes must not
         # accumulate plans; see limit_cufft_plan_cache
         limit_cufft_plan_cache()
@@ -182,6 +234,43 @@ class BatchedJointForward:
         # largest E*(embed feats): sets how small echunk must be to bound memory
         self._max_ef = max(len(g.zs) * (1 + 2 * g.models[0].config.n_freqs)
                            for g in self.groups)
+
+    def build_temp_table(self, temps, echunk=None, mem_gb=2.0,
+                         compile_trunk=False):
+        """Tabulate the trunk and the line amplitudes at ``temps`` -> _TempTable.
+
+        Costs one trunk pass over ``temps`` (for a 70-node DEM grid, about one
+        of the DEM forwards it replaces) and is then reused by every subsequent
+        call whose temperatures match exactly.
+
+        The table is built by calling ``_density`` itself rather than by
+        re-deriving the trunk, so the element ordering, the grouping and the
+        arithmetic are by construction the same ones the uncached path uses.
+        Gradient tracking is forced off for the build: the table is a constant
+        and must not retain a graph.
+        """
+        temps = torch.as_tensor(temps, dtype=torch.float32,
+                                device=self.device).reshape(-1)
+        prev, self.temp_table = self.temp_table, None    # build from the trunk
+        try:
+            with self.grad_enabled(False), torch.no_grad():
+                ec = (echunk if echunk is not None
+                      else self._echunk(temps.numel(), mem_gb))
+                dens, zs = self._density(temps, ec, compile_trunk)
+                amp = {}
+                for z in zs:
+                    m = self.joint.models[z]
+                    if m.line_head is None:
+                        continue
+                    tnorm = m.norm_temp(temps).view(-1, m.config.n_params)
+                    lh = m.line_head
+                    amp[z] = (torch.pow(10.0, lh.all_line_amplitudes(tnorm))
+                              * lh.line_widths)          # (G, L_z)
+        except Exception:
+            self.temp_table = prev
+            raise
+        self.temp_table = _TempTable(temps, dens.detach(), zs, amp)
+        return self.temp_table
 
     @contextlib.contextmanager
     def grad_enabled(self, on=True):
@@ -244,6 +333,16 @@ class BatchedJointForward:
         activations during backward, trading roughly one extra forward for a
         graph that scales with one chunk instead of all of them. Without it,
         gradient-based sampling is simply not runnable at production scale."""
+        # Fixed-grid cache (DEM). Bypassed when the temperature carries
+        # requires_grad: a gather has no derivative w.r.t. the temperature, so
+        # serving a single-T gradient fit from the table would silently zero
+        # d(flux)/d(kT). In DEM mode the grid is a constant and nothing
+        # differentiates through the trunk at all.
+        if self.temp_table is not None and not temp_kev.requires_grad:
+            hit = self.temp_table.lookup(temp_kev)
+            if hit is not None:
+                return (self.temp_table.dens.index_select(1, hit),   # (N, B, P)
+                        list(self.temp_table.zs))
         B, P, x = temp_kev.numel(), self._P, self._x
         use_ckpt = self.track_grad and torch.is_grad_enabled()
         dens, zs = [], []
@@ -300,8 +399,16 @@ class BatchedJointForward:
         # CUFFT_INTERNAL_ERROR partway through a long run. Padded rows are
         # zeros, so they broaden to zeros and are sliced off: no numerical
         # effect, only a stable shape.
+        # QUANTISED, not raw: the shape must come from a small fixed set, but
+        # it must not be a constant. Padding every call up to the memory cap
+        # made a contracted forward -- which has B rows, often 1 -- do the cap's
+        # worth of FFT regardless, and that is most of the tail. Rounding up to
+        # a power of two keeps the number of distinct shapes logarithmic (so the
+        # plan cache stays bounded) while charging a call at most 2x its own
+        # rows.
         n_rows = N * B
-        rchunk = max(1, int(0.25 * float(mem_gb) * 1e9 / max(1, K * 8 * 4)))
+        cap = max(1, int(0.25 * float(mem_gb) * 1e9 / max(1, K * 8 * 4)))
+        rchunk = min(cap, 1 << max(0, n_rows - 1).bit_length())
         cont = []
         for lo in range(0, n_rows, rchunk):
             hi = min(lo + rchunk, n_rows)
@@ -342,13 +449,122 @@ class BatchedJointForward:
             model = self.joint.models[z]
             if model.line_head is not None:
                 out_e = out_e + self._lines(model, temp_kev, bin_edges,
-                                            velocity, absorb, tfun, n_h, redshift)
+                                            velocity, absorb, tfun, n_h,
+                                            redshift, z=z)
             total = total + a * out_e
         return total
 
+    def _abundance_matrix(self, zs, abundances, B):
+        """(B, N) abundance weights in the ``zs`` order.
+
+        The ``skip`` shortcut of :func:`abundance_weight` is deliberately not
+        used here. It exists to elide a zero-abundance element's whole
+        broadening tail, and in the contracted path there is no per-element
+        tail to elide -- the tail is one row whatever the abundances are -- so
+        a zero simply contributes zero, at no cost."""
+        cols = []
+        for z in zs:
+            raw = abundances.get(z, 1.0) if abundances else 1.0
+            a, _ = abundance_weight(raw, self.device)
+            cols.append(a.reshape(-1).expand(B) if torch.is_tensor(a)
+                        else torch.full((B,), float(a), device=self.device,
+                                        dtype=torch.float32))
+        return torch.stack(cols, dim=1)                          # (B, N)
+
+    @_grad_aware
+    def _deposit_all(self, zs, temp_kev, a_mat, bin_edges, velocity, absorb,
+                     tfun, n_h, redshift, weights=None):
+        """Every element's lines in ONE deposit -> (B, M), or None if no element
+        in ``zs`` has a line head.
+
+        The per-element deposit is exact and analytic, so concatenating the
+        line lists and depositing once is the same arithmetic with one pass
+        over the target bins instead of N. ``weights`` (B, G) additionally
+        contracts a DEM's temperature grid, in which case ``temp_kev`` is that
+        grid and the amplitudes are (G, L_z) before weighting."""
+        en, fl = [], []
+        for i, z in enumerate(zs):
+            model = self.joint.models[z]
+            if model.line_head is None:
+                continue
+            amp = self._amplitudes(model, temp_kev, z=z)         # (rows, L_z)
+            if weights is not None:
+                amp = weights @ amp                              # (B, L_z)
+            en.append(model.line_head.line_energies)
+            fl.append(amp * a_mat[:, i:i + 1])
+        if not en:
+            return None
+        en = torch.cat(en)                                       # (L,)
+        fl = torch.cat(fl, dim=1)                                # (B, L)
+        if absorb:                     # transmission at each line's own energy
+            fl = fl * tfun(en / (1.0 + redshift), n_h, device=self.device)
+        return deposit_gaussian_lines(en, fl, bin_edges, velocity)
+
+    @_grad_aware
+    def _contracted_flux(self, dens, zs, abundances, temp_kev, bin_edges,
+                         velocity, absorb, tfun, n_h, redshift, mem_gb,
+                         weights=None):
+        """Sum over elements (and, with ``weights``, over the DEM grid) BEFORE
+        the fine-grid tail -> (B, M).
+
+        Broadening, absorption, rebinning and the line deposit are all linear
+        in the flux, and none of them depends on which element or which
+        temperature a contribution came from -- only on the walker's
+        ``(sigma_v, n_h)``. So the contraction commutes with the whole tail,
+        and doing it first turns ``N * B`` fine-grid rows (``N * B * G`` for a
+        DEM) into ``B``. That is the entire cost of the DEM forward once the
+        trunk is tabulated, and an ``N``-fold saving on the tail for a single
+        temperature.
+
+        Element and grid axes are contracted as one GEMM: ``(B, N*G) @
+        (N*G, P)``. The bin widths are applied downstream in ``_continuum``,
+        which is legitimate because they are per energy bin and therefore
+        common to every element and every temperature.
+        """
+        B = weights.shape[0] if weights is not None else dens.shape[1]
+        a_mat = self._abundance_matrix(zs, abundances, B)         # (B, N)
+        if weights is None:
+            f = torch.einsum("bn,nbp->bp", a_mat, dens)           # (B, P)
+        else:
+            N, G, P = dens.shape
+            coef = (a_mat[:, :, None] * weights[:, None, :]).reshape(B, N * G)
+            f = coef @ dens.reshape(N * G, P)                     # (B, P)
+        out = self._continuum(f.unsqueeze(0), bin_edges, velocity, absorb,
+                              tfun, n_h, redshift, mem_gb)[0]     # (B, M)
+        lines = self._deposit_all(zs, temp_kev, a_mat, bin_edges, velocity,
+                                  absorb, tfun, n_h, redshift, weights=weights)
+        return out if lines is None else out + lines
+
+    @_grad_aware
+    def flux_dem(self, temp_grid, weights, abundances, velocity, bin_edges,
+                 absorption=None, n_h=0.0, redshift=0.0, echunk=None,
+                 mem_gb=2.0, compile_trunk=False):
+        """Emission-measure-weighted flux over a temperature grid -> (B, M).
+
+        ``temp_grid`` is (G,) and ``weights`` (B, G); every other argument
+        matches :meth:`flux`. The grid is evaluated ONCE -- it is the same for
+        every walker -- and each walker's weights and abundances are applied in
+        the contraction, so the emulator cost is independent of the number of
+        walkers and the tail costs B rows rather than N*B*G.
+
+        With a fixed-grid table built (see :meth:`build_temp_table`) the
+        emulator stage is a lookup and this is cheaper than a single-T forward.
+        """
+        temp_grid, bin_edges, absorb, tfun, echunk = self._prep(
+            temp_grid, bin_edges, absorption, n_h, echunk, mem_gb,
+            compile_trunk)
+        weights = torch.as_tensor(weights, dtype=torch.float32,
+                                  device=self.device).reshape(-1,
+                                                              temp_grid.numel())
+        dens, zs = self._density(temp_grid, echunk, compile_trunk)  # (N, G, P)
+        return self._contracted_flux(dens, zs, abundances, temp_grid,
+                                     bin_edges, velocity, absorb, tfun, n_h,
+                                     redshift, mem_gb, weights=weights)
+
     @_grad_aware
     def flux(self, temp_kev, abundances, velocity, bin_edges, absorption=None,
-             n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0, compile_trunk=False):
+             n_h=0.0, redshift=0.0, echunk=None, mem_gb=2.0,
+             compile_trunk=False, contract=True):
         """Abundance-weighted summed flux on ``bin_edges`` — see
         ``JointOperatorModel.flux`` for the parameter semantics.
 
@@ -358,10 +574,20 @@ class BatchedJointForward:
         from ``mem_gb`` when None) and the broadening over rows; both are
         numerically transparent. ``compile_trunk`` additionally torch.compiles
         the vmapped group forward (compile ∘ vmap), stacking kernel fusion on top
-        of the batching (one-off compile stall on the first call)."""
+        of the batching (one-off compile stall on the first call).
+
+        ``contract`` sums the elements before the fine-grid tail instead of
+        after (see :meth:`_contracted_flux`), which is the same arithmetic in a
+        different order: B broadening rows instead of N*B. ``contract=False``
+        keeps the element-stacked path, which is the numerical reference and
+        the one ``element_flux`` needs."""
         temp_kev, bin_edges, absorb, tfun, echunk = self._prep(
             temp_kev, bin_edges, absorption, n_h, echunk, mem_gb, compile_trunk)
         dens, zs = self._density(temp_kev, echunk, compile_trunk)
+        if contract:
+            return self._contracted_flux(dens, zs, abundances, temp_kev,
+                                         bin_edges, velocity, absorb, tfun,
+                                         n_h, redshift, mem_gb)
         cont = self._continuum(dens, bin_edges, velocity, absorb, tfun, n_h,
                                redshift, mem_gb)
         return self._combine(cont, zs, abundances, temp_kev, bin_edges,
@@ -418,17 +644,31 @@ class BatchedJointForward:
             model = self.joint.models[z]
             if model.line_head is not None:
                 out_e = out_e + self._lines(model, temp_kev, bin_edges,
-                                            velocity, absorb, tfun, n_h, redshift)
+                                            velocity, absorb, tfun, n_h,
+                                            redshift, z=z)
             out.append(out_e)
         return zs, torch.stack(out, dim=0)                       # (N, B, M)
 
+    def _amplitudes(self, model, temp_kev, z=None):
+        """(B, L_z) integrated line flux for one element, before absorption.
+
+        ``z`` names the element only so the fixed-grid table can be consulted;
+        without it the amplitudes are computed from the line head as before."""
+        if (z is not None and self.temp_table is not None
+                and not temp_kev.requires_grad):      # see _density
+            hit = self.temp_table.lookup(temp_kev)
+            if hit is not None and z in self.temp_table.line_amp:
+                return self.temp_table.line_amp[z].index_select(0, hit)
+        lh = model.line_head
+        tnorm = model.norm_temp(temp_kev).view(-1, model.config.n_params)
+        return torch.pow(10.0, lh.all_line_amplitudes(tnorm)) * lh.line_widths
+
     def _lines(self, model, temp_kev, bin_edges, velocity, absorb, tfun,
-               n_h, redshift):
+               n_h, redshift, z=None):
         """Analytic line deposit for one element (mirrors
         ``element_broadened_flux``'s line block exactly)."""
-        tnorm = model.norm_temp(temp_kev).view(-1, model.config.n_params)
         lh = model.line_head
-        line_flux = torch.pow(10.0, lh.all_line_amplitudes(tnorm)) * lh.line_widths
+        line_flux = self._amplitudes(model, temp_kev, z=z)
         if absorb:
             line_flux = line_flux * tfun(lh.line_energies / (1.0 + redshift),
                                          n_h, device=self.device)

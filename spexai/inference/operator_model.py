@@ -193,7 +193,18 @@ def element_broadened_flux(model, temp_kev, velocity, bin_edges,
     widths = model.train_edges[1:] - model.train_edges[:-1]
     f_train = dens * widths
 
-    uni = uniform_log_edges(float(model.train_edges[0]),
+    # Anchor the uniform-log lattice so that restricting the grid keeps the
+    # SAME cell boundaries: scatter_to_grid deposits each native bin at its
+    # centre, so a lattice shifted by a fraction of a cell moves sharp trunk
+    # features between cells and perturbs the folded spectrum at ~1e-3 -- the
+    # level the bias campaign is trying to measure. Untruncated models have no
+    # anchor and reproduce the previous grid exactly.
+    lo_edge = float(model.train_edges[0])
+    anchor = getattr(model, "_uni_anchor", lo_edge)
+    if anchor != lo_edge:
+        k0 = math.floor((math.log10(lo_edge) - math.log10(anchor)) / dlx)
+        lo_edge = anchor * 10.0 ** (k0 * dlx)
+    uni = uniform_log_edges(lo_edge,
                             float(model.train_edges[-1]), dlx).to(device)
     f_uni = fft_broaden(scatter_to_grid(f_train, model.train_edges, uni),
                         dlx, velocity)
@@ -211,6 +222,75 @@ def element_broadened_flux(model, temp_kev, velocity, bin_edges,
         out = out + deposit_gaussian_lines(lh.line_energies, line_flux,
                                            bin_edges.to(device), velocity)
     return out
+
+
+def restrict_band(joint, e_lo):
+    """Drop training-grid bins below ``e_lo`` keV, in place, on every element.
+
+    The trunk and the FFT broadening both run on the native training grid
+    (0.1-12 keV, 24212 bins) and on the uniform-log grid derived from its
+    endpoints (~208k bins), regardless of the analysis band. For a fit that
+    keeps only channels above some threshold, everything below it is work
+    whose result is masked away. This slices the grid once, after loading, so
+    every downstream path -- serial, batched and grouped -- inherits it with
+    no signature changes.
+
+    ``e_lo`` is a REST-frame energy and must already carry both margins: the
+    RMF's upward redistribution reach above the band edge, and the velocity
+    broadening that can lift flux from below ``e_lo`` into it. See
+    ``campaign.band_low_cut``, which computes it.
+
+    ``bn_mu``/``bn_sigma`` are PER-BIN and are indexed positionally by the
+    ``bins`` argument ``element_broadened_flux`` derives from the grid length,
+    so they must be sliced in step or every retained bin is denormalised with
+    another bin's statistics. That is the one non-obvious coupling here.
+
+    Two things are deliberately NOT touched:
+
+    * ``x_lo``/``x_hi``, the energy normalisation. They are stored scalars,
+      not derived from the grid, so ``norm_energy`` returns bit-identical
+      coordinates for every retained bin and the trunk is unchanged there.
+    * the line head. Its amplitudes come from a learned output layer whose
+      width is fixed at ``n_lines``, so dropping lines would mean slicing that
+      layer in step with the ``line_energies``/``line_widths`` buffers. The
+      deposit is analytic and cheap next to the trunk, and keeping it whole
+      means lines just below the cut still broaden correctly into the band.
+      Only the continuum is truncated.
+
+    Because the line head is left whole, its ``line_ids`` (positions on the
+    ORIGINAL grid) are stale afterwards. Nothing on the inference path reads
+    them -- ``element_broadened_flux`` calls the trunk with ``add_lines=False``
+    and deposits lines from their absolute energies -- but
+    ``forward_norm(add_lines=True)`` and ``forward_on_grid`` are invalid on a
+    restricted model, so it is flagged and they refuse to run.
+
+    Returns (bins_before, bins_after) for logging, or None if nothing was cut.
+    """
+    before = after = None
+    for z in joint.elements:
+        m = joint.models[z]
+        edges = m.train_edges                              # (P+1,)
+        i0 = int(torch.searchsorted(edges, torch.as_tensor(
+            e_lo, dtype=edges.dtype, device=edges.device)).item())
+        if i0 <= 0:
+            continue
+        if i0 >= m.train_energy.numel():
+            raise ValueError(f"e_lo={e_lo} keV is at or above the whole "
+                             f"training grid for Z={z}")
+        if before is None:
+            before, after = m.train_energy.numel(), m.train_energy.numel() - i0
+        # keep the pre-truncation lattice origin so the broadening grid's cell
+        # boundaries are unchanged (see element_broadened_flux)
+        m._uni_anchor = float(edges[0])
+        m.train_energy = m.train_energy[i0:].clone()       # (P-i0,)
+        m.train_edges = edges[i0:].clone()                 # (P-i0+1,)
+        if getattr(m.config, "use_binnorm", False):
+            m.bn_mu = m.bn_mu[i0:].clone()                 # (P-i0,)
+            m.bn_sigma = m.bn_sigma[i0:].clone()           # (P-i0,)
+        m._band_restricted = float(e_lo)
+    # the batched forward caches grid/uni/widths at construction -> rebuild
+    joint._batched = None
+    return None if before is None else (before, after)
 
 
 class JointOperatorModel:
