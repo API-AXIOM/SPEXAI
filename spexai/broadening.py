@@ -116,8 +116,20 @@ USE_FLOAT32_FFT = False
 # per-walker sigma_v that changes every MCMC step, so an un-quantised length
 # allocates a fresh plan per step until the GPU runs out of memory and cuFFT
 # fails with CUFFT_INTERNAL_ERROR. Quantising collapses a run to a couple of
-# lengths. 256 costs at most ~0.3% extra transform on a ~160k-bin grid.
-FFT_PAD_QUANTUM = 256
+# lengths.
+#
+# 1024, not 256, and the size is the point rather than an arbitrary round
+# number: the shapes cuFFT keys on are (rows, length) PAIRS, so a length axis
+# with three values and a row axis with seven gives twenty-one plans, not ten.
+# The row axis is quantised too (see batched._continuum), so this constant's
+# job is to make the length axis a CONSTANT over any velocity that will
+# actually be fitted. The reach is 8 sigma_u / du with sigma_u = v/c and
+# du = dlx ln10 = 2.303e-5, i.e. 35 cells at 30 km/s and 696 at 600 km/s --
+# the whole SIGMA_V_PRIOR range -- so one quantum of 1024 covers all of it
+# (and everything up to ~880 km/s) with a single transform length. It costs
+# ~0.7% extra transform on a ~208k-cell grid, which is far cheaper than a
+# second cached plan and its workspace.
+FFT_PAD_QUANTUM = 1024
 
 
 def limit_cufft_plan_cache(max_size=16):

@@ -45,9 +45,15 @@ from spexai.inference.response import Response                    # noqa: E402
 
 
 def plan_cache_size():
+    # AssertionError too: on a CUDA-less build, touching the plan cache runs
+    # torch.cuda._lazy_init, which asserts rather than raising RuntimeError.
+    # The docstring advertises --device cpu for the (device-independent) shape
+    # count, so this must degrade to "no cache" instead of killing the run.
+    if not torch.cuda.is_available():
+        return -1
     try:
         return int(torch.backends.cuda.cufft_plan_cache.size)
-    except (AttributeError, RuntimeError):
+    except (AttributeError, RuntimeError, AssertionError):
         return -1
 
 
@@ -140,13 +146,32 @@ def main():
           f"{' ...' if len(shapes) > 4 else ''}")
     print(f"cuFFT plans cached  : {plan_cache_size()}")
     print(f"peak allocated      : {peak:.2f} GB")
-    if len(rows) >= 2:
+    # The verdict is BOUNDEDNESS, not growth. A shape is a (rows, length) pair
+    # and both axes are quantised, so a walker count seen for the first time
+    # late in a run adds a shape legitimately -- "it grew in the second half"
+    # cannot tell that apart from something unbounded, and it reported a
+    # failure for exactly that reason once the row axis stopped being a
+    # constant. What must hold is that every shape lies in the set fixed
+    # before the run starts: ONE transform length (FFT_PAD_QUANTUM is sized so
+    # the whole sigma_v prior lands in one quantum) and row counts that are
+    # powers of two (batched._continuum). Anything outside that set is a real
+    # leak, which growth alone would have missed if it happened early.
+    lengths = sorted({sh[-1] for sh in shapes})
+    bad_rows = sorted({sh[0] for sh in shapes if sh[0] & (sh[0] - 1)})
+    print(f"transform lengths   : {len(lengths)}  -> {lengths}")
+    if bad_rows:
+        print(f"non-power-of-2 rows : {bad_rows}")
+    if len(rows) >= 2:                       # informational, not the verdict
         grew = rows[-1][1] - rows[len(rows) // 2][1]
-        print(f"\nshape growth over the second half: {grew:+d}")
-        print("PASS -- shapes are stable, nothing is accumulating"
-              if grew == 0 and not args.emulate_old else
-              "leaking (expected with --emulate_old)" if args.emulate_old else
-              "FAIL -- shapes still growing; find what else varies")
+        print(f"shape growth over the second half: {grew:+d} "
+              f"(expected while walker counts are still being seen)")
+    ok = len(lengths) == 1 and not bad_rows
+    print("\nPASS -- shapes drawn from the fixed bounded set"
+          if ok and not args.emulate_old else
+          "leaking (expected with --emulate_old)" if args.emulate_old else
+          f"FAIL -- {len(lengths)} transform lengths"
+          f"{' and non-power-of-2 row counts' if bad_rows else ''}; "
+          f"find what else varies")
 
 
 if __name__ == "__main__":
