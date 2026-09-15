@@ -8,9 +8,10 @@ Each model here exposes the contract that ``fitting.make_loglike`` expects:
 * ``weights(params)`` -- a 1-D tensor of non-negative weights (the total
   emission measure is carried separately by ``norm``). Free-weight shapes
   (``BinnedDEM``) renormalise these to sum to 1, because their weights are
-  otherwise exactly degenerate with ``norm``. Parametric shapes do **not**:
-  their weights are ``pdf * quadrature``, whose sum is the fraction of the
-  distribution the grid contains and is meant to be read as such.
+  otherwise exactly degenerate with ``norm``. Parametric shapes (including the
+  two-Gaussian mixture) do **not**: their weights are ``pdf * quadrature``,
+  whose sum is the fraction of the distribution the grid contains and is
+  meant to be read as such.
 * ``param_names`` -- the fit parameters the DEM consumes
 * ``suggested_bounds()`` -- default ``{name: (low, high)}`` for building Params
 
@@ -25,7 +26,7 @@ in one forward, and (for NUTS/VI) ``d weights / d theta``. Shapes that can be
 written in closed form therefore also provide:
 
 * ``weights_batch(params)`` -- ``{name: (B,) tensor}`` -> ``(B, G)`` tensor,
-  pure torch, differentiable, each row summing to 1.
+  pure torch, differentiable, with the same normalisation as ``weights``.
 
 It is deliberately optional. ``ParametricDEM`` accepts any frozen scipy
 distribution, and most have no torch equivalent; those keep only the scalar
@@ -165,7 +166,10 @@ class TwoGaussianDEM:
     """Two log-T Gaussians with a mixing fraction (a bimodal DEM).
 
     Params: ``logT1, sig1, logT2, sig2, frac`` (frac in [0,1] weights the first
-    component). Weights renormalised to sum to 1 on the grid.
+    component). Weights are ``pdf * dlogT``, **not** renormalised, for the same
+    reason as ``ParametricDEM``: the mixture is a normalised pdf, so the sum is
+    the fraction of it the grid contains, and dividing by it would silently
+    redistribute an off-grid component's emission measure onto the grid.
     """
 
     def __init__(self, grid: TempGrid, names=("logT1", "sig1", "logT2", "sig2",
@@ -181,20 +185,18 @@ class TwoGaussianDEM:
         m1, s1, m2, s2, f = (float(params[n]) for n in self.param_names)
         f = min(max(f, 0.0), 1.0)
         pdf = f * norm(m1, s1).pdf(self._x) + (1 - f) * norm(m2, s2).pdf(self._x)
-        raw = pdf * self._quad
-        s = raw.sum()
-        w = raw / s if s > 0 else raw
-        return torch.as_tensor(w, dtype=torch.float32)
+        raw = pdf * self._quad                  # NOT renormalised, see class doc
+        return torch.as_tensor(raw, dtype=torch.float32)
 
     def weights_batch(self, params: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """``{name: (B,)}`` -> ``(B, G)``, differentiable."""
+        """``{name: (B,)}`` -> ``(B, G)``, differentiable, NOT renormalised."""
         m1, s1, m2, s2, f = (torch.as_tensor(params[n]).reshape(-1, 1)
                              for n in self.param_names)
         f = f.clamp(0.0, 1.0)
         x = torch.as_tensor(self._x, dtype=torch.float32, device=f.device)
         quad = torch.as_tensor(self._quad, dtype=torch.float32, device=f.device)
         pdf = f * _gauss_pdf(x, m1, s1) + (1.0 - f) * _gauss_pdf(x, m2, s2)
-        return _normalise(pdf * quad)
+        return pdf * quad                                     # (B, G)
 
     def suggested_bounds(self):
         return {"logT1": (np.log10(0.3), np.log10(10.0)), "sig1": (0.02, 0.6),
@@ -242,12 +244,19 @@ class BinnedDEM:
 
 def gaussian_logT(grid: TempGrid, mean: str = "logT_mean",
                   sigma: str = "logT_sigma") -> ParametricDEM:
-    """Gaussian in log10 T (params in log10 keV)."""
+    """Gaussian in log10 T (params in log10 keV) -- SPEX's own ``gdem``.
+
+    Default bounds are the bias campaign's design range: centre 0.7-15 keV
+    (the PCHIP-safe truth floor up to the hottest clusters), width 0.056-0.4
+    dex. The width floor is a RESOLUTION limit, not physics: on the 70-node
+    campaign grid (0.0211 dex per cell) it is ~2.7 cells, and below it the
+    width's Fisher information comes from grid interpolation."""
     from scipy.stats import norm
     return ParametricDEM(
         grid, lambda v: norm(loc=v[0], scale=v[1]), [mean, sigma],
         variable="logT",
-        bounds={mean: (np.log10(0.3), np.log10(10.0)), sigma: (0.02, 0.8)},
+        bounds={mean: (np.log10(PCHIP_TRUTH_SAFE_LO_KEV), np.log10(15.0)),
+                sigma: (0.056, 0.4)},
         torch_pdf=_gauss_pdf)
 
 

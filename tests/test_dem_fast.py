@@ -103,6 +103,31 @@ def test_fast_matches_uncached_values(obs, model):
     assert _rel(got, want) < 1e-5, _rel(got, want)
 
 
+def test_fast_matches_uncached_values_logT(obs, model):
+    """The bias campaign's DEM is a Gaussian in log10 T. The table and the
+    contraction never see the shape family -- only its (B, G) weights -- so
+    the log-T parametrisation must agree with the uncached forward exactly as
+    the linear-T one does."""
+    def dem():
+        return td.gaussian_logT(td.TempGrid(1.0, 8.0, n=10))
+    params = [Param("logT_mean", 0.0, 0.9, truth=0.5),
+              Param("logT_sigma", 0.03, 0.5, truth=0.15),
+              Param("velocity", 30.0, 600.0, truth=200.0),
+              Param("log_norm", 9.0, 11.0, truth=10.0)]
+    fast = build_posterior(obs, model, params, FIXED, dem=dem(),
+                           dem_fast=True).forward
+    ref = build_posterior(obs, model, params, FIXED, dem=dem(),
+                          dem_fast=False).forward
+    rng = np.random.default_rng(1)
+    th = np.column_stack([rng.uniform(0.3, 0.7, 5),       # logT_mean
+                          rng.uniform(0.08, 0.3, 5),      # logT_sigma
+                          rng.uniform(80.0, 500.0, 5),    # sigma_v
+                          rng.uniform(9.9, 10.1, 5)])     # log_norm
+    got, want = fast(th), ref(th)
+    fast.emu.batched.temp_table = None
+    assert _rel(got, want) < 1e-5, _rel(got, want)
+
+
 def test_fast_matches_uncached_with_absorption(obs, model):
     """Absorption is applied on the fine grid and at the line energies, i.e.
     downstream of everything the table holds -- so it must be untouched by the

@@ -67,8 +67,8 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, HOT_SCIENCE, HOT_WEAK, find_xrism_response,
-    band_mask, EXCLUDE_NONE, gaussian_dem, N_REF, Par, Forward,
-    restrict_to_band)
+    band_mask, EXCLUDE_NONE, gaussian_logT_dem, check_truth_dem_param,
+    DEM_PARAM, N_REF, Par, Forward, restrict_to_band)
 from fisher_bias import linear_bias_fisher, COND_F_WARN           # noqa: E402
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import SYMBOL                    # noqa: E402
@@ -77,18 +77,30 @@ from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
 from spexai.inference.response import Response                    # noqa: E402
 from spexai.inference.spex_truth import SpexTruthModel            # noqa: E402
 
-# --- the cluster science range (agreed 2026-08-19) --------------------------
-# Deliberately the range real cluster fits live in, not the full training box:
-# the question is "is the emulator safe for the clusters we fit", and filling
-# the map with cold/hot extremes no cluster shows would swamp that answer.
+# --- the cluster science range (revised 2026-09-15) -------------------------
+# Temperature: 0.7-15 keV, groups through the most massive clusters, for BOTH
+# modes. 0.7 keV is the PCHIP truth's safe floor (tempdist.PCHIP_TRUTH_SAFE_LO_KEV;
+# below it Ar -> inf at 0.5 keV), 15 keV stays inside the emulator's trained
+# 19.94 keV. The 2026-08-19 range (1.5-8 keV) excluded groups and exactly the
+# hot clusters where the hot line-rich metals matter.
+#
+# The DEM is a Gaussian in log10 T (SPEX gdem). Width 0.056-0.4 dex: the floor
+# keeps sigma resolved on the 70-node grid, the ceiling is the wide end of
+# SPEX-typical widths. NO width cap tied to the centre -- a DEM running off the
+# grid is truncated identically in truth and emulator, so b_sys stays a fair
+# comparison; the truncation is recorded per point (``contained_fraction``)
+# and read at interpretation time, not cut at design time.
 RANGES = {
-    "kT": (1.5, 8.0),              # keV, single-T
-    "T_mean": (1.5, 8.0),          # keV, DEM centroid
-    "T_sigma": (0.15, 3.0),        # keV, DEM width
+    "kT": (0.7, 15.0),             # keV, single-T; drawn UNIFORM IN log10 kT
+    "logT_mean": (float(np.log10(0.7)), float(np.log10(15.0))),  # log10 keV
+    "logT_sigma": (0.056, 0.4),    # dex, DEM width
     "abundance": (0.2, 2.0),       # x solar, each free element independently
     "sigma_v": (30.0, 600.0),      # km/s
     "n_h": (0.0, 5.0),             # 1e21 cm^-2
 }
+# axes whose RANGES are in linear units but are drawn uniform in log10, so a
+# temperature axis samples the same way in both modes
+LOG_AXES = {"kT"}
 NORM_REF = 1e11
 
 
@@ -97,20 +109,41 @@ def sample_points(n, mode, seed):
 
     LHS rather than a grid: with 12+ axes a grid is impossible, and LHS gives
     every axis full marginal coverage at any sample size, which is what makes
-    a partial run still interpretable.
+    a partial run still interpretable. Axes in ``LOG_AXES`` are stratified in
+    log10 and returned in linear units.
     """
     from scipy.stats import qmc
-    axes = (["T_mean", "T_sigma"] if mode == "dem" else ["kT"])
+    axes = (["logT_mean", "logT_sigma"] if mode == "dem" else ["kT"])
     axes = axes + [f"a_{SYMBOL[z]}" for z in FREE_Z] + ["sigma_v", "n_h"]
     sampler = qmc.LatinHypercube(d=len(axes), seed=seed)
     u = sampler.random(n)                                   # (n, d)
     lo, hi = [], []
     for a in axes:
         key = ("abundance" if a.startswith("a_") else a)
-        lo.append(RANGES[key][0])
-        hi.append(RANGES[key][1])
+        a_lo, a_hi = RANGES[key]
+        if a in LOG_AXES:
+            a_lo, a_hi = np.log10(a_lo), np.log10(a_hi)
+        lo.append(a_lo)
+        hi.append(a_hi)
     x = qmc.scale(u, lo, hi)                                # (n, d)
-    return [dict(zip(axes, row)) for row in x]
+    for j, a in enumerate(axes):
+        if a in LOG_AXES:
+            x[:, j] = 10.0 ** x[:, j]
+    return [{k: float(v) for k, v in zip(axes, row)} for row in x]
+
+
+def contained_fraction(point, mode):
+    """Fraction of the DEM's emission measure on the fixed grid; 1 for single-T.
+
+    The parametric weights are not renormalised, so their sum IS this fraction.
+    Recorded per point rather than used as a design cut: a truncated DEM is
+    truncated identically in truth and emulator, so it is a property of the
+    point, not an invalid one."""
+    if mode != "dem":
+        return 1.0
+    dem, p = gaussian_logT_dem(mean=point["logT_mean"],
+                               sigma=point["logT_sigma"])
+    return float(dem.weights(p).sum())
 
 
 def abundance_map(point, elements):
@@ -151,6 +184,7 @@ def stage_truth(args, points, outp):
     n_chan = response.n_channels if hasattr(response, "n_channels") else None
 
     dem_cache = {}
+    contained = np.array([contained_fraction(pt, args.mode) for pt in points])
     total = None
     done = set()
     if os.path.exists(outp) and args.resume:
@@ -178,9 +212,10 @@ def stage_truth(args, points, outp):
             common = dict(luminosity_distance=PERSEUS["dist_m"],
                           absorption=absorption, n_h=pt["n_h"] * 1e21)
             if args.mode == "dem":
-                key = (round(pt["T_mean"], 6), round(pt["T_sigma"], 6))
+                key = (round(pt["logT_mean"], 6), round(pt["logT_sigma"], 6))
                 if key not in dem_cache:
-                    dem_cache[key] = gaussian_dem(mean=key[0], sigma=key[1])
+                    dem_cache[key] = gaussian_logT_dem(mean=key[0],
+                                                       sigma=key[1])
                 dem, dp = dem_cache[key]
                 c = m.predict_counts_dem(
                     dem.temp_grid, dem.weights(dp), {z_el: a}, logz, NORM_REF,
@@ -197,10 +232,13 @@ def stage_truth(args, points, outp):
         # record the response: an ARF changes neither the channel count nor
         # the element set, but rescales the truth channel by channel, so a
         # truth built against a different response is silently wrong and no
-        # other field in this file can reveal it.
+        # other field in this file can reveal it. ``dem_param`` does the same
+        # job for the DEM parametrisation (see campaign.check_truth_dem_param).
         np.savez(outp, counts=total, elements_done=sorted(done),
                  points=json.dumps(points), mode=args.mode,
-                 rmf=os.path.basename(rmf), arf=os.path.basename(arf))
+                 rmf=os.path.basename(rmf), arf=os.path.basename(arf),
+                 dem_param=DEM_PARAM if args.mode == "dem" else "none",
+                 contained=contained)
         print(f"Z={z_el:>2}: load {load_s:.1f}s, {len(points)} points in "
               f"{time.time() - t0:.1f}s ({len(done)}/{len(emu_elements)} done)",
               flush=True)
@@ -211,26 +249,44 @@ def stage_truth(args, points, outp):
             f"{bad} sweep points have non-finite truth counts -- almost "
             f"certainly a DEM grid point below the per-element training "
             f"minimum (~0.501 keV), where the PCHIP truth extrapolates and "
-            f"blows up. Narrow RANGES['T_sigma'] or raise the DEM grid floor.")
+            f"blows up. The campaign grid starts at the PCHIP-safe 0.7 keV, so "
+            f"check campaign.gaussian_logT_dem's `lo` and RANGES['kT'].")
     print(f"truth complete -> {outp}", flush=True)
 
 
 # --- stage 2: bias ----------------------------------------------------------
 
+# fit-box padding beyond the temperature design range, dex
+LOGT_PAD_DEX = 0.1
+
+
 def build_pars(fwd, point, log_norm_truth, mode):
     """Truth vector for this sweep point, in ``fwd.names`` order.
 
-    Bounds are only used for finite differences here, so they are the science
-    range widened slightly -- the Fisher solve never leaves the truth point.
+    The Fisher solve never leaves the truth point, but the P6 fits (L-BFGS,
+    Gauss-Newton) clip to these bounds, so they are chosen to NEVER BIND at a
+    truth point rather than from physics: the temperature design range padded
+    by ``LOGT_PAD_DEX`` (kT 0.556-18.9 keV, still inside the emulator's
+    0.5013-19.94 keV), and a width box of 0.045-0.5 dex whose floor sits just
+    below the 0.056 dex resolution limit -- much lower and the width's Fisher
+    information comes from grid interpolation, not the spectrum.
+
+    Steps: 5e-4 dex for both DEM parameters, comparable to the old 5e-3 keV at
+    3.9 keV. kT keeps its 5e-3 keV step.
     """
     out = []
     for z in FREE_Z:
         out.append(Par(SYMBOL[z], point[f"a_{SYMBOL[z]}"], 1e-3, 0.02, 3.0))
     if mode == "single":
-        out.append(Par("kT", point["kT"], 5e-3, 1.0, 9.0))
+        k_lo, k_hi = np.log10(RANGES["kT"])
+        out.append(Par("kT", point["kT"], 5e-3,
+                       float(10.0 ** (k_lo - LOGT_PAD_DEX)),
+                       float(10.0 ** (k_hi + LOGT_PAD_DEX))))
     else:
-        out.append(Par("T_mean", point["T_mean"], 5e-3, 1.0, 9.0))
-        out.append(Par("T_sigma", point["T_sigma"], 5e-3, 0.1, 3.5))
+        m_lo, m_hi = RANGES["logT_mean"]
+        out.append(Par("logT_mean", point["logT_mean"], 5e-4,
+                       m_lo - LOGT_PAD_DEX, m_hi + LOGT_PAD_DEX))
+        out.append(Par("logT_sigma", point["logT_sigma"], 5e-4, 0.045, 0.5))
     out.append(Par("sigma_v", point["sigma_v"], 1.0, 10.0, 700.0))
     out.append(Par("n_h", point["n_h"], 1e-2, 0.0, 6.0))
     out.append(Par("log_norm", log_norm_truth, 2e-3,
@@ -240,11 +296,14 @@ def build_pars(fwd, point, log_norm_truth, mode):
 
 def stage_bias(args, points, truth_path, outp):
     tz = np.load(truth_path, allow_pickle=True)
+    check_truth_dem_param(tz)
     counts = tz["counts"]
     if len(counts) != len(points):
         raise SystemExit(f"truth has {len(counts)} points but the sweep asks "
                          f"for {len(points)} -- regenerate with the same "
                          f"--n_points/--seed/--mode")
+    contained = (tz["contained"] if "contained" in tz.files else
+                 np.array([contained_fraction(pt, args.mode) for pt in points]))
 
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
@@ -252,7 +311,7 @@ def stage_bias(args, points, truth_path, outp):
     keep = band_mask(response, exclude=EXCLUDE_NONE)
     emu = JointOperatorModel(models_dir=args.store, device=args.device)
     restrict_to_band(emu)
-    dem = gaussian_dem()[0] if args.mode == "dem" else None
+    dem = gaussian_logT_dem()[0] if args.mode == "dem" else None
     fwd = Forward(emu, response, absorption, keep, args.mode, dem=dem)
 
     done = {}
@@ -273,14 +332,18 @@ def stage_bias(args, points, truth_path, outp):
         log_norm_truth = float(np.log10(NORM_REF * s))
         # the DEM model has to carry THIS point's shape, not the fiducial's
         if args.mode == "dem":
-            fwd.dem = gaussian_dem(mean=pt["T_mean"], sigma=pt["T_sigma"])[0]
+            fwd.dem = gaussian_logT_dem(mean=pt["logT_mean"],
+                                        sigma=pt["logT_sigma"])[0]
         pars = build_pars(fwd, pt, log_norm_truth, args.mode)
         t0 = time.time()
         b_sys, sigma_ref, cond_F = linear_bias_fisher(fwd, pars, d,
                                                       verbose=False)
+        # contained: fraction of the DEM on the grid (1 for single-T), kept
+        # next to b_sys so truncated points can be read as such, not excluded
         rec = {"point": i, "params": pt, "names": [p.name for p in pars],
                "truth": [p.truth for p in pars], "b_sys": b_sys.tolist(),
                "sigma_ref": sigma_ref.tolist(), "n_ref": N_REF,
+               "contained": float(contained[i]),
                "log_norm_truth": log_norm_truth, "cond_F": cond_F,
                "rmf": os.path.basename(rmf), "arf": os.path.basename(arf),
                "runtime_s": time.time() - t0}

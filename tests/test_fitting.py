@@ -187,6 +187,26 @@ def test_vectorised_dem_matches_scalar(model, obs):
     assert np.allclose(got, ref, rtol=1e-4), f"{got} vs {ref}"
 
 
+def test_vectorised_logT_dem_matches_scalar(model, obs):
+    # the bias campaign's parametrisation: Gaussian in log10 T, per-walker
+    # shapes distinct so a weights/temperature mis-pairing cannot hide
+    from spexai.inference import tempdist as td
+    dem = td.gaussian_logT(td.TempGrid(1.0, 8.0, n=10))
+    params = [Param("logT_mean", 0.0, 0.9, truth=0.5),
+              Param("logT_sigma", 0.03, 0.5, truth=0.15),
+              Param("velocity", 30.0, 600.0, truth=200.0),
+              Param("log_norm", 9.0, 11.0, truth=10.0)]
+    names = [p.name for p in params]
+    post = build_posterior(obs, model, params, FIXED, dem=dem)
+    scalar = make_loglike(obs, model, names, FIXED, dem=dem)
+    theta = np.array([[0.35, 0.08, 150.0, 9.9],
+                      [0.55, 0.15, 240.0, 10.1],
+                      [0.70, 0.30, 400.0, 10.2]])
+    got = post.loglike(theta)
+    ref = np.array([scalar(t) for t in theta])
+    assert np.allclose(got, ref, rtol=1e-4), f"{got} vs {ref}"
+
+
 def test_vectorised_dem_matches_scalar_with_absorption(model, obs):
     from spexai.inference.absorption import Absorption
     absn = Absorption.default()

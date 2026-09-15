@@ -1,0 +1,66 @@
+\documentclass[11pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\newcommand{\kev}{\,\mathrm{keV}}
+\title{spexai: analysis decision log}
+\date{}
+\begin{document}
+\maketitle
+
+Appended as choices are made: what was tried, what was chosen, and why.
+
+\section*{2026-09-15: DEM log-$T$ switch (bias campaign)}
+
+\paragraph{Parametrisation.} \emph{Chosen:} Gaussian in $\log_{10}T$
+(SPEX \texttt{gdem}) for the bias campaign. \emph{Tried:} Gaussian in linear
+$T$ (thesis parametrisation). \emph{Why:} on the log-spaced grid a log-$T$
+width has constant resolution; the linear-$T$ width spanned 0.6--20 cells across
+one design and produced the single $>1\sigma$ outlier (1.642) as a resolution
+artefact.
+
+\paragraph{Temperature design range.} \emph{Chosen:} $0.7$--$15\kev$ for both
+the DEM centre and single-$T$ $kT$, drawn uniform in $\log_{10}T$.
+\emph{Tried/considered:} $1.5$--$8\kev$ (previous, uncited), $1$--$12\kev$,
+$0.5$--$15\kev$. \emph{Why:} groups through the most massive clusters.
+$0.5\kev$ rejected: below the PCHIP truth's safe floor ($0.7\kev$; Ar diverges
+at $0.5\kev$), below the emulator floor ($0.5013\kev$), and where the cache step
+defects cluster (Na, Fe, Ni, Cu, Co at $0.52$--$0.67\kev$).
+
+\paragraph{Width range.} \emph{Chosen:} $\sigma_x = 0.056$--$0.4$\,dex, no cap
+tied to the centre. \emph{Tried:} a centre-dependent cap requiring $\ge98\%$ of
+the DEM on the grid. \emph{Why rejected:} SPEX does not restrict \texttt{gdem}
+to fully contained Gaussians, and truth and emulator share the same
+$0.7$--$19.94\kev$ grid, so a truncated DEM is truncated identically on both
+sides and $b_{\rm sys}$ remains a fair comparison. The floor is a resolution
+limit ($\approx2.7$ cells of the 70-node grid). The contained fraction is
+recorded per truth point for interpretation instead.
+
+\paragraph{Fit bounds and steps.} \emph{Chosen:} $\log T$ centre and $\log kT$:
+design range $\pm0.1$\,dex; $\sigma_x$: $0.045$--$0.5$\,dex; finite-difference
+step $5\times10^{-4}$\,dex for both DEM parameters. \emph{Why:} bounds are not
+physics; they only need never to bind at a truth point and to stay inside the
+emulator's trained range. The width's lower bound sits just below the
+resolution floor. Single-$T$ $kT$ keeps its $5\times10^{-3}\kev$ step
+(unchanged; to revisit if the step check flags it at $0.7\kev$).
+
+\paragraph{Campaign fiducial.} \emph{Chosen:} $\log_{10}T = 0.591$,
+$\sigma_x = 0.111$\,dex, converted from $3.9\pm1.0\kev$ at the centre
+($\sigma_x = \sigma_T/(T\ln 10)$).
+
+\paragraph{Perseus showcase.} \emph{Chosen:} stays linear $T$. \emph{Why:} the
+XRISM Perseus enrichment analysis (arXiv:2606.17141) fits XSPEC
+\texttt{bvvgadem}, whose $\sigma_T$ is in keV; the showcase should match the
+real analysis. Grid and fiducial deferred.
+
+\paragraph{Frozen scripts.} \emph{Chosen:} hot\_floor scripts, \texttt{dump\_truth},
+\texttt{bake\_off} and the cache-step diagnostics are not modified; their
+divergence from the campaign is recorded in \texttt{NOTES.md}. \emph{Why:} not
+needed for P6/P7, and their produced results must remain reproducible.
+Consequence: \texttt{campaign.gaussian\_dem} and \texttt{campaign.build\_params}
+keep the linear-$T$ path; the campaign uses new \texttt{gaussian\_logT\_dem}.
+
+\paragraph{TwoGaussianDEM.} \emph{Chosen:} no longer renormalised, matching
+\texttt{ParametricDEM}. \emph{Why:} renormalising silently redistributes an
+off-grid component's emission measure onto the grid.
+
+\end{document}

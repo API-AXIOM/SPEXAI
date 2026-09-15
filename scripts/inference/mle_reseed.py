@@ -94,7 +94,8 @@ from bake_off import build_problem                                # noqa: E402
 from bias_sweep import NORM_REF, build_pars                       # noqa: E402
 from campaign import (                                            # noqa: E402
     PERSEUS, FREE_Z, find_xrism_response, band_mask, EXCLUDE_NONE,
-    check_truth_response, gaussian_dem, restrict_to_band)
+    check_truth_response, check_truth_dem_param, gaussian_logT_dem,
+    restrict_to_band)
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
@@ -147,6 +148,7 @@ def tierb_response(tz):
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     check_truth_response(tz, rmf, arf)
+    check_truth_dem_param(tz)
     return response, band_mask(response, exclude=EXCLUDE_NONE), rmf, arf
 
 
@@ -154,10 +156,21 @@ def tierb_mode(names):
     """'dem' or 'single', read off the sweep's own parameter names.
 
     The jsonl records the fitted-parameter names, and the two modes differ
-    exactly there (``kT`` vs ``T_mean``/``T_sigma``), so the mode is a property
-    of the file rather than a flag the caller can set inconsistently with it.
+    exactly there (``kT`` vs ``logT_mean``/``logT_sigma``), so the mode is a
+    property of the file rather than a flag the caller can set inconsistently
+    with it.
+
+    A file from the retired linear-T DEM (``T_mean``/``T_sigma``) is REFUSED:
+    by this test it would read as single-T, and its truth is a different
+    injected spectrum anyway.
     """
-    return "dem" if "T_mean" in list(names) else "single"
+    names = list(names)
+    if "T_mean" in names or "T_sigma" in names:
+        raise SystemExit(
+            "this sweep uses the retired linear-T DEM parametrisation "
+            "(T_mean/T_sigma). The campaign DEM is now a Gaussian in log10 T; "
+            "regenerate the truth and the bias screen.")
+    return "dem" if "logT_mean" in names else "single"
 
 
 def tierb_forward(args, names, response, keep):
@@ -170,7 +183,7 @@ def tierb_forward(args, names, response, keep):
     ``bias_sweep``'s Fisher stage, which pins the shape per point and therefore
     has to rebuild it.
     """
-    dem = gaussian_dem()[0] if tierb_mode(names) == "dem" else None
+    dem = gaussian_logT_dem()[0] if tierb_mode(names) == "dem" else None
     emu = JointOperatorModel(models_dir=args.store, device=args.device,
                              accelerate=False)
     restrict_to_band(emu)
@@ -209,7 +222,8 @@ def tierb_point(args, rec, counts_row, keep, verbose=True):
     if verbose:
         p = rec["params"]
         temp = (f"kT={p['kT']:.3f}" if mode == "single" else
-                f"T_mean={p['T_mean']:.3f} T_sigma={p['T_sigma']:.3f}")
+                f"logT_mean={p['logT_mean']:.3f} "
+                f"logT_sigma={p['logT_sigma']:.3f}")
         print(f"point {rec['point']}: {temp} "
               f"sigma_v={rec['params']['sigma_v']:.1f} "
               f"n_h={rec['params']['n_h']:.3f}  cond(F)={rec['cond_F']:.1e}  "

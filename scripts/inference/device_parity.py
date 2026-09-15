@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
 from bias_sweep import build_pars, sample_points                  # noqa: E402
 from campaign import (                                            # noqa: E402
-    EXCLUDE_NONE, Forward, band_mask, find_xrism_response, gaussian_dem)
+    EXCLUDE_NONE, Forward, band_mask, find_xrism_response, gaussian_logT_dem)
 from spexai.config import RESULTS, STORE                          # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
@@ -43,10 +43,11 @@ from spexai.inference.response import Response                    # noqa: E402
 
 def forward_on(device, args, point, response, keep, log_norm_truth):
     emu = JointOperatorModel(models_dir=args.store, device=device)
-    dem = gaussian_dem()[0] if args.mode == "dem" else None
+    dem = gaussian_logT_dem()[0] if args.mode == "dem" else None
     fwd = Forward(emu, response, Absorption.default(), keep, args.mode, dem=dem)
     if args.mode == "dem":
-        fwd.dem = gaussian_dem(mean=point["T_mean"], sigma=point["T_sigma"])[0]
+        fwd.dem = gaussian_logT_dem(mean=point["logT_mean"],
+                                    sigma=point["logT_sigma"])[0]
     pars = build_pars(fwd, point, log_norm_truth, args.mode)
     return fwd(np.array([p.truth for p in pars]))
 

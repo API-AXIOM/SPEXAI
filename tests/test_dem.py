@@ -157,6 +157,41 @@ def test_two_gaussian_weights_batch_matches_scalar():
         assert _torch.allclose(got[i], dem.weights(r), atol=1e-6), f"walker {i}"
 
 
+def test_two_gaussian_weights_not_renormalised_when_truncated():
+    """Same semantics as ``ParametricDEM``: the sum is the contained fraction.
+    A component running off the top of the grid must LOSE emission measure,
+    in both the scalar and the batched path, not have it redistributed."""
+    from scipy.stats import norm as _norm
+    grid = td.TempGrid(0.7, td.EMULATOR_T_HI_KEV, n=70)
+    dem = td.TwoGaussianDEM(grid)
+    p = {"logT1": np.log10(2.0), "sig1": 0.1,
+         "logT2": np.log10(18.0), "sig2": 0.3, "frac": 0.5}
+    # midpoint quadrature: half a cell beyond each end node
+    h = 0.5 * float(grid.dlogt[0])
+    lo, hi = grid.logtemps[0] - h, grid.logtemps[-1] + h
+
+    def inside(m, s):
+        d = _norm(m, s)
+        return d.cdf(hi) - d.cdf(lo)
+
+    contained = (p["frac"] * inside(p["logT1"], p["sig1"])
+                 + (1 - p["frac"]) * inside(p["logT2"], p["sig2"]))
+    assert contained < 0.85                    # genuinely truncated
+    w = dem.weights(p)
+    assert float(w.sum()) == pytest.approx(contained, abs=2e-3)
+    # float32, as VectorForward passes theta
+    wb = dem.weights_batch({n: torch.tensor([float(p[n])], dtype=torch.float32)
+                            for n in dem.param_names})
+    assert torch.allclose(wb[0], w, atol=1e-6)
+
+
+def test_gaussian_logt_default_bounds_are_the_campaign_design():
+    b = td.gaussian_logT(td.TempGrid(0.7, td.EMULATOR_T_HI_KEV, n=70)
+                         ).suggested_bounds()
+    assert b["logT_mean"] == pytest.approx((np.log10(0.7), np.log10(15.0)))
+    assert b["logT_sigma"] == pytest.approx((0.056, 0.4))
+
+
 def test_binned_weights_batch_matches_scalar():
     dem = _td.BinnedDEM(0.5, 8.0, n_bins=5)
     rows = [{f"dem{i}": v for i, v in enumerate([0.1, 0.4, 0.2, 0.0, 0.3])},

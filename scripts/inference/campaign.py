@@ -50,8 +50,16 @@ MPC_M = 3.0857e22
 # --- Perseus fiducials (arXiv:2606.17141) ----------------------------------
 # z, N_H (cm^-2), core kT (keV), turbulence sigma_v (km/s); Gaussian-DEM mean
 # and width for the multi-T flavour.
+#
+# Two DEM parametrisations, deliberately both kept. ``dem_mean``/``dem_sigma``
+# (keV) are the LINEAR-T Gaussian the hot_floor scripts were run with; those
+# results are frozen, so these values must not move. ``dem_logT_*`` is the same
+# fiducial for the log10-T Gaussian (SPEX ``gdem``) the bias campaign uses,
+# converted at the centre: sigma_x = sigma_T / (T ln 10) = 0.111 dex.
 PERSEUS = dict(z=0.017284, dist_mpc=75.0, n_h=1.36e21, kT=3.9, vel=180.0,
-               dem_mean=3.9, dem_sigma=1.0)
+               dem_mean=3.9, dem_sigma=1.0,
+               dem_logT_mean=float(np.log10(3.9)),
+               dem_logT_sigma=1.0 / (3.9 * math.log(10.0)))
 PERSEUS["dist_m"] = PERSEUS["dist_mpc"] * MPC_M
 
 # Injected abundance pattern (Asplund proto-solar relative), from the paper's
@@ -309,6 +317,61 @@ def gaussian_dem(mean=None, sigma=None, lo=td.PCHIP_TRUTH_SAFE_LO_KEV,
     return model, p
 
 
+# The bias campaign's DEM parametrisation, stamped into every truth npz it
+# writes so a truth built under a different one cannot be read back silently.
+DEM_PARAM = "logT"
+
+
+def gaussian_logT_dem(mean=None, sigma=None, lo=td.PCHIP_TRUTH_SAFE_LO_KEV,
+                      hi=td.EMULATOR_T_HI_KEV, n=70):
+    """Gaussian-in-log10-T DEM (SPEX ``gdem``) + its params, on the campaign grid.
+
+    The bias campaign's DEM. ``mean`` is log10(keV) and ``sigma`` is in dex;
+    the grid is identical to ``gaussian_dem``'s (see there for ``lo``, ``hi``
+    and ``n``). On a log-spaced grid a log-T width has CONSTANT resolution,
+    sigma/dx the same at every temperature, which is what the linear-T
+    Gaussian lacked: the same keV width spanned 0.6 to 20 cells across one
+    design.
+
+    ``gaussian_dem`` (linear T, keV) is kept unchanged for the frozen
+    hot_floor scripts. The two take same-named arguments in different units,
+    so values that can only be keV are refused rather than silently
+    reinterpreted: a centre outside 0.1-100 keV, or a width of 1 dex or more
+    (wider than two-thirds of the whole grid).
+    """
+    mean = PERSEUS["dem_logT_mean"] if mean is None else float(mean)
+    sigma = PERSEUS["dem_logT_sigma"] if sigma is None else float(sigma)
+    if not -1.0 <= mean <= 2.0:
+        raise ValueError(f"logT_mean={mean} is not log10(keV) -- was a "
+                         f"temperature in keV passed?")
+    if not 0.0 < sigma < 1.0:
+        raise ValueError(f"logT_sigma={sigma} dex is outside (0, 1) -- was a "
+                         f"width in keV passed?")
+    grid = td.TempGrid(lo, hi, n=n)
+    return td.gaussian_logT(grid), {"logT_mean": mean, "logT_sigma": sigma}
+
+
+def check_truth_dem_param(tz):
+    """Fail if a DEM truth npz was not built with the campaign's log-T DEM.
+
+    A linear-T truth has the same shape, element set and response as a log-T
+    one, so no other guard can tell them apart -- but it is a different
+    injected spectrum, and ``b_sys`` against it would be meaningless.
+    Single-T truths carry no DEM and pass."""
+    if str(tz["mode"]) != "dem":
+        return
+    if "dem_param" not in tz.files:
+        raise SystemExit(
+            "DEM truth npz predates the DEM-parametrisation stamp: it was built "
+            "with the retired linear-T Gaussian, not the campaign's log10-T "
+            "one. Regenerate it with bias_sweep.py --stage truth.")
+    got = str(tz["dem_param"])
+    if got != DEM_PARAM:
+        raise SystemExit(f"DEM truth npz was built with dem_param={got!r} but "
+                         f"the campaign uses log10 T ({DEM_PARAM!r}). "
+                         f"Regenerate it.")
+
+
 def stream_truth_counts(cfg: TruthConfig, response, absorption,
                         store=None, datadir=None, device="cpu",
                         perseus: Optional[Dict] = None,
@@ -362,7 +425,12 @@ class Forward:
         self.abmodel = ab
         self.abnames = ab.param_names
         # parameter order: [abundances...] + thermal + [sigma_v, n_h, log_norm]
-        self.thermal = ["kT"] if mode == "single" else ["T_mean", "T_sigma"]
+        # The DEM names come from the DEM itself, so the same class serves the
+        # campaign's log-T Gaussian (logT_mean, logT_sigma) and the frozen
+        # hot_floor scripts' linear-T one (T_mean, T_sigma) unchanged. Callers
+        # may swap ``self.dem`` per point, but only within the same family.
+        self.thermal = (["kT"] if mode == "single"
+                        else list(dem.param_names))
         self.names = self.abnames + self.thermal + ["sigma_v", "n_h", "log_norm"]
 
     def __call__(self, theta: np.ndarray) -> np.ndarray:
@@ -376,7 +444,7 @@ class Forward:
                 torch.tensor([p["kT"]]), abund, self.logz, norm, p["sigma_v"],
                 self.resp, 1.0, **common)
         else:
-            w = self.dem.weights({"T_mean": p["T_mean"], "T_sigma": p["T_sigma"]})
+            w = self.dem.weights({n: p[n] for n in self.dem.param_names})
             mu = self.emu.predict_counts_dem(
                 self.dem.temp_grid, w, abund, self.logz, norm, p["sigma_v"],
                 self.resp, 1.0, **common)
@@ -399,6 +467,13 @@ def build_params(fwd: Forward, log_norm_truth: float) -> List[Par]:
     if fwd.mode == "single":
         out.append(Par("kT", p["kT"], 5e-3, 1.5, 7.5))
     else:
+        # the hot_floor parametrisation only; the campaign's log-T DEM uses
+        # bias_sweep.build_pars. Refuse rather than return a mis-ordered vector.
+        if getattr(fwd, "thermal", ["T_mean", "T_sigma"]) != ["T_mean", "T_sigma"]:
+            raise ValueError(
+                f"campaign.build_params supports only the linear-T hot_floor "
+                f"DEM (T_mean, T_sigma); this forward has {fwd.thermal}. Use "
+                f"bias_sweep.build_pars for the log-T campaign DEM.")
         out.append(Par("T_mean", p["dem_mean"], 5e-3, 1.5, 7.5))
         out.append(Par("T_sigma", p["dem_sigma"], 5e-3, 0.15, 3.0))
     out.append(Par("sigma_v", p["vel"], 1.0, *SIGMA_V_PRIOR))
