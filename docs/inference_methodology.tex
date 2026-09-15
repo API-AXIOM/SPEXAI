@@ -370,6 +370,18 @@ real observation, not on the emulator-error measurement, and we record it here
 rather than acting on it: no analysis in this work fits real data over a band
 where it matters.
 
+\paragraph{DEM truncation at the temperature limits (recorded, not fixed).}
+The same argument applies along the temperature axis. The DEM grid spans
+$0.7$--$19.94\kev$, and the parametric weights are not renormalised, so a
+Gaussian running off either end loses the emission measure outside the grid.
+In the bias campaign this is common-mode---\code{SpexTruthModel} evaluates the
+same grid with the same weights---and it is recorded per point as the
+contained fraction rather than excluded. Against real data it is a genuine
+limit: SPEX's \code{gdem} centred at $12\kev$ with $\sigma_x=0.2$ dex includes
+emission from $20$--$40\kev$ plasma, which contributes in-band continuum that
+this forward cannot produce, because the emulator is not trained above
+$19.94\kev$.
+
 \section{Temperature distributions and abundances}\label{sec:dem}
 A DEM is a weighted sum $\sum_g w_g\, f(T_g)$ over a temperature grid, evaluated
 by \code{predict\_counts\_dem} (folding once, after the sum). Shapes are drawn
@@ -459,16 +471,37 @@ The largest $\sigma_x$ keeping $99\%$ of the distribution on-grid rises from
 $0.045$ to $0.175$ dex at $8\kev$, and from $0$ to $0.130$ at $10\kev$: on the
 old grid, no width at $10\kev$ was simultaneously contained and resolved.
 
-\paragraph{Decision.} Future DEM work uses \code{gaussian\_logT}, which already
-exists and is tested, with $\sigma_x$ floored at the grid's resolution limit of
-${\sim}0.056$ dex ($16$ nodes across $\pm3\sigma$, SPEX's own standard; the
-declared lower bound of $0.02$ dex is itself sub-cell). This removes the
-artefact and puts the campaign on SPEX's definition, at the cost of
-invalidating the existing DEM truth files, since the weights feed the injected
-spectrum directly. We retain the fixed grid rather than adopting an adaptive
-$\sigma$-scaled window: a shared grid is what lets rows with common kinematics
-share one emulator evaluation, and what makes the trunk output cacheable at all
+\paragraph{Decision.} The bias campaign now uses \code{gaussian\_logT}, with
+$\sigma_x$ floored at the grid's resolution limit of ${\sim}0.056$ dex ($16$
+nodes across $\pm3\sigma$, SPEX's own standard; the previously declared lower
+bound of $0.02$ dex was itself sub-cell). This removes the artefact and puts the
+campaign on SPEX's definition, at the cost of invalidating every existing DEM
+truth file, since the weights feed the injected spectrum directly; truth files
+now carry a parametrisation stamp and unstamped DEM truths are refused. We
+retain the fixed grid rather than adopting an adaptive $\sigma$-scaled window: a
+shared grid is what lets rows with common kinematics share one emulator
+evaluation, and what makes the trunk output cacheable at all
 (Sec.~\ref{sec:forwardcost}).
+
+The redesigned DEM screen draws the centre uniform in $\log_{10}T$ over
+$0.7$--$15\kev$ and the width uniform over $\sigma_x=0.056$--$0.4$ dex; the
+single-temperature screen draws $kT$ uniform in $\log_{10}kT$ over the same
+$0.7$--$15\kev$. The range runs from groups to the most massive clusters. Its
+floor is the PCHIP truth's safe limit, and its ceiling stays inside the
+emulator's trained $19.94\kev$. \emph{No} width cap is tied to the centre, even
+though a wide Gaussian near either end of the grid is truncated: truth and
+emulator share the same grid and the same un-renormalised weights, so the
+missing emission measure is missing from both, and $b_{\rm sys}$ remains a fair
+emulator-versus-truth comparison. SPEX likewise does not restrict \code{gdem}
+to Gaussians contained in any particular range. The contained fraction
+$\sum_g w_g$ is recorded for every point instead, so heavily truncated points
+can be identified when the screen is read. Fit bounds are chosen only never to
+bind at a truth point: the temperature design range padded by $0.1$ dex, and
+$\sigma_x\in[0.045, 0.5]$ dex. The Perseus fiducial becomes
+$\log_{10}T=0.591$, $\sigma_x=0.111$ dex, i.e.\ $3.9\pm1.0\kev$ converted at the
+centre. The Perseus showcase is the exception: it stays in linear $T$, because
+the XRISM Perseus analysis it reproduces fits XSPEC's \code{bvvgadem}, whose
+width is in keV.
 
 That choice has a cost worth stating as a domain limit rather than leaving
 implicit. SPEX reproduces the isothermal case \emph{exactly}---$\sigma_T=0$
@@ -527,8 +560,9 @@ through XRISM/Resolve, as a concrete recovery demonstration.
 \begin{table}[t]
 \centering
 \caption{Parameter ranges. ``Realistic'' is the primary SBC volume; ``Extreme''
-is the stress-test extension. $kT$ is capped at the $0.2$--$10\kev$ training
-band.}
+is the stress-test extension. $kT$ must lie inside the emulator's trained
+temperature range, $0.5013$--$19.94\kev$; the Tier~B bias screen samples
+$0.7$--$15\kev$ (Sec.~\ref{sec:demparam}).}
 \label{tab:ranges}
 \begin{tabular}{lccc}
 \toprule
@@ -1221,7 +1255,12 @@ is combinatorially impossible, while the hypercube gives every axis full
 marginal coverage at any sample size, so a partially completed run is still
 interpretable. The range is deliberately the volume real cluster fits occupy
 rather than the full training box---filling the map with temperatures no cluster
-exhibits would swamp the science-relevant signal.
+exhibits would swamp the science-relevant signal. These are the ranges the
+results below were produced with. The redesigned screen (2026-09-15) widens the
+temperature axis to $0.7$--$15\kev$, drawn uniform in $\log_{10}T$ for both
+flavours, and parametrises the DEM as a Gaussian in $\log T$ with
+$\sigma_x=0.056$--$0.4$ dex (Sec.~\ref{sec:demparam}); every DEM number in this
+section predates it.
 
 \paragraph{Why the abundance axes matter.} Abundance enters both the truth and
 the emulator \emph{linearly} (CIE emissivities sum per element), so varying it
