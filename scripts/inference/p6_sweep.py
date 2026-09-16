@@ -132,6 +132,22 @@ def run_point(args, rec, counts_row, forward, keep):
         data_batch = np.repeat(mu_true[None, :], args.n_seeds, axis=0)
         start = bsys_starts(truth, b_sys, pars, args.n_seeds, args.seed0,
                             scale=args.start_bsys_scale)
+        # Is the spread criterion reachable AT ALL before the fit runs? The
+        # starts scatter by ~|b_sys| per component while Gauss-Newton moves at
+        # most gn_max_step sigma per iteration, so a budget below
+        # spread / gn_max_step cannot bring the starts together however well
+        # the iteration behaves -- the 2026-09-10 run failed the criterion by
+        # construction (60-280 sigma against 12 iterations at a 20 sigma clamp)
+        # and that showed up only as a puzzling failure at the end.
+        if args.method == "gn":
+            spread0 = float(((start.max(0) - start.min(0)) / sigma).max())
+            need = int(np.ceil(spread0 / max(args.gn_max_step, 1e-12)))
+            if need > args.gn_iter:
+                print(f"  WARNING: start spread {spread0:.1f} sigma needs >= "
+                      f"{need} iterations at --gn_max_step "
+                      f"{args.gn_max_step:g}, but --gn_iter is {args.gn_iter}: "
+                      f"the spread criterion cannot be met by construction",
+                      flush=True)
     else:
         data_batch = np.stack([
             np.random.default_rng(args.seed0 + i).poisson(mu_true)
@@ -173,27 +189,14 @@ def run_point(args, rec, counts_row, forward, keep):
     se_k = se_d / np.abs(b_sys)
     # k is a ratio: only meaningful where b_sys clears this run's noise floor
     measurable = np.abs(b_sys) > 3.0 * se_d
-    # convergence judged against the bias, for parameters whose bias is resolved
-    bias_sig = np.abs(mean_d / sigma)
-    resolved = bias_sig > 3.0 * (se_d / sigma)
-    frac = np.where(resolved, move.max(axis=0) / np.maximum(bias_sig, 1e-12), 0.0)
-
-    # In noiseless mode the K rows are the SAME objective from different
-    # starts, so their disagreement is pure numerics -- a real convergence
-    # certificate, unlike the last pass's movement, which point 10 showed can
-    # be 2e-4 sigma while the fit is 3.4 sigma out. Judged on the same
-    # 10%-of-bias convention so the two modes stay comparable.
-    spread_sig = (mle.max(axis=0) - mle.min(axis=0)) / sigma
-    spread_frac = float(np.where(
-        resolved, spread_sig / np.maximum(bias_sig, 1e-12), 0.0).max())
-    converged = bool(frac.max() <= 0.10)
-    if args.noiseless:
-        converged = converged and spread_frac <= 0.10
+    verdict = convergence_verdict(move, mle, mean_d, se_d, sigma,
+                                  bool(args.noiseless))
 
     return {
         "noiseless": bool(args.noiseless),
-        "start_spread_sigma": float(spread_sig.max()),
-        "start_spread_frac_of_bias": spread_frac,
+        "start_spread_sigma": verdict["start_spread_sigma"],
+        "start_spread_frac_of_bias": verdict["start_spread_frac_of_bias"],
+        "n_resolved": verdict["n_resolved"],
         "point": int(rec["point"]), "params": rec["params"], "names": names,
         "counts": args.counts, "n_seeds": args.n_seeds,
         "truth": truth.tolist(), "b_sys": b_sys.tolist(),
@@ -202,9 +205,50 @@ def run_point(args, rec, counts_row, forward, keep):
         "measurable": measurable.tolist(),
         "cond_F": rec["cond_F"], "worst_b_over_sig": worst_ratio(rec),
         "drift_sigma": float(move.max()),
-        "drift_frac_of_bias": float(frac.max()),
-        "converged": converged,
+        "drift_frac_of_bias": verdict["drift_frac_of_bias"],
+        "converged": verdict["converged"],
     }
+
+
+def convergence_verdict(move, mle, mean_d, se_d, sigma, noiseless):
+    """Did this point's fit converge? -> the verdict plus what the jsonl records.
+
+    Convergence is judged against the BIAS, not against an absolute tolerance:
+    the estimator only has to place the endpoint well enough to measure
+    ``k = mean_delta / b_sys``, so the last pass's movement (and, in noiseless
+    mode, the disagreement between independent starts) must be a small
+    fraction of the bias itself.
+
+    **``resolved.any()`` is a precondition, and it is the 2026-09-10 bug.**
+    ``frac`` and ``spread_frac`` are zeroed wherever a parameter's bias is not
+    resolved above the run's noise, so a point that resolved NOTHING scored
+    ``frac.max() == 0`` and reported ``converged=True`` -- "the fit learned
+    nothing" silently became "the fit converged", which is the exact failure a
+    convergence flag exists to prevent. All six converged DEM points of that
+    run were vacuous, every one clamp-saturated at ``drift_sigma == 20.000``,
+    and their k was read as a result.
+
+    In noiseless mode the K rows are the SAME objective from different starts,
+    so their disagreement is pure numerics -- a real convergence certificate,
+    unlike the last pass's movement, which point 10 showed can be 2e-4 sigma
+    while the fit is 3.4 sigma out. Judged on the same 10%-of-bias convention
+    so the two modes stay comparable.
+    """
+    bias_sig = np.abs(mean_d / sigma)
+    resolved = bias_sig > 3.0 * (se_d / sigma)
+    frac = np.where(resolved, move.max(axis=0) / np.maximum(bias_sig, 1e-12),
+                    0.0)
+    spread_sig = (mle.max(axis=0) - mle.min(axis=0)) / sigma
+    spread_frac = float(np.where(
+        resolved, spread_sig / np.maximum(bias_sig, 1e-12), 0.0).max())
+    converged = bool(resolved.any() and frac.max() <= 0.10)
+    if noiseless:
+        converged = converged and spread_frac <= 0.10
+    return {"converged": converged,
+            "n_resolved": int(resolved.sum()),
+            "drift_frac_of_bias": float(frac.max()),
+            "start_spread_frac_of_bias": spread_frac,
+            "start_spread_sigma": float(spread_sig.max())}
 
 
 def summarise(path):
@@ -289,8 +333,16 @@ def main():
                          "its convergence test is the Newton decrement, so "
                          "--gn_tol replaces --tol_change/--tol_grad and the "
                          "line-search flags are ignored")
-    ap.add_argument("--gn_iter", type=int, default=8,
-                    help="max Fisher-scoring rounds (--method gn)")
+    ap.add_argument("--gn_iter", type=int, default=20,
+                    help="max Fisher-scoring rounds (--method gn). 20, not 8: "
+                         "the noiseless starts scatter by ~|b_sys| per "
+                         "component (60-280 sigma between the most distant "
+                         "pair at 1e9 counts) while --gn_max_step caps each "
+                         "iteration at 20 sigma, so closing that gap needs "
+                         ">=14 iterations BEFORE convergence can begin -- at "
+                         "8-12 the spread criterion failed by construction. "
+                         "Affordable only since the forward work: ~12 s/iter "
+                         "is ~4 min/point, where 980 s/iter was 3.3 h/point")
     ap.add_argument("--gn_tol", type=float, default=1e-2,
                     help="Newton-decrement tolerance in NATS (--method gn). "
                          "lambda^2/2 is the log-likelihood still on the table. "

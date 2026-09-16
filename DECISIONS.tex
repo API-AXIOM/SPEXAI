@@ -59,6 +59,99 @@ needed for P6/P7, and their produced results must remain reproducible.
 Consequence: \texttt{campaign.gaussian\_dem} and \texttt{campaign.build\_params}
 keep the linear-$T$ path; the campaign uses new \texttt{gaussian\_logT\_dem}.
 
+\paragraph{Finite-difference step (2026-09-16).} \emph{Chosen:} one step in
+dex, $5\times10^{-4}$, for every temperature axis; $kT$ takes it converted at
+the point, $kT\ln 10\,\times 5\times10^{-4}$, replacing the inherited absolute
+$5\times10^{-3}\kev$. \emph{Why:} the step check at the widened range showed the
+DEM parameters comfortably in the valley between truncation ($\propto h^2$) and
+float32 round-off ($\propto1/h$) --- halving the step moved the Fisher-weighted
+Jacobian column by $7.7\times10^{-5}$ to $8.3\times10^{-4}$ --- while single-$T$
+$kT$ moved by $6.0\times10^{-2}$ at $0.75\kev$ against $3.1\times10^{-3}$ at
+$14\kev$. An absolute step is $0.67\%$ of $kT$ at the cold end and $0.036\%$ at
+the hot end, and above $1.9\kev$ a cold plasma contributes only its exponential
+tail, so the curvature there is extreme; the implied Jacobian bias at the old
+step is ${\sim}8\%$. \texttt{campaign.build\_params} keeps $5\times10^{-3}\kev$
+(frozen hot\_floor path, fiducial $3.9\kev$, where it is $0.13\%$ of $kT$).
+
+\paragraph{Outcome of that change (2026-09-16), and a correction.} The rerun
+refuted the reasoning above. With the relative step, single-$T$ $kT$ at
+$0.75\kev$ moved from $6.8\times10^{-2}$ to $3.8\times10^{-2}$ and at $14\kev$
+from $3.1\times10^{-3}$ to $6.6\times10^{-3}$; the DEM values were unchanged.
+Shrinking the step $5.8\times$ at the cold end should have reduced the
+difference ${\sim}34\times$ under an $h^2$ truncation law and reduced it
+$1.8\times$, and neither end follows the round-off law either. Step size is
+therefore not what controls the cold-end number, and the ${\sim}8\%$ Jacobian
+bias inferred above does not follow from the data. \emph{The relative step is
+retained} on the grounds of units---a single step in dex serves $0.7$--$15\kev$
+where an absolute keV step cannot---not on that measurement.
+
+What remains unexplained is confined to the cold points. Above $1.9\kev$ a
+$0.75\kev$ plasma leaves nearly every channel with $\mu\simeq0$, and both the
+check and \texttt{linear\_bias\_fisher} weight channels by ${\sim}1/\mu$, so
+empty channels can dominate on float32 noise alone. Whether $J$ is genuinely
+unreliable below ${\sim}1.5\kev$, the check misreports it, or the band simply
+carries no information there is not resolved; the diagnostic that separates
+them (three step sizes, a signal-restricted metric, and a count of empty
+channels) is specified but was not run. This affects only the coldest Tier~B
+points, where $\mathrm{cond}(F)$ is reported per point; $k$ is insulated,
+because the Gauss--Newton fixed point is set by the autograd score and $F$ only
+preconditions the path.
+
+\paragraph{Forward-mode AD instead of a step: probed, rejected for now.}
+\emph{Tried:} replacing the central-difference Jacobian with
+\texttt{torch.func.jvp}. Forward mode is the right shape for this object (one
+pass per parameter, versus one per channel for reverse mode), it would be about
+twice as cheap as the $2n+1$ stencil, and it has no step at all.
+\emph{Result:} it fails on both paths --- \texttt{Sparse CSR tensors do not have
+strides} in the response fold (DEM), and \texttt{You must implement the jvp
+function for custom autograd.Function} from the trunk's gradient checkpointing
+(single-$T$). An abundance control agreed to $5.8\times10^{-4}$ by finite
+differences in both modes, so the probe itself was sound.
+\emph{Why not fixed now:} both are fixable --- the fold is linear, so forward
+mode need only run as far as \texttt{flux} and the same map applies to the
+tangent, and checkpointing is redundant under forward mode --- but it is a
+hot-path restructure with an uncertain interaction with \texttt{grad\_enabled},
+to fix one parameter at one end of the design that the relative step already
+fixes. Recorded as future work; probe kept at
+\texttt{scripts/inference/probe\_jacobian\_ad.py}.
+
+\section*{2026-09-16: Gauss--Newton bugs (D1--D3)}
+
+\paragraph{D1, vacuous convergence: FIXED.} \emph{Chosen:} \texttt{converged}
+now requires \texttt{resolved.any()}, and the record carries
+\texttt{n\_resolved}. \emph{Why:} \texttt{frac} is zeroed wherever a
+parameter's bias is unresolved, so a point that resolved nothing scored
+$\max(\texttt{frac})=0$ and reported converged---``the fit learned nothing''
+became ``the fit converged''. All six converged DEM points of the 2026-09-10
+run were that case, each clamp-saturated at $\texttt{drift\_sigma}=20.000$, and
+their $k$ was read as a result. The criterion was extracted from
+\texttt{run\_point} into \texttt{p6\_sweep.convergence\_verdict} so it could be
+tested at all; three tests added.
+
+\paragraph{D2, Gauss--Newton does not descend: HELD.} $-\log L$ rises
+monotonically while the Newton decrement falls. \emph{Deferred by D.H.} until
+the log-$T$ switch and D1 have been through a real screen, on the grounds that
+the other fixes may change the picture. The proposed fix, if it is still needed,
+is to accept a step only on decrease and otherwise halve along the same Newton
+direction---affine invariant, and not the strong-Wolfe search that broke
+L-BFGS.
+
+\paragraph{D3, unreachable spread criterion: more iterations.} \emph{Chosen:}
+raise the iteration budget (\texttt{--gn\_iter} $8\to20$), plus a start-up
+check that warns when $\texttt{gn\_iter}\times\texttt{gn\_max\_step}$ is smaller
+than the point's actual start spread. \emph{Why:} the noiseless starts scatter
+by ${\sim}|b_{\rm sys}|$ per component---$60$--$280\sigma$ between the most
+distant pair---while the trust region caps each iteration at $20\sigma$, so
+closing the gap needs $\ge14$ iterations before convergence can begin and the
+budget was $8$--$12$. The criterion therefore failed by construction. This is
+affordable only now: at ${\sim}12$\,s per iteration $20$ iterations is
+${\sim}4$ minutes per point, where at $980$\,s it was $3.3$ hours.
+\emph{Rejected:} a larger step clamp (trades a known cost for overshoot risk
+into a region where the dropped residual term is not small) and tighter starts
+via \texttt{--start\_bsys\_scale} (closer starts agree more easily, so the
+multi-start certificate would certify less). Note the budget only helps if the
+iteration descends, i.e.\ D2; both should be re-read against the new screen.
+
 \paragraph{TwoGaussianDEM.} \emph{Chosen:} no longer renormalised, matching
 \texttt{ParametricDEM}. \emph{Why:} renormalising silently redistributes an
 off-grid component's emission measure onto the grid.

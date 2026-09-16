@@ -27,6 +27,48 @@ from mle_reseed import gauss_newton_batch, gn_score          # noqa: E402
 from test_lbfgs_precondition import NDIM, _ToyForward        # noqa: E402
 
 
+def _verdict(mean_d, se_d, move, mle, noiseless=False):
+    from p6_sweep import convergence_verdict
+    return convergence_verdict(np.asarray(move), np.asarray(mle),
+                               np.asarray(mean_d), np.asarray(se_d),
+                               np.ones(3), noiseless)
+
+
+def test_unresolved_point_is_not_reported_converged():
+    """THE 2026-09-10 failure: ``frac`` is zeroed wherever a parameter is
+    unresolved, so a point that resolved NOTHING scored frac.max() == 0 and
+    called itself converged. All six 'converged' DEM points were that case,
+    every one clamp-saturated at drift_sigma == 20.0, and their k was read as
+    a result."""
+    v = _verdict(mean_d=[0.01, 0.0, 0.0], se_d=[0.05, 0.05, 0.05],
+                 move=np.full((4, 3), 20.0), mle=np.zeros((4, 3)))
+    assert v["n_resolved"] == 0
+    assert v["converged"] is False
+    assert v["drift_frac_of_bias"] == 0.0        # the vacuous score itself
+
+
+def test_resolved_point_with_small_drift_still_converges():
+    """Positive control: the fix must not turn honest convergence into a
+    failure."""
+    v = _verdict(mean_d=[1.0, 0.0, 0.0], se_d=[0.01, 0.01, 0.01],
+                 move=np.full((4, 3), 0.05), mle=np.zeros((4, 3)))
+    assert v["n_resolved"] == 1 and v["converged"] is True
+
+
+def test_noiseless_spread_still_bites():
+    """A resolved, low-drift point whose independent starts disagree is not
+    converged in noiseless mode."""
+    mle = np.zeros((4, 3))
+    mle[0, 0] = 0.5                              # 0.5 sigma spread on param 0
+    v = _verdict(mean_d=[1.0, 0.0, 0.0], se_d=[0.01, 0.01, 0.01],
+                 move=np.full((4, 3), 0.05), mle=mle, noiseless=True)
+    assert v["start_spread_frac_of_bias"] == pytest.approx(0.5)
+    assert v["converged"] is False
+    # ... and the same point passes when the spread criterion is not applied
+    assert _verdict([1.0, 0.0, 0.0], [0.01, 0.01, 0.01],
+                    np.full((4, 3), 0.05), mle)["converged"] is True
+
+
 class _GNToy(_ToyForward):
     """``_ToyForward`` plus the numpy ``__call__`` that ``batched_jacobian``
     uses to build the central-difference J."""
