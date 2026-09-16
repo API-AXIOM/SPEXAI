@@ -174,6 +174,29 @@ def test_build_pars_bounds_steps_and_containment_of_truths():
     assert single["kT"].low >= 0.5013 and single["kT"].high <= cp.td.EMULATOR_T_HI_KEV
 
 
+def test_single_T_step_is_relative_not_absolute():
+    """kT is in keV but its step is the DEM's dex step converted at the point.
+    An absolute step cannot serve 0.7 and 15 keV at once: at the cold end the
+    in-band counts fall away exponentially with kT, and the inherited 5e-3 keV
+    biased the Jacobian there by ~8% (h -> h/2 moved the Fisher-weighted column
+    by 6.0e-2, against 3.1e-3 at 14 keV)."""
+    steps = {}
+    for kt in (0.75, 3.9, 14.0):
+        pars = {q.name: q for q in bs.build_pars(
+            None, dict(bs.sample_points(1, "single", 0)[0], kT=kt),
+            10.0, "single")}
+        steps[kt] = pars["kT"].step
+        assert pars["kT"].step == pytest.approx(kt * np.log(10.0) * bs.STEP_DEX)
+    # the same fraction of kT everywhere, and no longer the old absolute value
+    fracs = [s / kt for kt, s in steps.items()]
+    assert fracs == pytest.approx([fracs[0]] * len(fracs))
+    assert all(s != 5e-3 for s in steps.values())
+    # and the DEM axes, already in dex, take STEP_DEX directly
+    dem = {q.name: q for q in bs.build_pars(
+        None, bs.sample_points(1, "dem", 0)[0], 10.0, "dem")}
+    assert dem["logT_mean"].step == dem["logT_sigma"].step == bs.STEP_DEX
+
+
 def test_contained_fraction_recorded_per_point():
     assert bs.contained_fraction({"kT": 4.0}, "single") == 1.0
     fid = cp.gaussian_logT_dem()[1]

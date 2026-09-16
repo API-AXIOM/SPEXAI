@@ -258,6 +258,16 @@ def stage_truth(args, points, outp):
 
 # fit-box padding beyond the temperature design range, dex
 LOGT_PAD_DEX = 0.1
+# finite-difference step for every temperature axis, in DEX. Relative, not
+# absolute: the central difference's truncation error grows as h^2 times the
+# local curvature, and above 1.9 keV a cold plasma's in-band counts fall away
+# exponentially with kT, so one absolute step cannot serve 0.7 and 15 keV at
+# once. The inherited 5e-3 keV was 0.036% of kT at 14 keV but 0.67% at 0.75
+# keV, where it biased the Jacobian by ~8% (measured: halving the step moved
+# the Fisher-weighted column by 6.0e-2, against 3.1e-3 at 14 keV).
+# 5e-4 dex sits in the valley between truncation and float32 round-off at
+# every temperature tested (7.7e-5 to 8.3e-4 for the DEM parameters).
+STEP_DEX = 5e-4
 
 
 def build_pars(fwd, point, log_norm_truth, mode):
@@ -271,22 +281,27 @@ def build_pars(fwd, point, log_norm_truth, mode):
     below the 0.056 dex resolution limit -- much lower and the width's Fisher
     information comes from grid interpolation, not the spectrum.
 
-    Steps: 5e-4 dex for both DEM parameters, comparable to the old 5e-3 keV at
-    3.9 keV. kT keeps its 5e-3 keV step.
+    Steps: ``STEP_DEX`` for every temperature axis. The DEM parameters are
+    already in dex, so they take it directly; ``kT`` is in keV, so it takes the
+    same step CONVERTED AT THE POINT, ``kT ln10 STEP_DEX`` -- 8.6e-4 keV at
+    0.75 keV, 0.016 keV at 14 keV. See ``STEP_DEX`` for the measurement that
+    retired the old absolute 5e-3 keV.
     """
     out = []
     for z in FREE_Z:
         out.append(Par(SYMBOL[z], point[f"a_{SYMBOL[z]}"], 1e-3, 0.02, 3.0))
     if mode == "single":
         k_lo, k_hi = np.log10(RANGES["kT"])
-        out.append(Par("kT", point["kT"], 5e-3,
+        out.append(Par("kT", point["kT"],
+                       float(point["kT"] * np.log(10.0) * STEP_DEX),
                        float(10.0 ** (k_lo - LOGT_PAD_DEX)),
                        float(10.0 ** (k_hi + LOGT_PAD_DEX))))
     else:
         m_lo, m_hi = RANGES["logT_mean"]
-        out.append(Par("logT_mean", point["logT_mean"], 5e-4,
+        out.append(Par("logT_mean", point["logT_mean"], STEP_DEX,
                        m_lo - LOGT_PAD_DEX, m_hi + LOGT_PAD_DEX))
-        out.append(Par("logT_sigma", point["logT_sigma"], 5e-4, 0.045, 0.5))
+        out.append(Par("logT_sigma", point["logT_sigma"], STEP_DEX,
+                       0.045, 0.5))
     out.append(Par("sigma_v", point["sigma_v"], 1.0, 10.0, 700.0))
     out.append(Par("n_h", point["n_h"], 1e-2, 0.0, 6.0))
     out.append(Par("log_norm", log_norm_truth, 2e-3,
