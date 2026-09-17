@@ -1535,6 +1535,91 @@ Si        & 19 &  1.42 &  8.74 & 0.028 & 0.178 & 0.048 \\
 \end{tabular}
 \end{table}
 
+\subsection{Results: the DEM flavour}\label{sec:kdem}
+The DEM sweep is 30 Latin-hypercube points over the log-$T$ ranges of
+Sec.~\ref{sec:demparam}, fitted from eight noiseless starts at $10^9$ in-band
+counts on the band-restricted grid. It supersedes an earlier attempt that
+yielded nothing usable (Sec.~\ref{sec:kcaveats}).
+
+\paragraph{The fits.} All 120 converge on the Newton decrement in $2$--$7$
+iterations (mode $2$--$3$); none stalled and none exhausted the 20-iteration
+budget. $-\log L$ falls monotonically at every point and the score collapses
+with it ($\max|s\sigma|$ from $570$ to $0.54$ at point~0), which is the
+quadratic convergence Fisher scoring should show on a likelihood this close to
+quadratic at $10^9$ counts. The eight independent starts agree to
+$0.003$--$0.039\sigma$ --- the certificate the earlier attempt never produced,
+where the same spread was $60$--$280\sigma$. This also refutes the one
+systematic that would flatter the result: one start is placed at
+$\theta_0+b_{\rm sys}$, so an under-converged fit would park there and report
+$k\to1$ spuriously, but the remaining seven are scattered by $|b_{\rm sys}|$
+about $\theta_0$ and would then disagree, and they do not.
+
+\paragraph{The denominator sets the tail, not the physics.} Of 390
+point-parameters, 305 satisfy $|b_{\rm sys}|\ge0.5\sigma$. The 85 excluded
+produce the entire tail of extreme ratios: the largest $|k|$ in the run is
+$54.4$ ($\code{logT\_mean}$ at point~20) on a denominator of
+$1.7\times10^{-3}\sigma$, and the next, $9.36$ ($\nh$ at point~7), sits on
+$1.06\times10^{-2}\sigma$ against a measured offset of $0.099\sigma$ --- itself
+only four times that point's own convergence drift. Both are ratios of two
+numbers at the fit's numerical floor, and neither moves any $N_\star$: $k$
+multiplies $b_{\rm sys}$, so a bias predicted at one percent of an error bar
+remains negligible whatever $k$ does to it.
+
+\paragraph{Above the floor there is no anomaly.} Table~\ref{tab:kdem} gives the
+per-parameter breakdown; every median lies in $0.94$--$1.02$. Pooled over all
+305 surviving rows, $k$ has median $0.988$, standard deviation $0.109$, and a
+central $90\%$ range of $0.84$--$1.17$. The extremes are $0.51$ (S at point~8)
+and $1.59$ ($\code{logT\_mean}$ at point~11), both at $|b_{\rm sys}|/\sigma
+\simeq0.55$, immediately above the cut and consistent with denominator noise
+growing as the floor is approached. The distribution sits slightly below unity,
+so the linearised screen mildly \emph{over}-predicts the DEM bias --- the
+conservative direction.
+
+\begin{table}[htbp]
+\centering
+\caption{Linearisation factor $k$ per parameter, DEM (log-$T$), 30 sweep points
+at $10^9$ in-band counts, restricted to $|b_{\rm sys}|\ge0.5\sigma$ (305 of 390
+point-parameters). $n$ is the number of surviving points for that parameter;
+min and max are over those points. Temperature parameters carry their
+record names.}
+\label{tab:kdem}
+\begin{tabular}{lrrrr}
+\toprule
+param & $n$ & median $k$ & min & max \\
+\midrule
+Si                  & 17 & 0.98 & 0.93 & 1.02 \\
+S                   & 21 & 1.01 & 0.51 & 1.46 \\
+Ar                  & 24 & 0.95 & 0.87 & 1.01 \\
+Ca                  & 26 & 1.01 & 0.89 & 1.39 \\
+Cr                  & 14 & 1.02 & 0.83 & 1.06 \\
+Mn                  & 13 & 0.95 & 0.84 & 0.99 \\
+Fe                  & 29 & 0.97 & 0.55 & 1.38 \\
+Ni                  & 27 & 1.01 & 0.99 & 1.31 \\
+\code{logT\_mean}   & 27 & 0.97 & 0.76 & 1.59 \\
+\code{logT\_sigma}  & 28 & 0.97 & 0.82 & 1.37 \\
+$\sigma_v$          & 26 & 1.00 & 0.94 & 1.11 \\
+$\nh$               & 24 & 0.97 & 0.73 & 1.07 \\
+$\log(\text{norm})$ & 29 & 0.94 & 0.70 & 1.09 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{The residual scatter is not attributed.} Propagating the fit's own
+convergence floor through the ratio,
+$\mathrm{unc}_k=\max(\text{drift},\text{start spread})/(|b_{\rm sys}|/\sigma)$,
+declares 138 of the 305 rows more than $3\,\mathrm{unc}_k$ from unity --- but
+that model is incomplete rather than the rows anomalous, and the pattern shows
+it: the most significant deviations are the \emph{smallest} ones at the largest
+denominators (point~5 Ar, $k=0.97$, flagged at $20\,\mathrm{unc}_k$ on
+$\mathrm{unc}_k=0.001$). Only the numerator is propagated; $b_{\rm sys}$ itself
+carries error from the finite-difference Jacobian and the Fisher solve, and a
+$5$--$10\%$ error there would account for the observed spread on its own. The
+$\pm0.11$ should therefore be read as an upper bound on genuine second-order
+curvature, not a measurement of it. The discriminator --- whether $|k-1|$
+shrinks as $|b_{\rm sys}|/\sigma$ grows, as it demonstrably does in the
+single-temperature sweep (Sec.~\ref{sec:linfactor}, exponent $-0.41$) --- has
+not been run for the DEM.
+
 \subsection{Where in parameter space?}
 Aggregating to one number per point (rows within a point share that point's
 $kT$, $\sigma_v$ and $\nh$, so row-level significance would be badly
@@ -1588,33 +1673,38 @@ small to threaten anything.
 
 \subsection{Caveats}\label{sec:kcaveats}
 \begin{enumerate}
-\item \textbf{Single-temperature only.} The factor has not been measured for
-the DEM flavour, whose binding parameter is $T_{\rm sigma}$ rather than Fe and
-which has no single-temperature analogue. The DEM margin against a deep
-stacked cluster core is roughly an order of magnitude, so it has less headroom
-than the single-$T$ case; carrying the numbers above across is an assumption,
-not a measurement.
-
-A DEM sweep was attempted and yielded nothing usable, which is worth recording
-because the failure was silent. Of 30 points, 16 completed in ${\sim}2.9$ days
-of A10 time before the run was stopped; six reported \code{converged}, and all
-six are spurious. The convergence test is
+\item \textbf{The DEM factor has now been measured} (Sec.~\ref{sec:kdem}),
+superseding the earlier form of this caveat. The first attempt yielded nothing
+usable and the failure was silent, which is worth recording. Of 30 points, 16
+completed in ${\sim}2.9$ days of A10 time before the run was stopped; six
+reported \code{converged}, and all six were spurious. The convergence test is
 \code{frac = np.where(resolved, move/bias\_sig, 0.0)} followed by
 \code{frac.max() <= 0.10}: when \emph{no} parameter is resolved, \code{frac} is
 identically zero and the test passes vacuously. The noiseless start-spread test
-has the same \code{np.where(resolved, ..., 0.0)} shape and does not catch it
-either. Every one of the six has \code{drift\_sigma} pinned at the $20\sigma$
-trust-region clamp and stalled at Gauss--Newton iteration 3, so the seven
-$k$ values they contribute---and the $1.69\times$ inflation they imply---are
-artefacts of a fit that never moved. The single-temperature results above are
-unaffected: auditing \code{resolved.any()} across the $n{=}100$ sweep and the
-earlier 20-point sweep finds zero vacuous points in either. Two further
-symptoms should be fixed before the DEM sweep is rerun: $-\log L$ \emph{rises}
-monotonically across iterations at several points while the Newton decrement
-falls to tolerance, so the Gauss--Newton step is not a descent direction; and
-the start spread ($60$--$280\sigma$) exceeds what $12$ iterations at a
-$20\sigma$ clamp can close, making the spread criterion unreachable by
-construction rather than informative.
+has the same \code{np.where(resolved, ..., 0.0)} shape and did not catch it
+either. Every one of the six had \code{drift\_sigma} pinned at the $20\sigma$
+trust-region clamp and stalled at Gauss--Newton iteration 3, so the seven $k$
+values they contributed---and the $1.69\times$ inflation they implied---were
+artefacts of a fit that never moved. Three defects were addressed before the
+rerun: the vacuous test now requires \code{resolved.any()}; $-\log L$ rose
+monotonically under the linear-$T$ parametrisation and descends under log-$T$,
+so no line-search fix was needed; and the start spread, $60$--$280\sigma$
+against a $20\sigma$ per-iteration clamp, is now $0.003$--$0.039\sigma$. The
+single-temperature results above were unaffected throughout: auditing
+\code{resolved.any()} across the $n{=}100$ sweep and the earlier 20-point sweep
+finds zero vacuous points in either.
+\item \textbf{The detectability guard is inert in noiseless mode.}
+\code{measurable} and \code{resolved} compare $|b_{\rm sys}|$ against
+$3\,\code{se\_delta}$, but with noiseless data the $K$ rows are independent
+starts on one objective, so \code{se\_delta} measures optimiser repeatability
+(${\sim}1.5\times10^{-5}\sigma$) rather than statistical uncertainty. It is
+true for $390/390$ point-parameters of the DEM sweep, at a median margin of
+${\sim}1.4\times10^{4}$. The $|b_{\rm sys}|\ge0.5\sigma$ floor of
+Sec.~\ref{sec:kdefs} is what actually excludes unusable ratios, and the guard
+should not be relied on in its place. \code{converged} inherits the same
+weakness through its relative-to-bias criterion: ten of the 30 DEM points are
+flagged not converged while their absolute drift, $0.010$--$0.135\sigma$, is in
+line with the converged ones.
 \item \textbf{Twelve of 100 points are excluded} for failing the multi-start
 criterion. They are not enriched in high bias as a set (Mann--Whitney
 $p=0.40$), so the distribution above is not flattered; however the two
