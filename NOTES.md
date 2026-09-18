@@ -3,6 +3,56 @@
 Running log of context, progress and open questions. Decisions and their
 reasoning go in `DECISIONS.tex`.
 
+## NEXT ACTIONS (2026-09-18)
+
+**Both P6 screens are DONE, analysed and written up.** The answer is that the
+linearised screen is trustworthy: **k = 1 to within ~10%, with a real tail to
+~1.5x.**
+
+| screen | points | k median | sd | central 90% |
+|---|---|---|---|---|
+| DEM log-T | 30 (0 failed) | 0.992 | 0.11 | 0.84-1.17 |
+| single-T 0.7-15 keV | 30 (3 failed) | 0.992 | 0.20 | 0.75-1.27 |
+
+Write-ups: `docs/inference_methodology.tex` sec:kwide (single-T widened),
+sec:kdem (DEM), and sec:kcaveats. Choices: `DECISIONS.tex` 2026-09-17 and
+2026-09-18. Results: `~/work/data/spexai/results/` (`p6_gn_single_n30_s3.jsonl`,
+`p6_gn_dem_logT_n30_s3.jsonl`) and `logs/`.
+
+**Next: P7.** Carry k PER PARAMETER, not one scalar. Quote the worst case as
+~1.5x in magnitude (k^2 ~ 2.4 at single-T point 11), which REPLICATES the old
+100-point design's 2.75 rather than exceeding it -- the tail is a stable
+property of the linearisation, and no design coordinate predicts it in advance.
+
+Open, deliberately not chased, in the order they would matter:
+
+1. **The scatter in k is unattributed** (+-0.11 DEM, +-0.20 single-T) between
+   b_sys's own error (FD Jacobian + Fisher solve -- random, averages away over
+   a sweep) and genuine second-order curvature (structured, would need carrying
+   per parameter). Discriminator: does |k-1| shrink as |b_sys|/sigma grows? It
+   does for single-T (rho = -0.38, p < 1e-4, log-log slope +0.39, from
+   `p6_trends`); not run for DEM.
+2. **The optimiser fixes D2 + D5** (see below). Required before any rerun of
+   this stage; not required for the current result.
+3. **The cold end**: whether b_sys itself is trustworthy below ~1.5 keV is
+   still open (2026-09-16 section). It did NOT affect convergence -- the three
+   coldest points (0.765, 0.878, 0.955 keV) all converged cleanly, and the
+   three failures sit at 0.851, 2.043 and 6.187 keV, i.e. scattered.
+
+To rerun either screen (truth -> bias -> GN, resumable per stage, ~3.4 h for 30
+single-T points on an A10):
+
+```bash
+export MKL_THREADING_LAYER=GNU
+NPOINTS=30 SEED=3 MODE=single GN_ITER=20 COUNTS=1e9 NSEEDS=8 \
+    nohup bash scripts/inference/p6_overnight.sh > logs/p6_single.log 2>&1 &
+```
+
+`p6_overnight.sh` defaults `GN_ITER` to 12 and silently overrides p6_sweep's
+default of 20, so pass it explicitly. A fresh NPOINTS is a DIFFERENT Latin
+hypercube, not an extension.
+
+
 ## Current work: DEM log-T switch (branch `dem-logT-switch`, uncommitted)
 
 Started 2026-09-15. Baseline on `main` (9113853): 265 tests pass.
@@ -126,24 +176,83 @@ reproducible. If any of them is needed again, reconcile first.
 `campaign.Forward` still produces bit-identical names and weights for the
 linear-T DEM (pinned by `test_forward_linear_T_hot_floor_path_unchanged`).
 
-## GN bugs (D1-D3), 2026-09-16
+### Smoke runs PASSED 2026-09-16 (2 DEM points, cluster)
 
-- **D1 vacuous convergence: FIXED.** `p6_sweep.convergence_verdict` (extracted
-  from `run_point` so it is testable) requires `resolved.any()`; the jsonl now
-  carries `n_resolved`. 3 tests in `tests/test_gauss_newton.py` (18 passed);
-  full-suite verification pending at the time of writing.
-- **D2 not descending: HELD** by D.H. until the log-T switch + D1 have been
-  through a real screen. Fix if still needed: accept only on decrease, else
-  halve along the Newton direction.
-- **D3 spread criterion: more iterations (option 1). IMPLEMENTED.**
-  `--gn_iter` default 8 -> 20, with the arithmetic in its help text, plus a
-  start-up check in `run_point` (noiseless + `--method gn`): it computes the
-  actual start spread in sigma, divides by `--gn_max_step`, and warns at the
-  TOP of the log if `--gn_iter` is below that. Rejected: bigger clamp
-  (overshoot into the region where GN's dropped residual term is not small),
-  tighter `--start_bsys_scale` (closer starts agree more easily, so the
-  multi-start certificate would certify less). Only helps if the iteration
-  descends -- see D2.
+Both stages ran end to end under the log-T parametrisation; output downloaded
+to `~/work/data/spexai/results/bias_sweep_logT_smoke/`. Verified locally:
+`dem_param='logT'` stamped; `contained` in BOTH npz and jsonl and equal to an
+independent recomputation (0.7619, 0.9990); names/order carry
+`logT_mean`/`logT_sigma`; the drawn points reproduce `sample_points(2,'dem',0)`
+exactly; 30 elements; correct Resolve RMF/ARF; counts finite. Numbers are
+unremarkable: worst |b|/sigma at N_REF=1e5 is +0.057 (Fe, pt0) and +0.109
+(sigma_v, pt1); cond(F) 9.4e7 and 6.0e6, far below COND_F_WARN=1e10. Bias
+stage ~235-285 s/point. Point 0 (1.22 keV, 0.354 dex) is 76% contained -- the
+cold-end truncation the design allows, behaving as predicted.
+
+**GOTCHA (pre-existing, not introduced here): the bias jsonl has 4 records for
+2 points.** `stage_bias` opens the jsonl with `"a"` and only skips work when
+`--resume` is passed, so a second invocation without `--resume` APPENDS a
+duplicate set, and `summarise()` does not deduplicate -- it would double-count
+every repeated point. **Always pass `--resume` on a rerun**, and check
+`len(records)` against `--n_points` before reading a summary.
+
+## GN bugs D1-D4: status 2026-09-18
+
+Read against two real screens: DEM log-T (30 points) and single-T 0.7-15 keV
+(30 points), 120 fits each.
+
+- **D1 vacuous convergence: SUPERSEDED by D4.** The `resolved.any()` guard was
+  correct for the 2026-09-10 failure but inert against the real problem, since
+  `resolved` uses `se_delta`, which in noiseless mode is optimiser
+  repeatability (~1.5e-5 sigma), not an error bar -- so it was true 13/13 at
+  every point. D4's absolute floor subsumes it, and the precondition has been
+  REMOVED from the criterion (`n_resolved` is kept as a diagnostic).
+- **D2 not descending: REOPENED 2026-09-18.** Closed on 2026-09-17 on DEM
+  evidence; the single-T screen refutes that closure. Three points exit through
+  the stall detector while pinned at the 20 sigma clamp, and at two of them
+  -logL is RISING at exit (pt 0: -2.149e4 -> -2.141e4 -> -2.119e4). GN does go
+  uphill, but only when clamp-saturated -- which the DEM screen never was.
+  Fix identified, NOT implemented: accept a step only on decrease, else halve
+  along the Newton direction.
+- **D3 spread criterion: RETIRED in practice.** Start spread is 0.003-0.048
+  sigma at converged points and the start-up warning never fires. NOTE the
+  warning is now nearly toothless anyway: at `--gn_iter 20` with
+  `--gn_max_step 20` it only triggers above a 400 sigma start spread.
+- **D5 (NEW): the trust region is isotropic.** `over = |d/sig|.max() /
+  max_step_sigma; d /= over` rescales the WHOLE step vector by its worst
+  component, so one runaway direction throttles every other direction by the
+  same factor. Signature: direction-dependence within one fit -- at pt 0 the
+  sigma_v direction converged to 1.7% of its initial across-start scatter while
+  S never moved at all (99.4%), same eight starts. At pt 18 several
+  thick-denominator directions ended FURTHER apart than they began. Fix
+  identified, NOT implemented: clamp per component.
+
+**D2 and D5 are the two to apply before any rerun of this stage.** They were
+deferred because k replicates across three independent samples and recovering
+3 points in 30 would not change it.
+
+### D4: every threshold divided by something that vanishes -- FIXED 2026-09-18
+
+- `measurable_mask(b_sys, se_d, sigma)` (extracted from `run_point` so it is
+  testable) requires `|b_sys| > max(3 se_d, K_FLOOR_SIGMA * sigma)`,
+  K_FLOOR_SIGMA = 0.5.
+- `convergence_verdict` judges drift and start spread against
+  `max(bias, CONV_FLOOR_SIGMA)`, CONV_FLOOR_SIGMA = 1.0, same 10% convention.
+  The `np.where(resolved, ..., 0.0)` masks -- the mechanism of the vacuous
+  score -- are gone.
+- Verified: 296 tests (293 + 3 new in `tests/test_gauss_newton.py`). On the
+  stored single-T run the new rule gives 3 NOT CONVERGED where the old gave 9,
+  no indeterminate cases, and `measurable` 347/360 -> 301/360.
+- The two `*_frac_of_bias` key names are KEPT although their denominator is now
+  floored, because `p6_trends` and `p6_check_outliers` consume them to exclude
+  points and the floor makes those exclusions strictly better.
+
+**The jsonls on disk were written by the OLD code**, so their `measurable` and
+`converged` fields are pre-D4. Every number in the write-ups comes from
+applying the current rule downstream of the stored `b_sys`, `sigma`,
+`drift_sigma` and `start_spread_sigma`. Re-running the sweep is the only way to
+make the stored flags agree with the text; not worth it for this result.
+
 
 ## Flags for later
 

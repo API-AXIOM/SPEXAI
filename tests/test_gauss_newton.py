@@ -44,7 +44,9 @@ def test_unresolved_point_is_not_reported_converged():
                  move=np.full((4, 3), 20.0), mle=np.zeros((4, 3)))
     assert v["n_resolved"] == 0
     assert v["converged"] is False
-    assert v["drift_frac_of_bias"] == 0.0        # the vacuous score itself
+    # The vacuous score itself is gone: the denominator is floored at
+    # CONV_FLOOR_SIGMA, so 20 sigma of drift is scored as 20, not as 0.
+    assert v["drift_frac_of_bias"] == pytest.approx(20.0)
 
 
 def test_resolved_point_with_small_drift_still_converges():
@@ -422,3 +424,47 @@ def test_steps_stay_inside_the_box(gtoy):
                                 verbose=False)
     assert np.all(mle >= lo[None, :] - 1e-12)
     assert np.all(mle <= hi[None, :] + 1e-12)
+
+
+# --- D4, 2026-09-17: every threshold divided by something that vanishes ------
+
+def test_tiny_bias_point_with_small_drift_converges():
+    """THE 2026-09-17 false failure. Judged as a fraction of the bias alone, a
+    point whose bias is 1e-4 sigma can never converge however well it fitted:
+    ten of the 30 single-T points reported NOT CONVERGED on absolute drifts of
+    0.010-0.135 sigma, in line with the points that passed. Under the old rule
+    this scored 200; it must now be judged against the 1 sigma floor."""
+    v = _verdict(mean_d=[1e-4, 0.0, 0.0], se_d=[1e-6, 1e-6, 1e-6],
+                 move=np.full((4, 3), 0.02), mle=np.zeros((4, 3)))
+    assert v["drift_frac_of_bias"] == pytest.approx(0.02)
+    assert v["converged"] is True
+
+
+def test_large_bias_keeps_the_relative_allowance():
+    """The floor must not make the test ABSOLUTE everywhere: a parameter whose
+    bias is 30 sigma can afford 2 sigma of drift (k would be wrong by 7%), and
+    judging that against the floor alone would fail it for nothing."""
+    move = np.zeros((4, 3))
+    move[:, 0] = 2.0                             # 2 sigma drift on a 30 sigma bias
+    kw = dict(mean_d=[30.0, 0.0, 0.0], se_d=[0.01, 0.01, 0.01],
+              mle=np.zeros((4, 3)))
+    assert _verdict(move=move, **kw)["converged"] is True
+    move[:, 0] = 5.0                             # ... but 5 sigma is 17%, too much
+    assert _verdict(move=move, **kw)["converged"] is False
+
+
+def test_measurable_needs_a_thick_denominator_not_just_signal():
+    """k is a ratio, so its denominator must be thick in ABSOLUTE terms. In
+    noiseless mode se_d is optimiser repeatability (~1e-5 sigma), so the
+    inherited |b_sys| > 3 se_d passed 390/390 point-parameters of the DEM
+    screen and let k = 9.36 be quoted on a 0.011 sigma denominator."""
+    from p6_sweep import K_FLOOR_SIGMA, measurable_mask
+    sigma = np.ones(3)
+    tiny_se = np.full(3, 1e-5)                   # noiseless: se_d is meaningless
+    m = measurable_mask(np.array([0.6, 0.3, 10.0]), tiny_se, sigma)
+    assert list(m) == [True, False, True]        # 0.3 sigma is below the floor
+    assert K_FLOOR_SIGMA == 0.5
+    # ... and in a NOISY run the statistical half can still be the binding one
+    big_se = np.full(3, 1.0)                     # 3 se_d = 3 sigma > the floor
+    m = measurable_mask(np.array([0.6, 0.3, 10.0]), big_se, sigma)
+    assert list(m) == [False, False, True]

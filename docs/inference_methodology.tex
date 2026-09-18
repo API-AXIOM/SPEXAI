@@ -1535,6 +1535,101 @@ Si        & 19 &  1.42 &  8.74 & 0.028 & 0.178 & 0.048 \\
 \end{tabular}
 \end{table}
 
+\subsection{Results: single-temperature, widened range}\label{sec:kwide}
+The single-$T$ design was redrawn over the widened $0.7$--$15\kev$ range
+(Sec.~\ref{sec:biassweep}) so that both flavours span the same volume: 30
+Latin-hypercube points, eight noiseless starts, $10^9$ in-band counts. It is a
+\emph{different sample} from the 100-point set above, not an extension of it,
+because the Latin hypercube does not nest.
+
+\paragraph{Three points failed to converge and are excluded.} Points 0, 1 and
+18 ended with start-to-start spreads of $20.0$, $35.5$ and $20.2\sigma$ against
+$0.003$--$0.048\sigma$ everywhere else --- a separation of nearly three orders
+of magnitude, so the exclusion is unambiguous. The failure is in the optimiser,
+not the model (Sec.~\ref{sec:kcaveats}), and the excluded points are
+\emph{not} a region of parameter space: their percentiles within the design are
+$3/33/70$ in $kT$, $47/17/60$ in $\sigma_v$, $27/30/90$ in $\nh$ and
+$43/3/63$ in $\mathrm{cond}(F)$. Dropping them is therefore close to missing at
+random, and in particular does not remove a difficult corner and flatter the
+result.
+
+\paragraph{The factor.} Of the 360 point-parameters, 310 have
+$|b_{\rm sys}|\ge0.5\sigma$, and 278 of those belong to the 27 converged
+points. Over those, $k$ has median $0.992$, standard deviation $0.203$ and a
+central $90\%$ range of $0.75$--$1.27$; every per-parameter median lies in
+$0.97$--$1.01$ (Table~\ref{tab:kwide}). The scatter is about twice the DEM
+flavour's $0.109$, and Sec.~\ref{sec:kdem}'s caveat applies here too: it is not
+attributed between $b_{\rm sys}$'s own error and genuine curvature.
+
+\begin{table}[htbp]
+\centering
+\caption{Linearisation factor $k$ per parameter, single-temperature over
+$0.7$--$15\kev$, 27 converged points at $10^9$ in-band counts, restricted to
+$|b_{\rm sys}|\ge0.5\sigma$ (278 of 360 point-parameters). $n$ is the number of
+surviving points for that parameter; min and max are over those points.}
+\label{tab:kwide}
+\begin{tabular}{lrrrr}
+\toprule
+param & $n$ & median $k$ & min & max \\
+\midrule
+Si                  & 17 & 0.99 &  0.92 & 1.03 \\
+S                   & 22 & 0.99 &  0.64 & 2.04 \\
+Ar                  & 25 & 0.98 &  0.20 & 1.81 \\
+Ca                  & 25 & 1.00 &  0.71 & 1.55 \\
+Cr                  & 21 & 1.01 &  0.50 & 1.13 \\
+Mn                  & 22 & 1.01 &  0.77 & 1.50 \\
+Fe                  & 26 & 0.97 &  0.54 & 1.32 \\
+Ni                  & 23 & 0.98 &  0.54 & 1.18 \\
+$kT$                & 27 & 1.01 &  0.60 & 1.54 \\
+$\sigma_v$          & 21 & 1.00 &  0.74 & 1.21 \\
+$\nh$               & 22 & 0.98 & $-0.24$ & 1.84 \\
+$\log(\text{norm})$ & 27 & 0.99 &  0.16 & 1.99 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Scale error or direction error?} Per-parameter $k$ hides the
+distinction that matters. The screen predicts a \emph{vector} $b_{\rm sys}$ and
+the fit measures a vector $\delta$; both are expressed in units of $\sigma$, so
+their components are commensurate and the comparison is geometric. A ratio
+$|\delta|/|b_{\rm sys}|\neq1$ at alignment $\cos\theta\simeq1$ is a pure scale
+error --- the screen has the direction right and the magnitude wrong, which a
+single factor per point repairs, and which is exactly what $k$ is built to
+express. A low $\cos\theta$ is a direction error, which no scalar can repair
+and which per-parameter $k$ would misrepresent. Restricting to the components
+with $|b_{\rm sys}|\ge0.5\sigma$ (a near-zero component contributes noise to
+the angle for the same reason it makes $k$ diverge), over the 27 converged
+points the ratio has median $0.994$ and the alignment median
+$\cos\theta=0.9997$, i.e.\ $1.4^\circ$. \textbf{For 23 of 27 points the
+linearisation is right in both length (to $8\%$) and direction (to
+${\sim}2^\circ$).} Only four fall below $\cos\theta=0.99$: points 11, 17, 22
+and 28.
+
+\paragraph{The one case that matters: point 11.} Point 11
+($kT=3.65\kev$, $\sigma_v=195\kms$, $\nh=1.23$) is the worst linearisation
+anywhere in either sweep that cannot be explained away. Its fit is clean ---
+monotonic descent, no trust-region saturation, exit on the Newton decrement,
+drift $0.026\sigma$ and start spread $0.030\sigma$ --- and its denominators are
+thick, so neither the convergence nor the small-denominator escape applies. It
+measures $|\delta|/|b_{\rm sys}| = 1.463$ at $\cos\theta = 0.970$
+($14^\circ$): predominantly a scale error with a modest direction component.
+Per parameter this reads $k=1.54$ on $kT$ with $|b_{\rm sys}| = 12.58\sigma$
+and a $6.73\sigma$ miss, and $k\simeq1.8$--$2.0$ on $\log(\text{norm})$, $\nh$
+and S. Point 28 ($kT=7.30\kev$) is the same effect at $1.352$ and
+$\cos\theta=0.957$.
+
+Two things keep this in proportion. First, $k^2\simeq2.4$ at point 11, so
+$N_\star$ there is optimistic by that factor --- which \emph{replicates} the
+100-point design's independently measured worst case of $2.75$
+(Sec.~\ref{sec:linfactor}) rather than exceeding it. The tail is a stable
+property of the linearisation, not a new pathology, and a worst case near
+$1.5\times$ in magnitude is the realistic figure to carry. Second, it is an
+isolated point: neither its $kT$, nor its $\sigma_v$, nor its $\nh$, nor its
+$\mathrm{cond}(F)$ (which is the \emph{lowest} in the design, $4.5\times10^6$)
+marks out a region, so there is no part of parameter space that can be flagged
+as untrustworthy in advance. Carrying the distribution of $k$ per parameter,
+rather than a single scalar, is what this argues for.
+
 \subsection{Results: the DEM flavour}\label{sec:kdem}
 The DEM sweep is 30 Latin-hypercube points over the log-$T$ ranges of
 Sec.~\ref{sec:demparam}, fitted from eight noiseless starts at $10^9$ in-band
@@ -1693,18 +1788,49 @@ against a $20\sigma$ per-iteration clamp, is now $0.003$--$0.039\sigma$. The
 single-temperature results above were unaffected throughout: auditing
 \code{resolved.any()} across the $n{=}100$ sweep and the earlier 20-point sweep
 finds zero vacuous points in either.
-\item \textbf{The detectability guard is inert in noiseless mode.}
-\code{measurable} and \code{resolved} compare $|b_{\rm sys}|$ against
-$3\,\code{se\_delta}$, but with noiseless data the $K$ rows are independent
-starts on one objective, so \code{se\_delta} measures optimiser repeatability
-(${\sim}1.5\times10^{-5}\sigma$) rather than statistical uncertainty. It is
-true for $390/390$ point-parameters of the DEM sweep, at a median margin of
-${\sim}1.4\times10^{4}$. The $|b_{\rm sys}|\ge0.5\sigma$ floor of
-Sec.~\ref{sec:kdefs} is what actually excludes unusable ratios, and the guard
-should not be relied on in its place. \code{converged} inherits the same
-weakness through its relative-to-bias criterion: ten of the 30 DEM points are
-flagged not converged while their absolute drift, $0.010$--$0.135\sigma$, is in
-line with the converged ones.
+\item \textbf{The detectability guard was inert in noiseless mode; fixed
+2026-09-18.} \code{measurable} and \code{resolved} compared $|b_{\rm sys}|$
+against $3\,\code{se\_delta}$, but with noiseless data the $K$ rows are
+independent starts on one objective, so \code{se\_delta} measures optimiser
+repeatability (${\sim}1.5\times10^{-5}\sigma$) rather than statistical
+uncertainty. The rule was true for $390/390$ point-parameters of the DEM sweep,
+at a median margin of ${\sim}1.4\times10^{4}$, and \code{converged} inherited
+the same weakness through its relative-to-bias criterion: ten of the 30 DEM
+points and nine of the 30 single-$T$ points were flagged not converged on
+absolute drifts of $0.010$--$0.135\sigma$, in line with the points that passed.
+Both are now floored absolutely: \code{measurable\_mask} requires
+$|b_{\rm sys}|>\max(3\,\code{se\_delta},\,0.5\sigma)$, and
+\code{convergence\_verdict} judges drift and spread against
+$\max(\text{bias},1\sigma)$, which also subsumes the vacuous-convergence guard
+of the previous caveat. On the single-$T$ run the new rule reports 3 points not
+converged where the old reported 9, with no indeterminate cases, and tightens
+\code{measurable} from $347/360$ to $301/360$. \emph{The jsonl files on disk
+were written by the old code}, so their \code{measurable} and \code{converged}
+fields are the old ones; every number quoted in Sec.~\ref{sec:kwide} and
+Sec.~\ref{sec:kdem} comes from applying the current rule downstream of the
+stored \code{b\_sys}, \code{sigma}, \code{drift\_sigma} and
+\code{start\_spread\_sigma}.
+\item \textbf{Three of the 30 single-$T$ points failed inside the optimiser,
+and the mechanism is understood.} All three exited through the stall detector
+while the step was pinned at the $20\sigma$ trust-region boundary, with
+$-\log L$ \emph{rising} at two of them --- so Gauss--Newton was moving uphill,
+which is the overshoot anticipated when a larger clamp was rejected earlier in
+this campaign. The trust region rescales the \emph{entire} step vector by
+whatever its worst single component demands
+(\code{over = |d/sig|.max()/max\_step\_sigma}; \code{d /= over}), so one
+runaway direction throttles every other direction by the same factor. The
+signature is direction-dependence within a single fit: at point 0 the
+$\sigma_v$ direction converged completely (the across-start scatter fell to
+$1.7\%$ of its initial value) while the S direction never moved at all
+($99.4\%$), in the same eight starts. At point 18 several thick-denominator
+directions ended \emph{further} apart than they began
+($\log(\text{norm})$ $1.9\times$, $\nh$ $2.1\times$), so the failure is
+divergence rather than slow progress. Two fixes are identified and
+\emph{not} implemented --- per-component clamping, and accepting a step only on
+decrease, halving along the Newton direction otherwise --- because the value of
+$k$ replicates across three independent samples and recovering three points in
+thirty would not change it. Anyone rerunning this stage should apply them
+first.
 \item \textbf{Twelve of 100 points are excluded} for failing the multi-start
 criterion. They are not enriched in high bias as a set (Mann--Whitney
 $p=0.40$), so the distribution above is not flattered; however the two

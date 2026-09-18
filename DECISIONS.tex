@@ -156,4 +156,179 @@ iteration descends, i.e.\ D2; both should be re-read against the new screen.
 \texttt{ParametricDEM}. \emph{Why:} renormalising silently redistributes an
 off-grid component's emission measure onto the grid.
 
+\section*{2026-09-17: the DEM screen, and what $k$ can be read from}
+
+\paragraph{D2, Gauss--Newton does not descend: CLOSED, no fix needed.}
+\emph{Observed:} across all 30 points and 120 fits of the log-$T$ screen,
+$-\log L$ falls monotonically --- point~0 runs $+1.22\times10^3$ to $-112.6$ in
+two iterations --- and $\max|s\sigma|$ falls with it, $570\to0.54$. The
+ascent-direction failure recorded on 2026-09-16 does not reproduce under the
+log-$T$ parametrisation. \emph{Why it was right to hold:} D.H.\ deferred the
+line-search fix pending a real screen, precisely on the grounds that the other
+changes might change the picture, and they did. No accept-on-decrease logic was
+added.
+
+\paragraph{D3, unreachable spread criterion: retired in practice.}
+\emph{Observed:} the start-to-start spread collapsed from $60$--$280\sigma$
+under linear $T$ to $0.003$--$0.039\sigma$, and the start-up warning added on
+2026-09-16 never fired at any point. Convergence now takes $2$--$7$ iterations
+(mode $2$--$3$); all 120 fits exit on the Newton decrement, none stalled and
+none exhausted the budget. \emph{Consequence:} the $8\to20$ iteration budget is
+kept but is no longer binding.
+
+\paragraph{Fast convergence is not a bug.} \emph{Investigated} because two- to
+four-iteration convergence looked too good to be true. Fisher scoring on a
+Poisson likelihood that is near-quadratic at $10^9$ counts, started
+${\sim}b_{\rm sys}$ away, should converge quadratically; the descent of
+$-\log L$, the collapse of the score, and the agreement of eight independent
+starts to $<0.04\sigma$ all confirm it is genuine. \emph{Recorded} so the
+question is not reopened.
+
+\paragraph{\texttt{se\_delta} is not an error bar in noiseless mode.}
+\emph{Found:} the noiseless redesign made the $K$ rows independent \emph{starts}
+on one objective rather than one start on $K$ noisy objectives, so their scatter
+measures optimiser repeatability (${\sim}1.5\times10^{-5}\sigma$), not
+statistical uncertainty. Every threshold built on it is therefore vacuous:
+\texttt{measurable} $=|b_{\rm sys}|>3\,\texttt{se\_d}$ holds for all $390$
+point-parameters at a median margin of ${\sim}1.4\times10^{4}$, and
+\texttt{resolved} --- the guard D1 restored on 2026-09-16 --- holds for $13/13$
+parameters at every point, so \texttt{resolved.any()} can never fire.
+\emph{Consequence:} D1's fix is correct for the failure it was built from and
+inert against this one. \emph{Chosen:} $k$ is read only above an absolute floor
+on its denominator, $|b_{\rm sys}|\ge0.5\sigma$, which is already the convention
+documented for the single-$T$ sweep in the methodology note; the
+\texttt{se\_delta}-based detectability rule is not to be used in noiseless mode.
+\emph{Not yet implemented in code} --- \texttt{p6\_sweep} still writes
+\texttt{measurable} and \texttt{converged} on the old rule, and this analysis
+was done downstream of the jsonl.
+
+\paragraph{Convergence judged relative to the bias: same root cause.}
+\emph{Found:} \texttt{drift\_frac\_of\_bias} divides the fit's residual movement
+by the bias, so a point whose bias is negligible can never converge. Ten of 30
+points are flagged \texttt{NOT CONVERGED} while their absolute drift,
+$0.010$--$0.135\sigma$, is in line with the converged ones; point~17 reports
+$62\times$ the bias on a drift of $0.022\sigma$ because its smallest resolved
+bias is $1.2\times10^{-4}\sigma$. \emph{Chosen:} judge drift against
+$\max(\text{bias},\text{floor})$, so that ``nothing to measure'' reports as
+converged rather than failed. \emph{Also not yet implemented.}
+
+\paragraph{The $0.5\sigma$ cut, and the error bar on $k$.} \emph{Chosen:}
+$|b_{\rm sys}|\ge0.5\sigma$ rather than $1\sigma$, by D.H., to keep more of the
+sample; $305/390$ point-parameters survive. \emph{Uncertainty model:}
+$\mathrm{unc}_k=\max(\texttt{drift\_sigma},\texttt{start\_spread\_sigma})/
+(|b_{\rm sys}|/\sigma)$, the fit's own convergence floor propagated through the
+ratio. \emph{Why it is incomplete, and it matters:} it accounts only for the
+numerator. $b_{\rm sys}$ carries its own error from the finite-difference
+Jacobian and the Fisher solve, which is not propagated, and the symptom is
+visible --- the most significant deviations are the \emph{smallest} ones at the
+largest denominators (point~5 Ar, $k=0.97$, flagged at $20\,\mathrm{unc}_k$). A
+$5$--$10\%$ error on $b_{\rm sys}$ alone would account for the observed scatter.
+\emph{Consequence:} the $\pm0.11$ spread in $k$ is reported as unattributed ---
+either $b_{\rm sys}$'s own error bar (random, averages away over a sweep) or
+genuine second-order curvature (structured, and would need carrying per
+parameter). The discriminator, not run, is whether $|k-1|$ shrinks as
+$|b_{\rm sys}|/\sigma$ grows, as it does in the single-$T$ sweep.
+
+\paragraph{Reporting $k$ as a single ratio: kept, with the floor.}
+\emph{Rejected:} replacing the per-point ratio with a regression slope of
+$\delta/\sigma$ on $b_{\rm sys}/\sigma$. It handles small denominators correctly
+by construction (short lever arms get little leverage, no threshold to tune) and
+its intercept would expose the convergence floor, but it presumes the correction
+is one global constant, which is the wrong shape for a question about how
+offsets vary \emph{across} parameter space, and a single slope would average
+straight through any curvature. \emph{Chosen:} report $k$ per point-parameter
+above the floor, which answers the question directly and shows no anomaly worth
+modelling. \emph{Result:} $k=0.99\pm0.11$, every per-parameter median in
+$0.94$--$1.02$, slightly below unity, i.e.\ the screen mildly over-predicts the
+DEM bias.
+
+\section*{2026-09-18: the widened single-$T$ screen, and D4 implemented}
+
+\paragraph{D2 REOPENED.} \emph{Correction to 2026-09-17,} which closed D2 on
+the DEM screen's evidence. The widened single-$T$ screen refutes that closure:
+three of 30 points exit through the stall detector while pinned at the
+$20\sigma$ trust-region boundary, and at two of them $-\log L$ is \emph{rising}
+at exit (point 0 runs $-2.149\times10^4 \to -2.141\times10^4 \to
+-2.119\times10^4$ over its last three iterations). Gauss--Newton does move
+uphill, but only in the clamp-saturated regime, which the DEM screen never
+entered --- so the earlier closure was premature rather than wrong on its own
+data. \emph{Why it was right to hold D2 originally:} D.H.\ declined to accept a
+fix before a real screen had exercised it, and two screens were needed.
+
+\paragraph{Mechanism of the three failures: the clamp is isotropic.}
+\emph{Found:} the trust region rescales the \emph{entire} step vector by
+whatever its worst single component demands (\texttt{over = |d/sig|.max() /
+max\_step\_sigma}, then \texttt{d /= over}), so one runaway direction throttles
+every other direction by the same factor. Direction-dependence within one fit
+is the signature: at point 0 the $\sigma_v$ direction converged completely (the
+across-start scatter fell to $1.7\%$ of its initial value) while S never moved
+at all ($99.4\%$), in the same eight starts; at point 18 several
+thick-denominator directions ended \emph{further} apart than they began.
+\emph{Chosen:} record the mechanism, fix nothing now. \emph{Why:} $k$
+replicates across three independent samples, the three points are 10\% of one
+of them, and changing the optimiser would mean the DEM and single-$T$ screens
+were produced by different code. \emph{Rejected for now:} per-component
+clamping, and accepting a step only on decrease. Both remain the right fixes
+whenever this stage is rerun.
+
+\paragraph{The failures are not regional.} \emph{Checked} before excluding
+them, because excluding a difficult corner would flatter the result. Their
+percentiles within the 30-point design are $3/33/70$ in $kT$, $47/17/60$ in
+$\sigma_v$, $27/30/90$ in $n_{\rm H}$ and $43/3/63$ in $\mathrm{cond}(F)$.
+\emph{Two hypotheses refuted:} ``they had furthest to travel'' (point 18 has
+the third-\emph{smallest} predicted bias in the design, while points 10 and 16
+carry the two largest and converge cleanly) and ``they are badly conditioned''
+(point 1 has the second-\emph{lowest} $\mathrm{cond}(F)$ of all 30).
+
+\paragraph{D4 implemented: absolute floors on both thresholds.}
+\emph{Chosen:} \texttt{measurable\_mask} requires
+$|b_{\rm sys}| > \max(3\,\texttt{se\_d},\ 0.5\,\sigma)$, and
+\texttt{convergence\_verdict} judges drift and start spread against
+$\max(\text{bias},\ 1\,\sigma)$ at the same $10\%$ convention. \emph{Why:}
+every threshold in the estimator divided by a quantity that vanishes, which
+failed at both ends --- a point with no measurable bias could never converge,
+and a point that resolved nothing converged vacuously. \emph{Consequence:} the
+floor subsumes the \texttt{resolved.any()} precondition added for D1, which is
+therefore dropped from the criterion; \texttt{n\_resolved} is kept as a
+diagnostic, and the \texttt{np.where(resolved, ..., 0.0)} masks --- the
+mechanism of the vacuous score --- are gone. \emph{Verified:} 296 tests pass
+(293 + 3 new), and on the stored single-$T$ run the new rule reports 3 points
+not converged where the old reported 9, with no indeterminate cases, and
+tightens \texttt{measurable} from $347/360$ to $301/360$. \emph{Kept
+deliberately:} the two \texttt{*\_frac\_of\_bias} key names, although their
+denominator is now floored, because \texttt{p6\_trends} and
+\texttt{p6\_check\_outliers} consume them to exclude points and the floor makes
+those exclusions strictly better.
+
+\paragraph{Exclusion rule for a sweep: absolute, not relative.}
+\emph{Chosen:} drop points whose $\max(\text{drift},\text{spread})$ exceeds
+$1\sigma$. \emph{Why:} the separation is three orders of magnitude
+($\le0.048\sigma$ for 27 points, $20$--$35\sigma$ for three), so no tuning is
+involved. \emph{Note:} the stored \texttt{converged} flag is not usable for
+this, being the pre-D4 relative one.
+
+\paragraph{Diagnose with geometry, not per-parameter $k$.} \emph{Chosen:}
+report $|\delta|/|b_{\rm sys}|$ and $\cos\theta$ between the predicted and
+measured offset vectors in $\sigma$ units, over components with
+$|b_{\rm sys}|\ge0.5\sigma$. \emph{Why:} $k\neq1$ conflates a scale error (same
+direction, wrong length --- exactly what a scalar $k$ is built to express) with
+a direction error (which no scalar can repair and which per-parameter $k$
+misrepresents). \emph{Result:} 23 of 27 converged points are right in both
+length (to $8\%$) and direction (to ${\sim}2^\circ$); the four exceptions are
+points 11, 17, 22 and 28, and point 11's error is predominantly of scale
+($1.463$ at $\cos\theta=0.970$). Implemented as
+\texttt{scripts/inference/p6\_linearisation\_geometry.py}.
+
+\paragraph{Point 11 is the campaign's real worst case, and it is in
+proportion.} \emph{Found:} a cleanly converged point (drift $0.026\sigma$, no
+clamp saturation, exit on the decrement) with thick denominators and
+$k=1.54$ on $kT$ at $|b_{\rm sys}|=12.58\sigma$, giving $k^2\simeq2.4$.
+\emph{Why it does not change the campaign's conclusion:} it \emph{replicates}
+the 100-point design's independently measured worst case of $2.75$ rather than
+exceeding it, so the tail is a stable property of the linearisation; and no
+design coordinate marks it out in advance --- its $\mathrm{cond}(F)$ is in fact
+the lowest in the design. \emph{Consequence:} P7 carries the distribution of
+$k$ per parameter, not a single scalar, and quotes a worst case near
+$1.5\times$ in magnitude.
+
 \end{document}

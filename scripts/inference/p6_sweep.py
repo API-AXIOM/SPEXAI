@@ -188,7 +188,8 @@ def run_point(args, rec, counts_row, forward, keep):
     k = mean_d / b_sys
     se_k = se_d / np.abs(b_sys)
     # k is a ratio: only meaningful where b_sys clears this run's noise floor
-    measurable = np.abs(b_sys) > 3.0 * se_d
+    # AND is thick in absolute terms -- see measurable_mask.
+    measurable = measurable_mask(b_sys, se_d, sigma)
     verdict = convergence_verdict(move, mle, mean_d, se_d, sigma,
                                   bool(args.noiseless))
 
@@ -210,40 +211,82 @@ def run_point(args, rec, counts_row, forward, keep):
     }
 
 
+# Convergence tolerances. Drift and start-to-start spread are judged against
+# the bias, but never against a bias smaller than this floor: "10% of the bias"
+# is not a meaningful target when the bias is 1e-4 sigma.
+CONV_FLOOR_SIGMA = 1.0
+CONV_FRAC = 0.10
+# k = mean_delta / b_sys is a ratio, so it is quoted only where its DENOMINATOR
+# is thick. The inherited rule |b_sys| > 3 se_delta is a statistical
+# detectability test, correct for a NOISY run where se_delta is the scatter of
+# K independent Poisson realisations. In noiseless mode the K rows are starts
+# on ONE objective, so se_delta measures optimiser repeatability (~1e-5 sigma)
+# and the rule passes everything -- 390/390 point-parameters of the 2026-09-17
+# DEM screen, at a median margin of ~1.4e4. The absolute floor is what bites.
+K_FLOOR_SIGMA = 0.5
+
+
+def measurable_mask(b_sys, se_d, sigma):
+    """Where is k = mean_delta / b_sys worth quoting? -> bool mask per parameter.
+
+    Both halves matter. ``3 se_d`` is the statistical detectability test and is
+    the binding one in a NOISY run. ``K_FLOOR_SIGMA * sigma`` is an absolute
+    thickness floor and is the binding one in a NOISELESS run, where se_d
+    collapses to optimiser repeatability. Extracted from ``run_point`` so that
+    it can be tested at all -- the same reason ``convergence_verdict`` was.
+    """
+    return np.abs(b_sys) > np.maximum(3.0 * se_d, K_FLOOR_SIGMA * sigma)
+
+
 def convergence_verdict(move, mle, mean_d, se_d, sigma, noiseless):
     """Did this point's fit converge? -> the verdict plus what the jsonl records.
 
-    Convergence is judged against the BIAS, not against an absolute tolerance:
-    the estimator only has to place the endpoint well enough to measure
-    ``k = mean_delta / b_sys``, so the last pass's movement (and, in noiseless
-    mode, the disagreement between independent starts) must be a small
-    fraction of the bias itself.
+    Two questions are being asked, and they are kept apart on purpose:
 
-    **``resolved.any()`` is a precondition, and it is the 2026-09-10 bug.**
-    ``frac`` and ``spread_frac`` are zeroed wherever a parameter's bias is not
-    resolved above the run's noise, so a point that resolved NOTHING scored
-    ``frac.max() == 0`` and reported ``converged=True`` -- "the fit learned
-    nothing" silently became "the fit converged", which is the exact failure a
-    convergence flag exists to prevent. All six converged DEM points of that
-    run were vacuous, every one clamp-saturated at ``drift_sigma == 20.000``,
-    and their k was read as a result.
+    * **Did the optimiser finish?** That is this function, answered in sigma --
+      absolutely -- with a relative allowance for points whose bias is large
+      enough that 10% of it exceeds the floor.
+    * **Is k meaningful here?** That is the denominator's thickness, decided by
+      ``measurable`` in ``run_point``. It is not a convergence question.
+
+    Judging drift as a FRACTION OF THE BIAS alone fails at both ends, and both
+    failures were observed:
+
+    * A point with a negligible bias could never converge however well it
+      fitted. On 2026-09-17 ten of 30 single-T points reported NOT CONVERGED on
+      absolute drifts of 0.010-0.135 sigma, in line with the points that
+      passed; point 17 reported 62x the bias on 0.022 sigma of drift, because
+      its smallest resolved bias was 1.2e-4 sigma.
+    * A point that resolved NOTHING scored ``frac.max() == 0`` and called
+      itself converged -- the 2026-09-10 failure, where all six "converged" DEM
+      points were clamp-saturated at ``drift_sigma == 20.000`` and their k was
+      read as a result.
+
+    Flooring the denominator at ``CONV_FLOOR_SIGMA`` fixes both: the vacuous
+    point is judged against 1 sigma and fails on 20 sigma of drift, so
+    ``resolved.any()`` is no longer needed as a precondition and ``n_resolved``
+    is kept only as a diagnostic. The ``np.where(resolved, ..., 0.0)`` masks
+    are gone with it -- they were the mechanism of the vacuous score.
 
     In noiseless mode the K rows are the SAME objective from different starts,
-    so their disagreement is pure numerics -- a real convergence certificate,
-    unlike the last pass's movement, which point 10 showed can be 2e-4 sigma
-    while the fit is 3.4 sigma out. Judged on the same 10%-of-bias convention
-    so the two modes stay comparable.
+    so their disagreement is a real convergence certificate, unlike the last
+    pass's movement, which point 10 of the 2026-09-05 sweep showed can be 2e-4
+    sigma while the fit is 3.4 sigma from the optimum.
+
+    NOTE the two ``*_frac_of_bias`` keys keep their names for compatibility
+    with ``p6_trends`` and ``p6_check_outliers``, which use them to exclude
+    points, but their denominator is now ``max(bias, CONV_FLOOR_SIGMA)``.
     """
     bias_sig = np.abs(mean_d / sigma)
+    # diagnostic only: in noiseless mode se_d is repeatability, not an error bar
     resolved = bias_sig > 3.0 * (se_d / sigma)
-    frac = np.where(resolved, move.max(axis=0) / np.maximum(bias_sig, 1e-12),
-                    0.0)
+    scale = np.maximum(bias_sig, CONV_FLOOR_SIGMA)
+    frac = move.max(axis=0) / scale
     spread_sig = (mle.max(axis=0) - mle.min(axis=0)) / sigma
-    spread_frac = float(np.where(
-        resolved, spread_sig / np.maximum(bias_sig, 1e-12), 0.0).max())
-    converged = bool(resolved.any() and frac.max() <= 0.10)
+    spread_frac = float((spread_sig / scale).max())
+    converged = bool(frac.max() <= CONV_FRAC)
     if noiseless:
-        converged = converged and spread_frac <= 0.10
+        converged = converged and spread_frac <= CONV_FRAC
     return {"converged": converged,
             "n_resolved": int(resolved.sum()),
             "drift_frac_of_bias": float(frac.max()),
@@ -464,9 +507,9 @@ def main():
         extra = ""
         if args.noiseless:
             extra = (f"  start spread {out['start_spread_sigma']:.3f} sigma "
-                     f"({out['start_spread_frac_of_bias']:.1%} of bias)")
+                     f"({out['start_spread_frac_of_bias']:.1%} of max(bias,1sig))")
         print(f"  {out['runtime_s']:.0f}s  drift {out['drift_sigma']:.3f} "
-              f"sigma ({out['drift_frac_of_bias']:.1%} of bias){extra}  "
+              f"sigma ({out['drift_frac_of_bias']:.1%} of max(bias,1sig)){extra}  "
               f"{int(np.sum(out['measurable']))}/{len(out['names'])} "
               f"measurable{flag}", flush=True)
 
