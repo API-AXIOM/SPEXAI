@@ -280,30 +280,42 @@ def build_tierb_problem(args, rec, counts_row, tz):
     return forward, prior, pars, truth, names, mu_true, (rmf, arf)
 
 
-def batched_jacobian(forward, pars, theta):
+def batched_jacobian(forward, pars, theta, steps=None, verbose=True):
     """Central-difference Jacobian at each of K rows of ``theta``, one call.
 
     ``theta``: (K, ndim). Returns (mu0 (K, n_keep), J (K, ndim, n_keep)) --
     all 2*ndim+1 stencil points for all K rows are folded into a single
     ``forward()`` call so the per-forward CPU cost (~3s/row) is paid once,
     not once per seed per iteration.
+
+    ``steps`` overrides ``[p.step for p in pars]`` and may be (ndim,) -- one
+    step vector for every row, the reseed case, where the K rows are seeds of
+    ONE point -- or (K, ndim), one per row. The per-row form exists for the
+    P7 bias sweep, whose K rows are DIFFERENT sweep points: ``bias_sweep``
+    takes its temperature step in dex, so a single-T point's ``kT`` step is
+    ``kT ln10 STEP_DEX`` and therefore varies from row to row.
     """
     K, ndim = theta.shape
-    steps = np.array([p.step for p in pars])
+    if steps is None:
+        steps = np.array([p.step for p in pars])
+    steps = np.broadcast_to(np.atleast_2d(np.asarray(steps, dtype=np.float64)),
+                            (K, ndim))                        # (K, ndim)
     stencil = np.repeat(theta, 2 * ndim + 1, axis=0)          # (K*(2n+1), ndim)
     stencil = stencil.reshape(K, 2 * ndim + 1, ndim)
     for i in range(ndim):
-        stencil[:, 2 * i + 1, i] += steps[i]
-        stencil[:, 2 * i + 2, i] -= steps[i]
+        stencil[:, 2 * i + 1, i] += steps[:, i]
+        stencil[:, 2 * i + 2, i] -= steps[:, i]
     flat = stencil.reshape(-1, ndim)
     t0 = time.time()
     mu = forward(flat).reshape(K, 2 * ndim + 1, -1)
-    print(f"    batched stencil: {flat.shape[0]} forwards (1 call) in "
-          f"{time.time() - t0:.1f}s", flush=True)
+    if verbose:
+        print(f"    batched stencil: {flat.shape[0]} forwards (1 call) in "
+              f"{time.time() - t0:.1f}s", flush=True)
     mu0 = np.clip(mu[:, 0, :], 1e-30, None)                    # (K, n_keep)
     J = np.zeros((K, ndim, mu0.shape[1]))
     for i in range(ndim):
-        J[:, i, :] = (mu[:, 2 * i + 1, :] - mu[:, 2 * i + 2, :]) / (2.0 * steps[i])
+        J[:, i, :] = ((mu[:, 2 * i + 1, :] - mu[:, 2 * i + 2, :])
+                      / (2.0 * steps[:, i])[:, None])
     return mu0, J
 
 

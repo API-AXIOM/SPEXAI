@@ -19,10 +19,62 @@ sec:kdem (DEM), and sec:kcaveats. Choices: `DECISIONS.tex` 2026-09-17 and
 2026-09-18. Results: `~/work/data/spexai/results/` (`p6_gn_single_n30_s3.jsonl`,
 `p6_gn_dem_logT_n30_s3.jsonl`) and `logs/`.
 
-**Next: P7.** Carry k PER PARAMETER, not one scalar. Quote the worst case as
+**Next: P7.** Design FIXED 2026-09-18: **1000 points per flavour, seed 39235**
+(drawn at random, recorded in `DECISIONS.tex`). `sample_points(n, mode, seed)`
+gives a fresh hypercube per (n, seed), so both numbers must be quoted together;
+result files carry `n1000_s39235`. Carry k PER PARAMETER, not one scalar. Quote the worst case as
 ~1.5x in magnitude (k^2 ~ 2.4 at single-T point 11), which REPLICATES the old
 100-point design's 2.75 rather than exceeding it -- the tail is a stable
 property of the linearisation, and no design coordinate predicts it in advance.
+
+### P7 step 1 DONE 2026-09-18: batched Jacobian in the bias stage
+
+Branch `p7-batched-jacobian`, uncommitted. `bias_sweep.py --stage bias` now
+takes `--jacobian {serial,batched}`; `batched` folds `--point_chunk` points'
+2n+1 stencils into ONE `mle_reseed.tierb_forward` call and runs the SAME
+algebra afterwards (`fisher_bias.fisher_from_jacobian`, extracted from
+`linear_bias_fisher` so there is one implementation, not two). `serial` stays
+the default so pre-2026-09 commands reproduce; it prints a cost warning above
+50 points. `mle_reseed.batched_jacobian` now accepts per-ROW steps, which the
+sweep needs because a single-T point's kT step is `kT ln10 STEP_DEX` and so
+varies point to point.
+
+**Parity PASSES in both flavours** (2 fresh points each, current design,
+laptop CPU, `scripts/inference/check_jacobian_parity.py`):
+
+| flavour | max db/sigma | max rel d sigma_ref | max rel d cond(F) |
+|---|---|---|---|
+| single-T | 5.68e-4 | 1.49e-4 | 3.26e-4 |
+| DEM log-T | 4.99e-4 | 2.45e-4 | 5.96e-5 |
+
+That is the float32-vs-float64 level and nowhere near anything that moves an
+N*. 296 tests pass (unchanged).
+
+**The measured cost, CPU to CPU (laptop, 1 point per call):**
+
+| flavour | serial | batched | ratio |
+|---|---|---|---|
+| single-T | 46.8 s/pt | 45.7 s/pt | 1.02x |
+| DEM log-T | 3705 / 5785 s/pt | 333 s (first, builds the table) then 8.7 s | ~665x steady state |
+
+Single-T sees nothing on CPU: it is compute-bound, not call-bound, so the
+batching only removes per-call overhead and the real win has to come from GPU
+parallelism (unmeasured here -- that is the 5-10 point timing run, still to do).
+**The DEM number is the story.** The serial path goes through
+`JointOperatorModel.predict_counts_dem`, which has NO trunk/line table, NO
+contract-before-broadening and NO kinematic grouping -- all of those live in
+`BatchedJointForward`/`VectorForward` and were never wired into the Fisher
+stage, which is why P6 saw 980 s -> 12 s per iteration and this stage did not.
+The old 235-285 s/point DEM figure is also not comparable: it was the retired
+linear-T 48-node grid, and the grid is now 70 nodes.
+
+Consequence for the P7 cost model: on the serial path the DEM flavour alone
+would be ~1600 h at 1000 points, not the ~73 h the agenda assumed. The port is
+load-bearing for DEM, not an optimisation.
+
+**Still to do before the production run:** the 5-10 point GPU timing run
+(to cost 1000 x 2 on the A10/A100), and the `--point_chunk` sweep that goes
+with it.
 
 Open, deliberately not chased, in the order they would matter:
 

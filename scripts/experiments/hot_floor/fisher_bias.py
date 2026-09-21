@@ -97,6 +97,18 @@ def linear_bias_fisher(fwd, pars, d, verbose=True):
     approaching float64's limit and should be treated as unconstrained.
     """
     mu0, J = jacobian(fwd, pars, verbose=verbose)
+    return fisher_from_jacobian(mu0, J, d, verbose=verbose)
+
+
+def fisher_from_jacobian(mu0, J, d, verbose=True):
+    """The algebra of ``linear_bias_fisher``, given a Jacobian already in hand.
+
+    Split out so a caller that computes ``(mu0, J)`` some other way -- the
+    batched stencil of ``mle_reseed.batched_jacobian``, which evaluates many
+    sweep points in one emulator call -- gets bit-identical Fisher/bias numbers
+    rather than a second implementation of the same six lines. ``mu0``
+    (n_keep,) and ``J`` (n, n_keep) are exactly what ``jacobian`` returns.
+    """
     F = (J / mu0) @ J.T                                 # (n,n)
     cond_F = float(np.linalg.cond(F))
     cov = np.linalg.inv(F)

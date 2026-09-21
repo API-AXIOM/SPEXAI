@@ -331,4 +331,42 @@ the lowest in the design. \emph{Consequence:} P7 carries the distribution of
 $k$ per parameter, not a single scalar, and quotes a worst case near
 $1.5\times$ in magnitude.
 
+
+\paragraph{P7 design: 1000 points per flavour, seed 39235.} \emph{Chosen:}
+\texttt{--n\_points 1000} for both the single-temperature and the DEM log-$T$
+flavour, with \texttt{--seed 39235} (drawn at random 2026-09-18 and recorded
+here so the Latin hypercube is reproducible). \emph{Why the seed is recorded
+rather than defaulted:} \texttt{bias\_sweep.sample\_points(n, mode, seed)}
+generates a fresh hypercube for every $(n,\text{seed})$ pair, so a different
+$n$ is a different design and not an extension of an existing one; the seed is
+the only handle on the exact point set. \emph{Consequence:} every P7 result
+file carries \texttt{n1000\_s39235} in its name, and any reproduction must use
+both numbers together.
+
+
+\paragraph{The bias stage's Jacobian is batched; the serial path is kept as
+the default.} \emph{Chosen:} \texttt{bias\_sweep --stage bias} gains
+\texttt{--jacobian batched}, which folds \texttt{--point\_chunk} sweep points'
+$2n+1$ stencils into one call of the batched forward P6 ran
+(\texttt{mle\_reseed.tierb\_forward}) and then applies the identical Fisher
+algebra, extracted as \texttt{fisher\_bias.fisher\_from\_jacobian} so the two
+paths cannot drift apart. \emph{Why the serial path stays the default:} every
+bias result before 2026-09 was produced by it, and a default flip would make
+those commands silently un-reproducible; the risk of forgetting the flag is
+handled by a printed cost warning above 50 points instead. \emph{Verified:} on
+two fresh points per flavour, $b_{\rm sys}$ agrees to $5.7\times10^{-4}\sigma$
+(single-$T$) and $5.0\times10^{-4}\sigma$ (DEM), with $\sigma_{\rm ref}$ to
+$2.5\times10^{-4}$ relative --- the float32-versus-float64 level, and far below
+anything that moves an $N_\star$ (\texttt{check\_jacobian\_parity.py}).
+\emph{Found on the way:} the serial DEM path calls
+\texttt{JointOperatorModel.predict\_counts\_dem}, which carries none of the DEM
+accelerations (trunk table, contract-before-broadening, kinematic grouping) ---
+they live only in the batched forward. Laptop CPU cost is $3705$--$5785$\,s per
+DEM point serially against $8.7$\,s batched once the table is built, so the
+serial DEM flavour alone would be ${\sim}1600$\,h at 1000 points against the
+${\sim}73$\,h the P7 agenda assumed. \emph{Consequence:} the port is a
+prerequisite for the DEM flavour, not a speed optimisation, and the single-$T$
+speedup remains unmeasured on CPU (1.02x, compute-bound) pending the GPU
+timing run.
+
 \end{document}

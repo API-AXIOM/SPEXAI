@@ -37,6 +37,12 @@ Two stages, because they want different machines:
                    loop and keeps peak memory at one element (~0.4 GB).
 ``--stage bias``   The emulator Jacobian + Fisher solve. GPU-friendly, needs no
                    caches, and consumes the npz the truth stage wrote.
+                   ``--jacobian batched`` (what P7 runs) folds every stencil
+                   point of ``--point_chunk`` sweep points into ONE emulator
+                   call via the batched forward P6 used; ``serial`` is the
+                   original call-per-stencil-point path, kept as the default
+                   so earlier commands reproduce. Check one against the other
+                   with ``check_jacobian_parity.py``, not by assumption.
 
 Both stages checkpoint per unit of work and skip what is already on disk.
 
@@ -309,6 +315,65 @@ def build_pars(fwd, point, log_norm_truth, mode):
     return out
 
 
+def _point_inputs(args, pt, counts_row, keep):
+    """Per-point pieces shared by both Jacobian paths.
+
+    Returns ``(d, log_norm_truth, pars)`` or ``None`` when the point has no
+    in-band truth counts. ``d`` is the SPEX truth rescaled to ``N_REF``
+    in-band counts; ``log_norm_truth`` carries that rescaling, so the emulator
+    is evaluated at the same normalisation the truth was rescaled to.
+    """
+    d_ref = counts_row[keep]
+    if d_ref.sum() <= 0:
+        return None
+    s = N_REF / d_ref.sum()
+    d = d_ref * s
+    log_norm_truth = float(np.log10(NORM_REF * s))
+    pars = build_pars(None, pt, log_norm_truth, args.mode)
+    return d, log_norm_truth, pars
+
+
+def _bias_record(i, pt, pars, b_sys, sigma_ref, cond_F, contained_i,
+                 log_norm_truth, rmf, arf, runtime_s):
+    # contained: fraction of the DEM on the grid (1 for single-T), kept
+    # next to b_sys so truncated points can be read as such, not excluded
+    return {"point": i, "params": pt, "names": [p.name for p in pars],
+            "truth": [p.truth for p in pars], "b_sys": b_sys.tolist(),
+            "sigma_ref": sigma_ref.tolist(), "n_ref": N_REF,
+            "contained": float(contained_i),
+            "log_norm_truth": log_norm_truth, "cond_F": cond_F,
+            "rmf": os.path.basename(rmf), "arf": os.path.basename(arf),
+            "runtime_s": runtime_s}
+
+
+def _write_bias(outp, rec, n_points):
+    with open(outp, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    b_sys = np.array(rec["b_sys"])
+    sigma_ref = np.array(rec["sigma_ref"])
+    worst = int(np.argmax(np.abs(b_sys) / sigma_ref))
+    # cond(F) is printed per point because this loop runs unattended over
+    # hundreds of points: a near-singular F yields a finite, plausible N*
+    # from two meaningless numbers, and nothing else in the output would
+    # reveal it. See linear_bias_fisher's docstring for the n_h case.
+    warn = "  !! NEAR-SINGULAR F" if rec["cond_F"] > COND_F_WARN else ""
+    print(f"[{rec['point'] + 1}/{n_points}] {rec['runtime_s']:.1f}s  worst "
+          f"{rec['names'][worst]} b/sig@Nref="
+          f"{b_sys[worst] / sigma_ref[worst]:+.3f}  "
+          f"cond(F)={rec['cond_F']:.1e}{warn}", flush=True)
+
+
+def _serial_forward(args, response, keep):
+    """The original point-at-a-time forward: ``campaign.Forward``."""
+    emu = JointOperatorModel(models_dir=args.store, device=args.device)
+    restrict_to_band(emu)
+    dem = gaussian_logT_dem()[0] if args.mode == "dem" else None
+    return Forward(emu, response, Absorption.default(), keep, args.mode,
+                   dem=dem)
+
+
 def stage_bias(args, points, truth_path, outp):
     tz = np.load(truth_path, allow_pickle=True)
     check_truth_dem_param(tz)
@@ -322,60 +387,103 @@ def stage_bias(args, points, truth_path, outp):
 
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
-    absorption = Absorption.default()
     keep = band_mask(response, exclude=EXCLUDE_NONE)
-    emu = JointOperatorModel(models_dir=args.store, device=args.device)
-    restrict_to_band(emu)
-    dem = gaussian_logT_dem()[0] if args.mode == "dem" else None
-    fwd = Forward(emu, response, absorption, keep, args.mode, dem=dem)
 
     done = {}
     if os.path.exists(outp) and args.resume:
         with open(outp) as f:
             done = {int(json.loads(l)["point"]): 1 for l in f if l.strip()}
         print(f"resuming bias: {len(done)} points already done", flush=True)
+    todo = [i for i in range(len(points)) if i not in done]
 
-    for i, pt in enumerate(points):
-        if i in done:
-            continue
-        d_ref = counts[i][keep]
-        if d_ref.sum() <= 0:
+    if args.jacobian == "serial":
+        _stage_bias_serial(args, points, counts, contained, keep, response,
+                           rmf, arf, todo, outp)
+    else:
+        _stage_bias_batched(args, points, counts, contained, keep, response,
+                            rmf, arf, todo, outp)
+
+
+def _stage_bias_serial(args, points, counts, contained, keep, response,
+                       rmf, arf, todo, outp):
+    fwd = _serial_forward(args, response, keep)
+    for i in todo:
+        pt = points[i]
+        got = _point_inputs(args, pt, counts[i], keep)
+        if got is None:
             print(f"point {i}: zero in-band truth, skipped", flush=True)
             continue
-        s = N_REF / d_ref.sum()
-        d = d_ref * s
-        log_norm_truth = float(np.log10(NORM_REF * s))
+        d, log_norm_truth, pars = got
         # the DEM model has to carry THIS point's shape, not the fiducial's
         if args.mode == "dem":
             fwd.dem = gaussian_logT_dem(mean=pt["logT_mean"],
                                         sigma=pt["logT_sigma"])[0]
-        pars = build_pars(fwd, pt, log_norm_truth, args.mode)
         t0 = time.time()
         b_sys, sigma_ref, cond_F = linear_bias_fisher(fwd, pars, d,
                                                       verbose=False)
-        # contained: fraction of the DEM on the grid (1 for single-T), kept
-        # next to b_sys so truncated points can be read as such, not excluded
-        rec = {"point": i, "params": pt, "names": [p.name for p in pars],
-               "truth": [p.truth for p in pars], "b_sys": b_sys.tolist(),
-               "sigma_ref": sigma_ref.tolist(), "n_ref": N_REF,
-               "contained": float(contained[i]),
-               "log_norm_truth": log_norm_truth, "cond_F": cond_F,
-               "rmf": os.path.basename(rmf), "arf": os.path.basename(arf),
-               "runtime_s": time.time() - t0}
-        with open(outp, "a") as f:
-            f.write(json.dumps(rec) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        worst = int(np.argmax(np.abs(b_sys) / sigma_ref))
-        # cond(F) is printed per point because this loop runs unattended over
-        # hundreds of points: a near-singular F yields a finite, plausible N*
-        # from two meaningless numbers, and nothing else in the output would
-        # reveal it. See linear_bias_fisher's docstring for the n_h case.
-        warn = "  !! NEAR-SINGULAR F" if cond_F > COND_F_WARN else ""
-        print(f"[{i + 1}/{len(points)}] {rec['runtime_s']:.1f}s  worst "
-              f"{rec['names'][worst]} b/sig@Nref="
-              f"{b_sys[worst] / sigma_ref[worst]:+.3f}  "
-              f"cond(F)={cond_F:.1e}{warn}", flush=True)
+        rec = _bias_record(i, pt, pars, b_sys, sigma_ref, cond_F, contained[i],
+                           log_norm_truth, rmf, arf, time.time() - t0)
+        _write_bias(outp, rec, len(points))
+
+
+def _stage_bias_batched(args, points, counts, contained, keep, response,
+                        rmf, arf, todo, outp):
+    """Same Fisher solve, but every point's 2n+1 stencil in ONE emulator call.
+
+    The serial path pays the per-forward overhead 2n+1 times per point on a
+    forward built for one row at a time (262 s/point measured on laptop CPU,
+    which is 145 CPU-h for P7's 1000 points x 2 flavours). This path reuses the
+    primitive P6 already ran on the GPU: ``mle_reseed.tierb_forward`` (a
+    batched ``VectorForward``) driven by ``mle_reseed.batched_jacobian``, which
+    folds ``point_chunk * (2n+1)`` stencil rows into a single call. The algebra
+    afterwards is ``fisher_bias.fisher_from_jacobian`` -- the same six lines
+    the serial path runs, not a reimplementation.
+
+    Two differences from the serial path, both deliberate:
+
+    * **The DEM shape is not pinned per point.** ``VectorForward`` carries the
+      log-T Gaussian as a shape FAMILY with ``logT_mean``/``logT_sigma`` as
+      ordinary vector components, so the per-point ``fwd.dem`` rebuild the
+      serial path needs disappears and those Jacobian columns come for free.
+    * **The forward runs in float32** (``VectorForward.__call__`` casts), where
+      the serial path is float64 on CPU. The central differences are ~1e-4-1e-3
+      of ``mu``, so ~1e-7 relative forward noise lands as ~1e-3 relative noise
+      in J. Check it, do not assume it: ``check_jacobian_parity.py`` compares
+      the two paths' ``b_sys``/``sigma_ref``/``cond(F)`` point by point.
+    """
+    from mle_reseed import tierb_forward, batched_jacobian
+    from fisher_bias import fisher_from_jacobian
+
+    # names are a property of the mode, not the point, so the forward is built
+    # ONCE for the whole sweep -- see tierb_forward's docstring
+    probe = build_pars(None, points[todo[0] if todo else 0], 0.0, args.mode)
+    names = [p.name for p in probe]
+    fwd = tierb_forward(args, names, response, keep)
+
+    for lo in range(0, len(todo), args.point_chunk):
+        idx = todo[lo:lo + args.point_chunk]
+        rows = []
+        for i in idx:
+            got = _point_inputs(args, points[i], counts[i], keep)
+            if got is None:
+                print(f"point {i}: zero in-band truth, skipped", flush=True)
+                continue
+            rows.append((i,) + got)
+        if not rows:
+            continue
+        theta = np.array([[p.truth for p in r[3]] for r in rows])   # (K, ndim)
+        steps = np.array([[p.step for p in r[3]] for r in rows])    # (K, ndim)
+        t0 = time.time()
+        mu0, J = batched_jacobian(fwd, None, theta, steps=steps,
+                                  verbose=False)
+        per_point = (time.time() - t0) / len(rows)
+        for k, (i, d, log_norm_truth, pars) in enumerate(rows):
+            b_sys, sigma_ref, cond_F = fisher_from_jacobian(mu0[k], J[k], d,
+                                                            verbose=False)
+            rec = _bias_record(i, points[i], pars, b_sys, sigma_ref, cond_F,
+                               contained[i], log_norm_truth, rmf, arf,
+                               per_point)
+            _write_bias(outp, rec, len(points))
 
 
 # --- reporting --------------------------------------------------------------
@@ -444,7 +552,61 @@ def main():
     ap.add_argument("--summarise", action="store_true")
     ap.add_argument("--target_counts", type=float, default=1e6,
                     help="in-band counts at which to report bias/sigma")
+    # --- Jacobian path (--stage bias) ---------------------------------------
+    ap.add_argument("--jacobian", choices=["serial", "batched"],
+                    default="serial",
+                    help="serial = campaign.Forward, one stencil point per "
+                         "emulator call (262 s/point on laptop CPU); it is "
+                         "the default only so pre-2026-09 runs reproduce "
+                         "command-for-command. batched = one call per "
+                         "--point_chunk points via mle_reseed.tierb_forward, "
+                         "which is what P7 runs")
+    ap.add_argument("--point_chunk", type=int, default=4,
+                    help="sweep points per batched emulator call. Each costs "
+                         "(2n+1) rows (25 single-T, 27 DEM), and a DEM row "
+                         "costs the temperature grid on top, so raise this on "
+                         "a GPU and leave it small on a laptop")
+    # forward knobs, spelled as in mle_reseed/p6_sweep so one command carries
+    # across the three scripts; ignored by --jacobian serial
+    ap.add_argument("--chunk", type=int, default=32,
+                    help="emulator rows per sub-batch (batched only)")
+    ap.add_argument("--gchunk", type=int, default=None,
+                    help="DEM only: temperature-grid points per emulator call")
+    ap.add_argument("--echunk", type=int, default=None)
+    ap.add_argument("--mem_gb", type=float, default=2.0)
+    ap.add_argument("--compile", action="store_true")
+    ap.add_argument("--no_table", action="store_true",
+                    help="DEM only: disable the fixed-grid trunk/line table")
+    ap.add_argument("--no_contract", action="store_true",
+                    help="DEM only: broaden per element instead of "
+                         "contracting first")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="force deterministic CUDA kernels. The line "
+                         "deposit's index_add_ has repeated indices, so "
+                         "identical parameters otherwise return "
+                         "different counts -- and "
+                         "a central difference is a DIFFERENCE of two such "
+                         "calls, which is where that jitter lands")
     args = ap.parse_args()
+
+    if args.stage == "bias" and args.jacobian == "batched":
+        # must precede the first CUDA allocation
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF",
+                              "expandable_segments:True")
+        if args.deterministic:
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+            torch.use_deterministic_algorithms(True)
+            print("deterministic algorithms ON", flush=True)
+        elif args.device != "cpu":
+            print("WARNING: batched Jacobian on CUDA without --deterministic; "
+                  "the line deposit's index_add_ sums in a varying order, so "
+                  "the two arms of each central difference carry independent "
+                  "jitter", flush=True)
+    if (args.stage == "bias" and args.jacobian == "serial"
+            and args.n_points > 50):
+        print(f"WARNING: --jacobian serial at {args.n_points} points is "
+              f"~{args.n_points * 262 / 3600:.0f} CPU-h at the measured "
+              f"262 s/point. P7 runs --jacobian batched.", flush=True)
 
     os.makedirs(args.out, exist_ok=True)
     tag = f"{args.mode}_n{args.n_points}_s{args.seed}"
