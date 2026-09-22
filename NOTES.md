@@ -3,11 +3,89 @@
 Running log of context, progress and open questions. Decisions and their
 reasoning go in `DECISIONS.tex`.
 
-## NEXT ACTIONS (2026-09-22)
+## RESUME HERE: P8 (Tier C) -- posterior confirmation
 
-**P7 is COMPLETE and written up** (both flavours, 1000 points each, seed 39235)
--- see the P7 sections below. **Next is P8**; its targets and the one open
-decision are in "NEXT: P8" below.
+**P7 is COMPLETE and written up** (both flavours, 1000 points, seed 39235);
+P6 before it. Everything below the P8 block is history, kept for reference.
+
+
+Targets, from P7:
+1. **The cold + narrow corner** (the real mode): kT < 1.5 keV, sigma_v < 150
+   km/s, both flavours. Worst raw screen values 2.81 sigma (single-T) and
+   2.05 sigma (DEM), both on sigma_v.
+2. **Two safe controls** from the hot bulk (kT > 2.5 keV), where nothing
+   exceeds 1 sigma, as the positive control that the fit reproduces the screen.
+3. **NOT the Mn pair** -- documented as a design artifact (Mn/Fe ~ 4x solar is
+   not an ICM composition). Revisit only if a referee asks.
+
+**Open decision before starting: P8's target median precision**, which picks
+the sampler mechanically (agenda rule: worse than ~0.1 sigma -> emcee, better
+-> nautilus). The effects to resolve are ~1-3 sigma, so emcee's own 0.104
+sigma of MC error is ~5% of the smallest effect, which looks sufficient.
+
+**Known blocker (VERIFIED 2026-09-22):** `scripts/inference/tier_c_mcmc.py:95`
+builds `VectorForward(...)` with no `dem=` argument, while `build_pars` at
+line 91 hands it `logT_mean`/`logT_sigma` under `--mode dem`. So `--mode dem`
+constructs a single-T forward with DEM parameter names and cannot work. Fix
+before target 1's DEM half; single-T targets are unaffected.
+
+### What P8 needs on disk
+
+| what | where |
+|---|---|
+| screens (pick targets from these) | `~/work/data/spexai/results/bias_sweep/bias_{single,dem}_n1000_s39235.jsonl` |
+| truths (tier_c needs BOTH jsonl + npz from the SAME run) | `.../truth_{single,dem}_n1000_s39235.npz` (single-T npz is on the LAPTOP; DEM on the cluster) |
+| driver | `scripts/inference/tier_c_mcmc.py` (needs the dem fix) |
+| screening/diagnostic helper | `scripts/inference/p7_screen_diag.py` (untracked) |
+| figures | `docs/figures/p7_*.png`, written by `scripts/inference/plot_p7_sweep.py` (untracked) |
+
+`tier_c_mcmc.py` selects worst/safe points from a bias jsonl by `--n_worst` /
+`--n_safe`, which ranks on the SCREEN's own worst parameter -- for P8 the
+targets are defined by a REGION (cold + narrow), so check what it selects
+before trusting the default ranking.
+
+### Open questions to settle before running
+
+1. **Target median precision** (above). Picks the sampler mechanically.
+2. **How many points, and how are they chosen** -- `--n_worst`'s ranking, or an
+   explicit cold+narrow cut? P7 says the tail is a region, not a few outliers.
+3. **Which count level.** The screen is quoted at 1e6 in-band counts; the cold
+   points' N* is ~4.7e5, so the answer depends on the level P8 injects at.
+4. **Whether to apply k** to the screen values P8 is compared against, or to
+   compare raw and let P8 measure k at these points directly (it measures the
+   same ratio P6 did, at the points that actually matter).
+
+## P6 open threads (history, not P8 blockers)
+
+Open, deliberately not chased, in the order they would matter:
+
+1. **The scatter in k is unattributed** (+-0.11 DEM, +-0.20 single-T) between
+   b_sys's own error (FD Jacobian + Fisher solve -- random, averages away over
+   a sweep) and genuine second-order curvature (structured, would need carrying
+   per parameter). Discriminator: does |k-1| shrink as |b_sys|/sigma grows? It
+   does for single-T (rho = -0.38, p < 1e-4, log-log slope +0.39, from
+   `p6_trends`); not run for DEM.
+2. **The optimiser fixes D2 + D5** (see below). Required before any rerun of
+   this stage; not required for the current result.
+3. **The cold end**: whether b_sys itself is trustworthy below ~1.5 keV is
+   still open (2026-09-16 section). It did NOT affect convergence -- the three
+   coldest points (0.765, 0.878, 0.955 keV) all converged cleanly, and the
+   three failures sit at 0.851, 2.043 and 6.187 keV, i.e. scattered.
+
+To rerun either screen (truth -> bias -> GN, resumable per stage, ~3.4 h for 30
+single-T points on an A10):
+
+```bash
+export MKL_THREADING_LAYER=GNU
+NPOINTS=30 SEED=3 MODE=single GN_ITER=20 COUNTS=1e9 NSEEDS=8 \
+    nohup bash scripts/inference/p6_overnight.sh > logs/p6_single.log 2>&1 &
+```
+
+`p6_overnight.sh` defaults `GN_ITER` to 12 and silently overrides p6_sweep's
+default of 20, so pass it explicitly. A fresh NPOINTS is a DIFFERENT Latin
+hypercube, not an extension.
+
+
 
 **Both P6 screens are DONE, analysed and written up.** The answer is that the
 linearised screen is trustworthy: **k = 1 to within ~10%, with a real tail to
@@ -232,58 +310,6 @@ the figure paths are relative -- the old P1c issue, still open.
 **Left undone on purpose:** the per-parameter k correction is still not applied
 in code (`--apply_k` never written). The text carries the worst case ~1.5x
 instead. If P8 comes back consistent with the screen, that may be all it needs.
-
-## NEXT: P8 (Tier C) -- posterior confirmation
-
-Targets, from P7:
-1. **The cold + narrow corner** (the real mode): kT < 1.5 keV, sigma_v < 150
-   km/s, both flavours. Worst raw screen values 2.81 sigma (single-T) and
-   2.05 sigma (DEM), both on sigma_v.
-2. **Two safe controls** from the hot bulk (kT > 2.5 keV), where nothing
-   exceeds 1 sigma, as the positive control that the fit reproduces the screen.
-3. **NOT the Mn pair** -- documented as a design artifact (Mn/Fe ~ 4x solar is
-   not an ICM composition). Revisit only if a referee asks.
-
-**Open decision before starting: P8's target median precision**, which picks
-the sampler mechanically (agenda rule: worse than ~0.1 sigma -> emcee, better
--> nautilus). The effects to resolve are ~1-3 sigma, so emcee's own 0.104
-sigma of MC error is ~5% of the smallest effect, which looks sufficient.
-
-**Known blocker:** `tier_c_mcmc.py` does NOT pass `dem=` to VectorForward, so
-its DEM mode is broken. That must be fixed before target 1's DEM half.
-
-**Still to do before the production run:** the 5-10 point GPU timing run
-(to cost 1000 x 2 on the A10/A100), and the `--point_chunk` sweep that goes
-with it.
-
-Open, deliberately not chased, in the order they would matter:
-
-1. **The scatter in k is unattributed** (+-0.11 DEM, +-0.20 single-T) between
-   b_sys's own error (FD Jacobian + Fisher solve -- random, averages away over
-   a sweep) and genuine second-order curvature (structured, would need carrying
-   per parameter). Discriminator: does |k-1| shrink as |b_sys|/sigma grows? It
-   does for single-T (rho = -0.38, p < 1e-4, log-log slope +0.39, from
-   `p6_trends`); not run for DEM.
-2. **The optimiser fixes D2 + D5** (see below). Required before any rerun of
-   this stage; not required for the current result.
-3. **The cold end**: whether b_sys itself is trustworthy below ~1.5 keV is
-   still open (2026-09-16 section). It did NOT affect convergence -- the three
-   coldest points (0.765, 0.878, 0.955 keV) all converged cleanly, and the
-   three failures sit at 0.851, 2.043 and 6.187 keV, i.e. scattered.
-
-To rerun either screen (truth -> bias -> GN, resumable per stage, ~3.4 h for 30
-single-T points on an A10):
-
-```bash
-export MKL_THREADING_LAYER=GNU
-NPOINTS=30 SEED=3 MODE=single GN_ITER=20 COUNTS=1e9 NSEEDS=8 \
-    nohup bash scripts/inference/p6_overnight.sh > logs/p6_single.log 2>&1 &
-```
-
-`p6_overnight.sh` defaults `GN_ITER` to 12 and silently overrides p6_sweep's
-default of 20, so pass it explicitly. A fresh NPOINTS is a DIFFERENT Latin
-hypercube, not an extension.
-
 
 ## Current work: DEM log-T switch (branch `dem-logT-switch`, uncommitted)
 
