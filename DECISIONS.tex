@@ -369,4 +369,31 @@ prerequisite for the DEM flavour, not a speed optimisation, and the single-$T$
 speedup remains unmeasured on CPU (1.02x, compute-bound) pending the GPU
 timing run.
 
+
+\paragraph{P7 figures show the raw screen, not the $k$-corrected one.}
+\emph{Chosen:} every P7 figure plots $|b_{\rm sys}|/\sigma$ as measured, with
+the worst-case $k=1.54$ carried as an annotated arrow on the $N_\star$ figure.
+\emph{Why:} $k$ is a small multiplicative correction with a real spread
+(see the $k$ caveats in the methodology note), so folding it into the points would bury both the
+correction and its uncertainty inside marks the reader cannot decompose; an
+annotation states the size of the effect without pretending to a precision the
+factor does not have.
+
+\paragraph{The P7 tail is confined, and the two failure modes are treated
+differently.} \emph{Found:} the $>1\sigma$ points are confined to cold
+temperatures and low $\sigma_v$ (plus narrow width for the DEM) by a
+two-sample KS test per design axis, and are uniform in all eight abundance axes
+and $n_{\rm H}$; separately, two single-temperature points reach $4.1$ and
+$5.3\sigma$ on Mn at a Mn/Fe ratio near $4\,Z_\odot$. \emph{Chosen:} P8 confirms
+the cold, narrow corner --- a real group/cool-core regime, where low $T$ and
+low $\sigma_v$ are physically correlated --- and documents the Mn pair as a
+design artifact rather than spending posterior runs on it. \emph{Why:} Mn and
+Fe are both type-Ia products and track each other in the ICM, so the exposing
+abundance pattern is not one a real object presents; the emulator weakness is
+real but the configuration that reveals it is not observable. \emph{Caveat on
+record:} the cold mode's absolute size is $0.86$\,km\,s$^{-1}$ median
+($3.05$\,km\,s$^{-1}$ at p90) against a ${\sim}2$\,km\,s$^{-1}$ statistical error at $10^{6}$
+counts, and the $1.87\kev$ band floor is a gate-valve-closed property, so the
+whole cold-end result is conditional on that configuration.
+
 \end{document}

@@ -3,7 +3,11 @@
 Running log of context, progress and open questions. Decisions and their
 reasoning go in `DECISIONS.tex`.
 
-## NEXT ACTIONS (2026-09-18)
+## NEXT ACTIONS (2026-09-22)
+
+**P7 is COMPLETE and written up** (both flavours, 1000 points each, seed 39235)
+-- see the P7 sections below. **Next is P8**; its targets and the one open
+decision are in "NEXT: P8" below.
 
 **Both P6 screens are DONE, analysed and written up.** The answer is that the
 linearised screen is trustworthy: **k = 1 to within ~10%, with a real tail to
@@ -71,6 +75,182 @@ linear-T 48-node grid, and the grid is now 70 nodes.
 Consequence for the P7 cost model: on the serial path the DEM flavour alone
 would be ~1600 h at 1000 points, not the ~73 h the agenda assumed. The port is
 load-bearing for DEM, not an optimisation.
+
+### P7 step 2 DONE 2026-09-21/22: truth stage, both flavours, 1000 points
+
+`truth_single_n1000_s39235.npz` (laptop, 6 threads, 2.25 h) and
+`truth_dem_n1000_s39235.npz` (cluster) both complete. The single-T npz
+validated: counts (1000, 60000), all finite, no zero-in-band rows, 30 elements,
+`rsl_Hp_L_2025.rmf` + `rsl_extflat5_GVC_2025.arf`. It lives on the LAPTOP and
+must be rsynced to `~/data/spexai_data/results/bias_sweep/` for the bias stage.
+
+Measured truth-stage rates (per element, 1000 points), for future costing:
+
+| run | s/element-point | 30-element total |
+|---|---|---|
+| laptop single-T, 6 threads, idle | 0.267 (flat 266-272 s/element) | 2.25 h |
+| cluster DEM, CONTENDED | 2.95 | 24.6 h |
+
+The DEM/single-T intrinsic ratio is ~1.6x (2-point runs), so most of the 11x
+gap between those rows was contention from unrelated code on the node, not the
+flavour. Per-element cost is flat across all 30 elements, so the first element's
+line predicts the total.
+
+### P7 step 3: single-T bias stage COMPLETE (1000 points), screened 2026-09-22
+
+`bias_single_n1000_s39235.jsonl` (on the laptop too). At 1e6 in-band counts
+every parameter's MEDIAN bias is <=0.23 sigma; Fe binds in the median
+(0.233 sigma, median N* 1.8e7), then kT (0.205) and log_norm (0.184).
+
+**File is clean** (`scripts/inference/p7_screen_diag.py`, NEW + untracked):
+1000 records, 0 duplicates, 0 missing.
+
+**Conditioning is NOT the story.** cond(F) p50 2.7e7, p99 4.9e8, max 3.4e9 --
+ZERO points above COND_F_WARN=1e10. Every tail below is physics.
+
+**The tail is sigma_v at COLD temperatures, and nothing else.** 77/1000 points
+exceed 1 sigma on sigma_v (max 2.81). Spearman: kT rho=-0.705 (p~1e-151),
+sigma_v itself rho=-0.533. The sign is NEGATIVE -- cold and narrow-lined is
+worse, not hot and broad:
+
+| kT band | points | >1 sigma | max b/sigma |
+|---|---|---|---|
+| 0.7-1.0 | 117 | 44 (37.6%) | 2.81 |
+| 1.0-1.5 | 132 | 28 (21.2%) | 2.36 |
+| 1.5-2.5 | 167 | 5 (3.0%) | 1.30 |
+| 2.5-5.0 | 225 | 0 | 0.81 |
+| 5.0-15  | 359 | 0 | 0.71 |
+
+The whole tail sits below 1.89 keV. Above 2.5 keV NOTHING exceeds 1 sigma on
+any parameter. Physically consistent: the band starts at 1.87 keV, so a sub-2
+keV plasma is in-band only through its exponential tail and sigma_v rests on a
+few narrow lines, where a line-shape error is large in sigma units.
+
+**This is the cold-end question (open item 3) made concrete** -- but P6 already
+covers the ratio there: k = 0.96-1.02 at 0.765/0.878/0.955 keV, and N* depends
+only on b/sigma, which is what k validates. So the tail is most likely real.
+
+**Other tails, all tiny:** Mn 2 points (5.29, 4.11 sigma) ordered by a_Mn
+(rho +0.204) and low a_Fe (-0.123), NOT by cond(F) (rho 0.028, p=0.37) --
+a genuine second mode, high Mn against a weak Fe anchor. Fe 4 points, S 2, kT 1.
+
+### P7 step 4: DEM bias stage COMPLETE (1000 points), screened 2026-09-22
+
+`bias_dem_n1000_s39235.jsonl`. Clean file (1000/0 dupes/0 missing), cond(F)
+p50 5.9e7, max 2.3e9, ZERO above 1e10.
+
+**The DEM flavour is uniformly BETTER than single-T**, which was not the prior
+expectation (the P1a ARF redo had made DEM the tighter case):
+
+| param | DEM median | single-T median | DEM max | single-T max |
+|---|---|---|---|---|
+| Fe | 0.105 | 0.233 | 0.624 | 1.279 |
+| thermal | 0.099 / 0.102 (logT_mean/sigma) | 0.205 (kT) | 0.498 / 0.383 | 1.182 |
+| sigma_v | 0.083 | 0.131 | 2.047 | 2.813 |
+| Mn | 0.015 | 0.030 | 0.375 | 5.292 |
+
+Averaging over a temperature distribution smooths the emulator's
+temperature-local error; there is no DEM analogue of single-T's Mn outlier.
+
+**Same tail structure, weaker.** Only sigma_v exceeds 1 sigma anywhere:
+31/1000 points, max 2.047 (the global worst over BOTH flavours and all
+parameters). Spearman: sigma_v rho=-0.613, logT_mean rho=-0.542 -- cold and
+narrow again.
+
+| kT_mean band | points | >1 sigma | max |
+|---|---|---|---|
+| 0.7-1.0 | 117 | 17 (14.5%) | 2.05 |
+| 1.0-1.5 | 132 | 13 (9.8%) | 1.94 |
+| 1.5-2.5 | 166 | 1 (0.6%) | 1.06 |
+| 2.5-5.0 | 227 | 0 | 0.76 |
+| 5.0-15  | 358 | 0 | 0.53 |
+
+**Containment confound, named not chased:** the tail points are also the least
+contained (median 0.844 vs the design's 0.956, min 0.543) because a cold
+Gaussian in log T runs off the 0.7 keV grid floor. Truncation is identical in
+truth and emulator so b_sys stays a fair comparison, but the cold tail points
+are partly a different object from the well-contained bulk.
+
+**P7 headline, both flavours:** above ~2.5 keV NOTHING exceeds 1 sigma at 1e6
+counts, on any parameter, in either flavour. All residual risk is cold
+(<1.9 keV single-T, <1.7 keV DEM) and concentrated in sigma_v.
+
+### P7 figures BUILT 2026-09-22
+
+`scripts/inference/plot_p7_sweep.py` (NEW, untracked) -> `docs/figures/`:
+
+| fig | file | label | what it carries |
+|---|---|---|---|
+| A | `p7_safety_map.png` | fig:p7safety | worst b/sigma vs kT, coloured by who binds |
+| B | `p7_bias_by_param.png` | fig:p7params | all 12/13 distributions, >1 sigma called out |
+| C | `p7_nstar_vs_temperature.png` | fig:p7nstar | the same as an exposure limit |
+| D | `p7_mn_outliers.png` | fig:p7mn | Mn binned medians in (a_Mn, a_Fe) + the 2 points |
+
+Colour is by ROLE and capped at 3 hues (sigma_v blue, Fe orange, thermal aqua,
+everything else muted grey) because scatter puts all pairs on screen and only
+the first three palette slots validate under that condition. Same mapping in
+all four figures. Bias is RAW, not k-corrected -- figure C carries the
+worst-case k=1.54 (N*/2.4) as an annotated arrow instead.
+
+Figure D started as a per-point scatter and was REBUILT as binned medians: 1000
+dots of nearly the same blue read as noise and the rho=+0.20 ordering was
+invisible one point at a time.
+
+### P7 figure E 2026-09-22: the tail IS confined, in 2-3 axes only
+
+`p7_corner_single.png` / `p7_corner_dem.png` -- full design-space corner, all
+1000 points grey, the >1 sigma points red, marginals on the diagonal.
+Quantified by `p7_screen_diag.py --confinement` (2-sample KS, tail vs bulk,
+per axis, + the tail's share of the lowest design quartile):
+
+| axis | single-T | DEM |
+|---|---|---|
+| temperature | KS 0.684, p 2e-36, 86% in lowest quartile | KS 0.753, p 5e-18, 97% |
+| sigma_v | KS 0.566, p 4e-24, 70% | KS 0.650, p 7e-13, 81% |
+| logT_sigma | -- | KS 0.461, p 2e-06, 58% (narrow DEMs) |
+| a_S | KS 0.218, p 1e-03, 8% (INVERTED: high S) | KS 0.405, p 6e-05, 6% |
+| the other 8 abundances + n_h | p 0.03-0.95, share ~20-30% = no confinement | same |
+
+So the answer is yes and it is narrow: **cold + kinematically narrow**, plus a
+weak preference for HIGH sulphur, and the DEM adds narrow width. Every other
+abundance and n_h is consistent with the design's own uniform marginal, i.e.
+the tail is not an abundance-corner effect. The single-T Mn pair is a separate
+thing and does NOT live in this region (it is a_Mn-high/a_Fe-low, see fig D).
+
+### P7 CLOSED 2026-09-22 -- written up
+
+`docs/inference_methodology.tex` has a new `sec:p7sweep` inside `sec:biassweep`:
+design + seed, the batched-Jacobian cost argument and its parity check, both
+1000-point tables (`tab:p7single`, `tab:p7dem`), the confinement table
+(`tab:p7confine`), the physical-realism discussion, and all five figures
+(`fig:p7safety`, `fig:p7params`, `fig:p7nstar`, `fig:p7corner`, `fig:p7mn`).
+`DECISIONS.tex` has two new entries (raw-not-k-corrected figures; the two
+failure modes treated differently). Both compile; 0 undefined references on the
+second pass. NOTE the methodology PDF only builds from INSIDE `docs/`, since
+the figure paths are relative -- the old P1c issue, still open.
+
+**Left undone on purpose:** the per-parameter k correction is still not applied
+in code (`--apply_k` never written). The text carries the worst case ~1.5x
+instead. If P8 comes back consistent with the screen, that may be all it needs.
+
+## NEXT: P8 (Tier C) -- posterior confirmation
+
+Targets, from P7:
+1. **The cold + narrow corner** (the real mode): kT < 1.5 keV, sigma_v < 150
+   km/s, both flavours. Worst raw screen values 2.81 sigma (single-T) and
+   2.05 sigma (DEM), both on sigma_v.
+2. **Two safe controls** from the hot bulk (kT > 2.5 keV), where nothing
+   exceeds 1 sigma, as the positive control that the fit reproduces the screen.
+3. **NOT the Mn pair** -- documented as a design artifact (Mn/Fe ~ 4x solar is
+   not an ICM composition). Revisit only if a referee asks.
+
+**Open decision before starting: P8's target median precision**, which picks
+the sampler mechanically (agenda rule: worse than ~0.1 sigma -> emcee, better
+-> nautilus). The effects to resolve are ~1-3 sigma, so emcee's own 0.104
+sigma of MC error is ~5% of the smallest effect, which looks sufficient.
+
+**Known blocker:** `tier_c_mcmc.py` does NOT pass `dem=` to VectorForward, so
+its DEM mode is broken. That must be fixed before target 1's DEM half.
 
 **Still to do before the production run:** the 5-10 point GPU timing run
 (to cost 1000 x 2 on the A10/A100), and the `--point_chunk` sweep that goes

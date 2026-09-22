@@ -1397,6 +1397,266 @@ $\log(\text{norm})$ & 0.133 & 0.508 & $5.7\times10^{7}$ & 0.168 & 0.508 & $3.6\t
 \end{tabular}
 \end{table}
 
+\subsection{The production sweep: 1000 points, both flavours}\label{sec:p7sweep}
+The 20-point sweep above is a pilot. The production screen draws
+\textbf{1000 points per flavour} from the widened design of
+Sec.~\ref{sec:demparam} --- $kT$ (or the DEM's $\log T_{\rm mean}$)
+$0.7$--$15\kev$ drawn uniform in $\log_{10}T$, DEM width $0.056$--$0.4$ dex,
+the eight abundances, $\sigma_v$ and $\nh$ as before --- with
+\code{--seed 39235}. The seed is recorded because
+\code{sample\_points(n, mode, seed)} generates a fresh hypercube for every
+$(n,\mathrm{seed})$ pair: a different $n$ is a different design, not an
+extension of an existing one, so both numbers must be quoted together to
+reproduce the point set.
+
+\paragraph{Making it affordable.} The Jacobian of Sec.~\ref{sec:fisherbias}
+costs $2n+1$ emulator evaluations per point, and the original implementation
+paid that one call at a time on a forward built for a single row. Measured on
+laptop CPU that is $47\,$s per single-temperature point and
+$3705$--$5785\,$s per DEM point --- the latter because the serial path goes
+through \code{JointOperatorModel.predict\_counts\_dem}, which carries none of
+the DEM accelerations of Sec.~\ref{sec:forwardcost} (they live in the batched
+forward). At 1000 points per flavour the DEM screen alone would have cost
+${\sim}1600$ CPU-hours. The stencil is instead folded into a single batched
+call per chunk of points, on the same batched forward the $k$ study of
+Sec.~\ref{sec:linfactor} drives, which brings the DEM cost to $8.7\,$s per
+point once the fixed-grid trunk table is built. The two paths were checked
+against each other point by point rather than assumed equivalent: over two
+points per flavour $b_{\rm sys}$ agrees to $5.7\times10^{-4}\sigma$
+(single-$T$) and $5.0\times10^{-4}\sigma$ (DEM) and $\sigma_{\rm ref}$ to
+$2.5\times10^{-4}$ relative, which is the float32-versus-float64 level and far
+below anything that moves an $N_\star$.
+
+\paragraph{Results.} Tables~\ref{tab:p7single} and~\ref{tab:p7dem} give the two
+flavours at $10^{6}$ in-band counts. Every parameter's \emph{median} bias is at
+or below $0.23\sigma$, and $\mathrm{frac}>1$ is zero everywhere except
+$\sigma_v$ ($0.08$ single-$T$, $0.03$ DEM). Iron binds in the median sense for
+the single-temperature flavour ($0.233\sigma$, median
+$N_\star=1.8\times10^{7}$), followed by $kT$ and the normalisation.
+
+\paragraph{The DEM flavour is the better-behaved one.} This was not the
+expectation: after the ARF correction of Sec.~\ref{sec:hotfloor} the DEM was the
+tighter case. At 1000 points every DEM median is below its single-temperature
+counterpart --- Fe $0.105$ against $0.233$, the thermal parameters
+$0.099$/$0.102$ against $kT$'s $0.205$, Mn $0.015$ against $0.030$ --- and the
+worst DEM instance anywhere ($2.05\sigma$) is below the single-temperature
+worst ($2.81\sigma$). Averaging the emissivity over a temperature
+\emph{distribution} smooths the emulator's temperature-local error, and there
+is no DEM analogue of the single-temperature Mn outliers below.
+
+\paragraph{Conditioning is not the story.} $\mathrm{cond}(F)$ has median
+$2.7\times10^{7}$ (single-$T$) and $5.9\times10^{7}$ (DEM), with maxima
+$3.4\times10^{9}$ and $2.3\times10^{9}$: \emph{no} point in either flavour
+approaches the $10^{10}$ near-singularity guard of Sec.~\ref{sec:fisherbias}.
+Every excursion reported here is therefore a property of the model, not of the
+linear solve --- which had to be checked, because a degenerate direction
+produces a finite, plausible-looking $N_\star$ from two meaningless numbers.
+Both output files were also verified complete and duplicate-free (1000 records,
+no repeats), since the bias stage appends to its journal and the summary does
+not deduplicate.
+
+\paragraph{Two failure modes, and they are disjoint.} The points above
+$1\sigma$ are not scattered through the design. A two-sample
+Kolmogorov--Smirnov test of the tail's marginal against the bulk's, axis by
+axis, confines them to two coordinates in the single-temperature flavour and
+three in the DEM (Table~\ref{tab:p7confine}): \textbf{cold} (temperature
+$\mathrm{KS}=0.68$/$0.75$, $p\sim10^{-36}$/$10^{-18}$, with $86\%$/$97\%$ of
+the tail in the design's lowest temperature quartile) and
+\textbf{kinematically narrow} ($\sigma_v$ $\mathrm{KS}=0.57$/$0.65$, $70\%$/$81\%$
+in the lowest quartile), the DEM adding \emph{narrow in width}
+($\log T_\sigma$, $\mathrm{KS}=0.46$, $58\%$). The eight abundances and $\nh$
+are consistent with the design's own uniform marginals, so this is not an
+abundance-corner effect. Banding by temperature, nothing above
+$2.5\kev$ exceeds $1\sigma$ on any parameter in either flavour: the tail is
+entirely below $1.89\kev$ (single-$T$) and $1.65\kev$ (DEM), and $38\%$ of the
+coldest single-temperature band ($0.7$--$1.0\kev$) is above $1\sigma$.
+The one apparent exception, sulphur, rejects in the \emph{inverted} direction
+--- only $6$--$8\%$ of the tail sits in the lowest sulphur quartile --- which is
+why Table~\ref{tab:p7confine} reports the quartile share alongside the KS
+statistic: the statistic alone cannot distinguish confinement from inversion.
+
+The second mode is separate and single-temperature only: \textbf{two points}
+reach $4.11\sigma$ and $5.29\sigma$ on Mn against a median of $0.030\sigma$.
+They are ordered by abundance, not temperature ($\rho=+0.20$ on $a_{\rm Mn}$,
+$-0.12$ on $a_{\rm Fe}$, and $\rho=0.03$, $p=0.37$ on $\mathrm{cond}(F)$), and
+they do not lie in the cold corner at all.
+
+\paragraph{Are these realistic plasmas?} The two modes answer differently, and
+the distinction decides where confirmation effort belongs.
+
+The cold, narrow mode \emph{is} a real regime. Temperatures of
+$0.7$--$1.9\kev$ with $\sigma_v\sim80$--$110\kms$ describe galaxy groups and
+cool-core gas, which are targets rather than curiosities, and low temperature
+and low velocity dispersion are physically correlated through the depth of the
+potential --- so the failures fall in the self-consistent corner of a design
+that samples the two axes independently, not in an artificial one.
+Perseus-like conditions (${\sim}4\kev$, ${\sim}160\kms$) sit well inside the
+clean region. Three things bound the concern. First, in physical units the
+effect is small: the median $|b_{\rm sys}|$ on $\sigma_v$ is $0.86\kms$ below
+$1.5\kev$ (90th percentile $3.05\kms$) against $0.13\kms$ above $2.5\kev$, a
+factor $6.6$ increase, but still $0.3\%$ of a $\sim100\kms$ velocity; it
+crosses $1\sigma$ because the statistical error is nearly flat at
+${\sim}2\kms$ at $10^{6}$ counts, not because the bias is large. Second, the
+band floor of $1.87\kev$ is set by the closed gate valve, so a $1\kev$ plasma
+enters the fit only through its exponential tail; whether the tail's median
+$N_\star=4.7\times10^{5}$ in-band counts is ever \emph{reachable} for such a
+source is an exposure question this work does not answer. Third, and following
+from that, the result is specific to the gate-valve-closed configuration: with
+the soft band restored a cold plasma is measured on its line-rich soft
+spectrum, and both $\sigma$ and $b_{\rm sys}$ change.
+
+The Mn mode is a different matter. Those two points sit at
+$a_{\rm Mn}\simeq1.6$--$1.8\,\zsun$ against $a_{\rm Fe}\simeq0.34$--$0.5\,\zsun$,
+a Mn/Fe ratio near four times solar. Manganese and iron are both predominantly
+type-Ia products and track one another in the ICM, so this is not a cluster
+composition; it is a consequence of sampling the eight abundance axes
+independently over $0.2$--$2\,\zsun$, which by construction includes
+combinations no real object exhibits. The correct reading is that the emulator
+has a genuine Mn weakness that the design exposes, and that the exposure
+requires an abundance pattern outside the astrophysical locus.
+
+\paragraph{Figures.} Fig.~\ref{fig:p7safety} plots each point's worst
+$|b_{\rm sys}|/\sigma$ against temperature, coloured by which parameter binds;
+Fig.~\ref{fig:p7params} gives the full per-parameter distributions with the
+$>1\sigma$ population marked; Fig.~\ref{fig:p7nstar} restates the result as an
+exposure limit; Fig.~\ref{fig:p7corner} shows the tail in the full design
+space, which is the direct evidence for the confinement above; and
+Fig.~\ref{fig:p7mn} isolates the Mn mode in abundance space. All show the
+\emph{raw} linearised screen: the factor $k$ of Sec.~\ref{sec:linfactor} is a
+small multiplicative correction with a worst case near $1.5\times$, carried in
+the text and as an annotation on Fig.~\ref{fig:p7nstar} rather than folded
+silently into the points.
+
+\begin{table}[htbp]
+\centering
+\caption{Production sweep, single temperature: 1000 Latin-hypercube points
+(\code{--seed 39235}) over $kT=0.7$--$15\kev$, at $10^{6}$ in-band counts,
+without the Fe\,XXV mask. \code{frac${>}1$} is the fraction of points exceeding
+$1\sigma$.}
+\label{tab:p7single}
+\begin{tabular}{lrrrrr}
+\toprule
+param & median & p90 & max & frac${>}1$ & median $N_\star$ \\
+\midrule
+Si                  & 0.027 & 0.289 & 0.644 & 0.00 & $1.4\times10^{9}$ \\
+S                   & 0.053 & 0.234 & 1.307 & 0.00 & $3.5\times10^{8}$ \\
+Ar                  & 0.072 & 0.389 & 0.951 & 0.00 & $1.9\times10^{8}$ \\
+Ca                  & 0.074 & 0.295 & 0.798 & 0.00 & $1.8\times10^{8}$ \\
+Cr                  & 0.030 & 0.087 & 0.697 & 0.00 & $1.1\times10^{9}$ \\
+Mn                  & 0.030 & 0.079 & 5.292 & 0.00 & $1.1\times10^{9}$ \\
+Fe                  & 0.233 & 0.540 & 1.279 & 0.00 & $1.8\times10^{7}$ \\
+Ni                  & 0.065 & 0.179 & 0.640 & 0.00 & $2.4\times10^{8}$ \\
+$kT$                & 0.205 & 0.430 & 1.182 & 0.00 & $2.4\times10^{7}$ \\
+$\sigma_v$          & 0.131 & 0.806 & 2.813 & 0.08 & $5.8\times10^{7}$ \\
+$\nh$               & 0.092 & 0.227 & 0.971 & 0.00 & $1.2\times10^{8}$ \\
+$\log(\text{norm})$ & 0.184 & 0.436 & 0.949 & 0.00 & $2.9\times10^{7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Production sweep, DEM (Gaussian in $\log T$): 1000 points, same seed
+and count level as Table~\ref{tab:p7single}. Every median is below its
+single-temperature counterpart, and the worst instance in the flavour
+($2.05\sigma$) is below the single-temperature worst.}
+\label{tab:p7dem}
+\begin{tabular}{lrrrrr}
+\toprule
+param & median & p90 & max & frac${>}1$ & median $N_\star$ \\
+\midrule
+Si                  & 0.038 & 0.142 & 0.431 & 0.00 & $7.1\times10^{8}$ \\
+S                   & 0.036 & 0.101 & 0.308 & 0.00 & $7.7\times10^{8}$ \\
+Ar                  & 0.055 & 0.247 & 0.552 & 0.00 & $3.3\times10^{8}$ \\
+Ca                  & 0.051 & 0.131 & 0.420 & 0.00 & $3.8\times10^{8}$ \\
+Cr                  & 0.013 & 0.045 & 0.117 & 0.00 & $5.6\times10^{9}$ \\
+Mn                  & 0.015 & 0.049 & 0.375 & 0.00 & $4.7\times10^{9}$ \\
+Fe                  & 0.105 & 0.350 & 0.624 & 0.00 & $9.1\times10^{7}$ \\
+Ni                  & 0.055 & 0.132 & 0.235 & 0.00 & $3.3\times10^{8}$ \\
+$\log T_{\rm mean}$ & 0.099 & 0.235 & 0.498 & 0.00 & $1.0\times10^{8}$ \\
+$\log T_\sigma$     & 0.102 & 0.232 & 0.383 & 0.00 & $9.6\times10^{7}$ \\
+$\sigma_v$          & 0.083 & 0.586 & 2.047 & 0.03 & $1.5\times10^{8}$ \\
+$\nh$               & 0.069 & 0.169 & 0.285 & 0.00 & $2.1\times10^{8}$ \\
+$\log(\text{norm})$ & 0.115 & 0.241 & 0.523 & 0.00 & $7.6\times10^{7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Is the $>1\sigma$ population confined? Two-sample
+Kolmogorov--Smirnov statistic between the tail's marginal and the bulk's, per
+design axis, with the share of the tail falling in that axis's lowest design
+quartile (which gives the statistic a direction). Temperature is tested in
+$\log_{10}$, as it is sampled. Axes with $p>10^{-3}$ in both flavours are
+summarised in the last row.}
+\label{tab:p7confine}
+\begin{tabular}{lrrrrr}
+\toprule
+& \multicolumn{2}{c}{single-$T$ (86 points)} & \multicolumn{2}{c}{DEM (31 points)} \\
+axis & KS & low-quartile & KS & low-quartile \\
+\midrule
+temperature       & 0.684 & $86\%$ & 0.753 & $97\%$ \\
+$\sigma_v$        & 0.566 & $70\%$ & 0.650 & $81\%$ \\
+$\log T_\sigma$   & ---   & ---    & 0.461 & $58\%$ \\
+$a_{\rm S}$       & 0.218 & $8\%$  & 0.405 & $6\%$  \\
+\midrule
+8 other abundances, $\nh$ & $\le0.16$ & $19$--$35\%$ & $\le0.26$ & $19$--$39\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/p7_safety_map.png}
+\caption{Worst $|b_{\rm sys}|/\sigma$ per sweep point at $10^{6}$ in-band
+counts, against temperature, coloured by which parameter binds there. The hot
+half of the design is a dense band well below the $1\sigma$ line; the excursions
+are cold and overwhelmingly $\sigma_v$.}
+\label{fig:p7safety}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/p7_bias_by_param.png}
+\caption{Per-parameter distributions over the 1000 points, both flavours, with
+every point above $1\sigma$ drawn in red and counted. $\sigma_v$ carries a
+populated tail; Mn carries exactly two points, four to five times its own
+median's decade away from the bulk.}
+\label{fig:p7params}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/p7_nstar_vs_temperature.png}
+\caption{The same screen as an exposure limit: $N_\star$ for each point's
+binding parameter. The arrow marks the worst-case linearisation correction of
+Sec.~\ref{sec:linfactor} ($k=1.54$, i.e.\ $N_\star$ divided by $2.4$), which is
+not applied to the points.}
+\label{fig:p7nstar}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/p7_corner_single.png}
+\caption{The single-temperature design space, all 1000 points in grey and the
+points whose worst parameter exceeds $1\sigma$ in red, with marginals on the
+diagonal. The tail is confined in temperature and $\sigma_v$ and uniform in
+every abundance axis; the DEM equivalent
+(\code{p7\_corner\_dem.png}) adds a third confined axis, the DEM width.}
+\label{fig:p7corner}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.68\textwidth]{figures/p7_mn_outliers.png}
+\caption{The Mn mode, single temperature: median $|b_{\rm sys}|/\sigma$ in
+cells of the $(a_{\rm Mn}, a_{\rm Fe})$ plane, rising from $0.019$ to $0.069$
+toward high Mn and low Fe, with the two outlying points ringed. Their Mn/Fe
+ratio of ${\sim}4\,\zsun$ is not an ICM composition.}
+\label{fig:p7mn}
+\end{figure}
+
 \section{Is the linearised bias trustworthy? The factor $k$}\label{sec:linfactor}
 Everything in Sec.~\ref{sec:fisherbias} and Sec.~\ref{sec:biassweep} rests on a
 first-order expansion: $b_{\rm sys}=F^{-1}J^{\mathsf T}\!\operatorname{diag}
