@@ -217,7 +217,12 @@ deleted `run_emcee`). That is by design -- it is kept as the provenance record
 for `tests/data/refactor_golden.npz`, and exits with an explanation pointing at
 `tests/test_refactor_equivalence.py`, which needs nothing from it.
 
-## PROJECT RULE: name code for what it does
+## PROJECT RULES
+
+Standing conventions, to be applied as code is touched and swept up in full at
+the next repo refactor / clean-up.
+
+### 1. Name code for what it does
 
 Scripts and modules are named for their function, not for our internal campaign
 numbering (no `tier_a_*`, `tier_c_*`, `p6_*`, `p8_*`). The tier/phase labels stay
@@ -237,6 +242,56 @@ Those carry a pointer to the new name instead.
 Still to do under this rule: `p6_sweep.py`, `p6_probe.py`, `p7_screen_diag.py`,
 `plot_p7_sweep.py` and friends. Not renamed yet -- they are referenced from the
 written-up P6/P7 sections and a rename should happen in one pass with the tex.
+
+### 2. Docstrings are numpy-style, with full parameter and return sections
+
+Every public function, method and class gets a numpy-style (numpydoc) docstring
+with explicit `Parameters` and `Returns` sections. For each entry, give:
+
+* the **name**,
+* its **type**,
+* its **default**, where it has one (write it as `optional` with the value, e.g.
+  ``n_eff : int, optional`` ... ``Default is 1000.``),
+* a **short description of what the variable actually is** -- not a restatement
+  of its name. `keep : ndarray of bool` is not documentation; "in-band channel
+  mask, as returned by `band_mask`" is.
+
+`Raises` where the function raises deliberately, and `Notes`/`Examples` where
+the reasoning needs somewhere to live.
+
+    def scale_to_counts(rec, target_counts):
+        """Rescale a screen ratio from the sweep's reference level.
+
+        Parameters
+        ----------
+        rec : dict
+            One record from a `bias_sweep` jsonl. Must carry ``n_ref``, the
+            count level its ``b_sys``/``sigma_ref`` were computed at.
+        target_counts : float
+            In-band counts the posterior check actually injects.
+
+        Returns
+        -------
+        float
+            Multiplicative factor taking a stored ratio to `target_counts`.
+            ``b_sys`` grows linearly with counts and sigma as its square root,
+            so the ratio scales as ``sqrt(target_counts / n_ref)``.
+        """
+
+**Why this and not the current style.** The existing docstrings are discursive
+-- they explain *why* the code is the way it is, often very usefully, and that
+prose should be kept (move it to `Notes`). What they systematically do not do is
+say what the arguments are, so a caller has to read the body to find out that
+`keep` is a boolean mask, that `n_h` is in units of 1e21, or that `counts` may
+be full-length or band-restricted and the length silently picks the meaning.
+That last one is exactly the class of bug that cost us the n_h scale-convention
+split. Types and units in the signature documentation are the cheap guard.
+
+State of play: **no module in the package currently complies.** This is a
+whole-repo sweep, not a per-file fix, and it wants a linter pinning it
+(`pydocstyle --convention=numpy`, or ruff's `D` rules with
+`convention = "numpy"`) so it cannot silently rot afterwards. Decide the linter
+at the same time as the sweep, or the sweep is a one-off.
 
 ## RESUME HERE: P8 -- posterior confirmation of the bias screen
 
