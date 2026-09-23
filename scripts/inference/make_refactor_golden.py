@@ -15,6 +15,7 @@ Two cases, chosen to cover the paths the refactor actually touches:
 ``dem_abs``
     a Gaussian DEM *and* Galactic absorption, with ``n_h`` sampled per walker.
     This is the configuration whose wiring was broken in ``tier_c_mcmc.py``
+    (renamed ``emulator_bias_posterior_check.py``)
     (a ``VectorForward`` built with no ``dem=``), and per-walker ``n_h`` is the
     axis that carried a real broadcast bug before. A single-T golden case alone
     would pass while proving nothing about either.
