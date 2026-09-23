@@ -20,7 +20,7 @@ at production scale. Production (higher --nwalkers/--nsteps, --device cuda)
 belongs on the GPU cluster, at ~1.5-2h/point per the bake-off's emcee timing.
 
     # laptop smoke: 1 worst + 1 safe point, tiny budget
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python -u \\
+    conda run -n spexai python -u \\
         scripts/inference/tier_c_mcmc.py --n_worst 1 --n_safe 1 \\
         --nwalkers 32 --nsteps 60 --device cpu
 
@@ -41,15 +41,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from campaign import PERSEUS, FREE_Z, find_xrism_response, band_mask, EXCLUDE_NONE  # noqa: E402
+from campaign import (PERSEUS, FREE_Z, find_xrism_response, band_mask,  # noqa: E402
+                      EXCLUDE_NONE, gaussian_logT_dem)
 from bias_sweep import build_pars, abundance_map                  # noqa: E402
 from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
-from spexai.inference.posterior import BoxPrior, PoissonPosterior # noqa: E402
 from spexai.inference.response import Response                    # noqa: E402
-from spexai.inference.vector_forward import VectorForward         # noqa: E402
+from spexai.inference.priors import PriorSet                      # noqa: E402
+from spexai.inference.spectral_fit import SpectralFit             # noqa: E402
 from spexai.inference import samplers                             # noqa: E402
 
 
@@ -93,12 +94,6 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     names = [p.name for p in pars]
     truth = np.array([p.truth for p in pars])
 
-    forward = VectorForward(
-        emu, response, keep, names, ab, absorption=absorption,
-        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
-        velocity=None, device=args.device, chunk=args.chunk, batched=True,
-        compile_trunk=False, mem_gb=args.mem_gb)
-
     # rescale the cached truth (stored at N_REF) to the injected target counts,
     # exactly mirroring stage_bias's own d_ref -> d rescale
     scale = args.target_counts / d_ref.sum()
@@ -106,9 +101,24 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     rng = np.random.default_rng(args.seed + rec["point"])
     data = rng.poisson(mu_true).astype(np.float64)
 
-    prior = BoxPrior.from_params(pars, device=args.device)
-    post = PoissonPosterior(forward, data, prior)
-    return post, pars, truth, names
+    # DEM mode: build_pars emits logT_mean/logT_sigma, so the forward MUST carry
+    # the matching DEM. Until 2026-09-22 this script built a VectorForward with
+    # no dem= at all while passing those names, so --mode dem could not even
+    # construct (VectorForward then requires a kT column, which DEM pars lack).
+    # It is impossible to reintroduce now: SpectralFit is the only assembly
+    # point, and the dem travels with the parameters.
+    dem = gaussian_logT_dem()[0] if args.mode == "dem" else None
+
+    # n_h_scale=1e21: build_pars emits Par("n_h", point["n_h"], 1e-2, 0.0, 6.0),
+    # i.e. n_h in units of 1e21 cm^-2. `data` is already in-band.
+    fit = SpectralFit(
+        emulator=emu, response=response, counts=data, exposure=1.0,
+        priors=PriorSet.from_params(pars), keep=keep,
+        abundances=ab, absorption=absorption, dem=dem,
+        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
+        n_h_scale=1e21, device=args.device, chunk=args.chunk,
+        batched=True, compile_trunk=False, mem_gb=args.mem_gb)
+    return fit.posterior, pars, truth, names
 
 
 def run_point(store, response, absorption, keep, rec, d_ref, tag, ratio, args):

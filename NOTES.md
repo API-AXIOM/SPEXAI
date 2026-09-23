@@ -3,6 +3,220 @@
 Running log of context, progress and open questions. Decisions and their
 reasoning go in `DECISIONS.tex`.
 
+## IN PROGRESS 2026-09-22: inference API unification (before P8)
+
+Refactor to collapse the two parallel inference stacks into one user-facing
+API, so P8 does not add a sixth copy of the posterior-assembly block. Design:
+`docs/superpowers/specs/2026-09-22-inference-api-unification-design.md`.
+Worktree `.claude/worktrees/inference-api-unification`, branch
+`worktree-inference-api-unification`, **uncommitted**.
+
+**COMPLETE. Baseline 296 passed -> now 305 passed, 0 failed.** The count
+reconciles exactly: `296 + 11` new equivalence tests `- 2` tests whose subject
+(`run_emcee`'s scalar fallback) no longer exists.
+
+Phase status: **0-6 all DONE.** Left uncommitted for D.H. to review.
+
+> **Do not commit `spexai/models`** in this worktree -- it is a SYMLINK to the
+> main checkout's model store, created only so the tests would run here. See
+> the `MODELS_DIR` finding below for why it was needed.
+
+### What a user writes now
+
+```python
+from spexai.inference import SpectralFit, PriorSet, Uniform, Normal
+
+fit = SpectralFit(
+    emulator=emu, response=resp,
+    counts=counts, exposure=1.2e5,        # loaded externally; no loader here
+    priors=PriorSet({"kT":       Uniform(1.5, 7.5),
+                     "Fe":       Normal(0.55, 0.05, low=0.0),
+                     "sigma_v":  Uniform(30.0, 600.0),
+                     "log_norm": Uniform(10.0, 12.0)}),
+    abundances=ab, absorption=absn, n_h_scale=1e21,
+    redshift=0.0173, band=(1.9, 12.0), device="cuda")
+
+res = fit.sample("nautilus", n_live=2000)   # any of the nine
+print(res.summary())
+```
+
+`.posterior` still hands out the bare `PoissonPosterior` for the campaign
+scripts and the gradient paths.
+
+Five findings, all outside the refactor proper:
+
+1. **macOS OpenMP root-caused; `KMP_DUPLICATE_LIB_OK=TRUE` is withdrawn.** The
+   cause is import order: NumPy claims the env's `libomp` via its BLAS, and if
+   torch is imported first its bundled copy wins, so the next library to load
+   the env's copy aborts. `spexai/inference/__init__.py` now imports NumPy
+   first; the flag is removed from 15 scripts, 2 docs and the notebook, where
+   it was already unnecessary (every script imports NumPy before torch). Do not
+   reintroduce it -- it suppresses a "may silently produce incorrect results"
+   diagnostic rather than fixing the conflict.
+
+2. **`operator_model.MODELS_DIR` ignores `SPEXAI_STORE`.** It was hardcoded
+   relative to the package, unlike `spexai.config.STORE` which does honour the
+   variable. Consequence: in any checkout without `spexai/models/` (e.g. a
+   fresh worktree) **all 25 model-dependent tests skip silently** and the suite
+   still reports success -- a green run that tested none of the inference code.
+   **FIXED 2026-09-23.** Three changes:
+   - `operator_model.MODELS_DIR` is now `spexai.config.STORE`, so `SPEXAI_STORE`
+     moves it. The default is unchanged (`spexai/models/` inside the package),
+     so an unset variable behaves exactly as before. This reaches all 16 call
+     sites at once -- they all import `MODELS_DIR` from `operator_model`.
+   - The silent skip is now loud: `tests/conftest.py` ends a run with a red
+     `INCOMPLETE RUN: artifacts missing` banner naming the missing artifact and
+     where it looked, for the model store and for the ACIS response. Skipping
+     is still the default so a fresh checkout can run the suite.
+   - `SPEXAI_REQUIRE_MODELS=1` escalates a missing model store to a hard
+     `pytest.UsageError` (exit 4) before collection. Use it for CI and for any
+     campaign run that must not quietly test nothing.
+   The worktree symlink workaround is removed; run the suite here with
+   `SPEXAI_STORE=/Users/danielahuppenkothen/work/repositories/spexai/spexai/models`.
+
+3. **`run_emcee` is NOT reproducible from its `seed` argument.** The seed only
+   controls walker initialisation (`np.random.default_rng(seed)` for `p0`);
+   emcee's own proposals draw from NumPy's **global** RNG, which neither
+   `fitting.run_emcee` nor `samplers.run_emcee` seeds. Of the 9 samplers only
+   `ultranest` and `pocomc` seed anything. Two identical `seed=0` runs give
+   different chains. The golden generator works around it by calling
+   `np.random.seed()` immediately before the run. **This affects reproducibility
+   of every emcee result in the campaign, including the planned P8 runs.**
+   **FIXED 2026-09-22 on D.H.'s instruction:** both `run_emcee`s now pin
+   NumPy's global legacy RNG across emcee's construction (the point at which
+   emcee snapshots its own generator) and restore it afterwards, so a caller's
+   own RNG stream -- including the Poisson draw that makes the data -- does not
+   become a function of which sampler ran first. `seed` now reproduces the
+   chain. `run_zeus` and the rest are still unseeded; only emcee was asked for.
+
+4. **The two stacks disagreed on `n_h` UNITS, silently.**
+   `fitting.build_posterior` passed `n_h_scale=1.0`, so `n_h` was sampled in
+   absolute cm^-2 (`Uniform(0, 5e21)`). The campaign relied on
+   `VectorForward`'s default of `1e21` and sampled it in units of 1e21
+   (`Par("n_h", p["n_h"] / 1e21, ..., 0.0, 5.0)`). Either default in the shared
+   builder mis-scales the other convention's absorption by 10^21 -- which
+   raises nothing, it just yields an absurd spectrum. Measured on the golden
+   `dem_abs` case: the wrong scale gives a 0.999 relative deviation in logp.
+   **`SpectralFit` therefore has no default**: if `n_h` is a fitted parameter
+   or a non-zero fixed value, `n_h_scale` must be passed explicitly, or it
+   raises. Phase 5 must state the convention at every campaign call site.
+
+5. **`logp` is now offset by the prior normalisation.** `BoxPrior.logpdf`
+   returned 0 inside the box -- an unnormalised prior -- while `PriorSet`
+   returns a real density, so `logp` gains exactly `-sum(log(hi - lo))`
+   (-8.9847 for the `single` case, -60.3221 for `dem_abs`). Constant, so it
+   cancels in every acceptance ratio and moves no posterior sample; UltraNest
+   is untouched because it scores through `loglike`. Pinned by
+   `test_prior_is_now_normalised` so it stays deliberate. Consequence for the
+   gate: the equivalence test compares **`loglike`**, not `logp` -- and the
+   frozen `logp` IS the bare likelihood, precisely because the old prior
+   contributed zero.
+
+### Phase 1 artefact
+
+`tests/data/refactor_golden.npz`, written by
+`scripts/inference/make_refactor_golden.py` from the **pre-refactor** code.
+Two cases -- `single` (3 elements, single-T) and `dem_abs` (Gaussian DEM +
+absorption + per-walker `n_h`, the configuration `tier_c_mcmc.py` had wired
+wrong). Each stores `theta` (64 pts), `logp`, `p0`, `chain` (50x16), plus
+names/bounds/truth/counts. `--check` regenerates and asserts array equality:
+currently **25 arrays identical**.
+
+### Phase 3 artefact
+
+`spexai/inference/spectral_fit.py` -- `SpectralFit`, the single assembly point,
+exported from `spexai.inference` along with `PriorSet`/`Uniform`/`Normal`/
+`LogUniform`. Counts + exposure + response in as arrays (no `Observation`, no
+loader); `PriorSet` for the prior; `dem=` first class; `band=(lo,hi)` or
+`keep=`; `.posterior` for the bare object; `.sample(name, **kw)` over all nine
+samplers via the new `samplers.SAMPLERS` registry (gradient samplers get a
+Pyro `SpectrumModel` instead, via `GRADIENT_SAMPLERS`). `kT`/`sigma_v` are
+canonical; `temp`/`velocity` still work and emit a `DeprecationWarning`.
+
+Gate: `tests/test_refactor_equivalence.py`, **11 passed** --
+`loglike` matches the frozen reference at rtol 1e-12 in both cases, the seeded
+emcee chain matches at rtol 1e-10 in both, walker init is bit-identical, the
+prior offset is exactly the normalisation constant, legacy names warn, and
+`n_h_scale` is required when `n_h` is fitted.
+
+The walker-init clip difference the spec flagged (`lo + 1e-6` in `fitting` vs
+`lo + 1e-9` in `samplers`) turned out to be **untriggered**: no walker starts
+outside the box for either case, so both give identical `p0`. `samplers` was
+therefore left alone rather than changing campaign behaviour for no effect.
+
+### Phase 4: user-facing consumers migrated
+
+* `fit_plots.py` now takes `SamplerResult`, so it works for all nine samplers
+  rather than two. **Signature change: `truths=` is passed in, not read off the
+  result.** A posterior does not know the true answer; making the result carry
+  `truths` forced every real fit to invent one. `plot_corner_overlay` and
+  `plot_posterior_predictive` also take a `labels=` pair, so they are no longer
+  hardwired to the emcee/UltraNest combination.
+* `perseus_showcase.py`, `bias_study.py`, `run_inference_demo.py` build a
+  `SpectralFit` and call `.sample(...)`. The showcase needed `n_h_scale=1.0`
+  (its `PERSEUS["n_h"]` is absolute, 1.4e21, reaching the forward via `fixed`).
+* `tutorials/inference_walkthrough.ipynb` migrated (11 lines changed), including
+  the DEM section, and now documents non-uniform priors via `PriorSet` and the
+  `n_h_scale` requirement.
+* **`fitting.build_posterior` is now a thin adapter over `SpectralFit`** rather
+  than a second assembly. This was the high-leverage move: it converts all 27
+  `build_posterior` call sites in `test_fitting.py`, `test_contracted.py` and
+  `test_dem_fast.py` into tests of the new path **without editing them**, so
+  the scalar-vs-vectorised reference checks now guard `SpectralFit` directly.
+  Those 33 tests pass unchanged, across DEM, absorption, abundance models and
+  the contracted forward -- 27 independent constructions agreeing with the
+  scalar reference.
+
+### Phase 5: campaign scripts migrated
+
+* **`tier_c_mcmc.py` -- the P8 blocker is GONE.** It builds a `SpectralFit`
+  with `dem=gaussian_logT_dem()[0]` under `--mode dem`. The old bug (a
+  `VectorForward` with no `dem=` while passing `logT_mean`/`logT_sigma`) is now
+  unrepresentable: there is one assembly point and the DEM travels with the
+  parameters. **Not yet run against real data** -- needs the jsonl + npz pair.
+* **`bake_off.py`** migrated (D.H. approved). Its numbers must not move; the
+  change is a like-for-like substitution of the same assembly.
+* Mechanical `BoxPrior` -> `PriorSet` swap in `benchmark_ppl.py`,
+  `mle_reseed.py`, `p6_sweep.py` and 5 test files (`PriorSet.box` reproduces
+  `BoxPrior`'s exact constructor, names defaulting to `p0, p1, ...`).
+* **`n_h_scale=1e21` stated explicitly** at every campaign call site, since
+  `build_pars` emits `Par("n_h", point["n_h"], 1e-2, 0.0, 6.0)` -- units of
+  1e21, not absolute.
+* `SpectralFit` now accepts counts either full-length or already band-restricted
+  (the campaign's cached truths are `d_ref[keep]`); the length picks the
+  meaning and anything else raises.
+
+### Phase 6: duplicated machinery deleted
+
+Gone: `fitting.run_emcee`, `fitting.run_ultranest`, `EmceeResult`,
+`UltranestResult`, `fitting._resolve_posterior`, `fitting.progress_flag`,
+`posterior.BoxPrior` (154 + 74 lines).
+
+**Kept, on D.H.'s instruction:** `fitting.build_posterior`, now a ~15-line
+adapter over `SpectralFit` that emits a `DeprecationWarning`. It keeps 27 test
+call sites and any external caller working, and pins `n_h_scale=1.0` because
+that entry point has always taken `n_h` in absolute cm^-2.
+
+Also kept: `make_loglike` (the scalar reference), `Param`, `SIGMA_V_PRIOR`,
+`vectorization_blocker`.
+
+**Coverage changes.** Two tests lost their subject and were removed:
+`test_run_emcee_vectorised_and_scalar_agree` and
+`test_run_emcee_warns_and_falls_back_on_dem`, both of which tested
+`run_emcee`'s automatic fallback to the scalar likelihood -- `SpectralFit` is
+batched only. The per-walker `loglike` agreement tests are strictly more
+sensitive than a 6-step chain comparison at rtol 1e-3, so the real loss is
+small. `test_dem_run_emcee_does_not_warn` was **rewritten**, not deleted, as
+`test_dem_fit_runs_vectorised_end_to_end`. In `test_priors.py`, the two tests
+that existed to prove `PriorSet == BoxPrior` were rewritten against the
+analytic uniform expressions, which is a stronger statement than agreeing with
+a second implementation.
+
+`scripts/inference/make_refactor_golden.py` can no longer run (it needs the
+deleted `run_emcee`). That is by design -- it is kept as the provenance record
+for `tests/data/refactor_golden.npz`, and exits with an explanation pointing at
+`tests/test_refactor_equivalence.py`, which needs nothing from it.
+
 ## RESUME HERE: P8 (Tier C) -- posterior confirmation
 
 **P7 is COMPLETE and written up** (both flavours, 1000 points, seed 39235);

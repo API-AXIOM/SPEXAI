@@ -6,7 +6,7 @@ its python directly:
 
 1. In the spexai env, write the emulator's native energy grid to a file:
 
-     KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python \
+     conda run -n spexai python \
          scripts/inference/validate_spex_norm.py --mode edges --out /tmp/egrid.npz
 
 2. In the SPEX env, dump CIE model spectra on that grid at (T, Y=1, D=1e22 m):
@@ -18,7 +18,7 @@ its python directly:
 
 3. In the spexai env, compare the emulator flux to that dump:
 
-     KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python \
+     conda run -n spexai python \
          scripts/inference/validate_spex_norm.py --mode compare --in /tmp/spex_cie.npz
 
 What is being tested: that ``sum_Z JointOperatorModel`` at solar abundance

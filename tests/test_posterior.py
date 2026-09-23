@@ -11,12 +11,13 @@ import numpy as np
 import pytest
 import torch
 
-from spexai.inference.posterior import BoxPrior, PoissonPosterior
+from spexai.inference.posterior import PoissonPosterior
+from spexai.inference.priors import PriorSet
 
 
 @pytest.fixture
 def prior():
-    return BoxPrior([0.0, -2.0, 1.0], [1.0, 5.0, 3.0], ["a", "b", "c"])
+    return PriorSet.box([0.0, -2.0, 1.0], [1.0, 5.0, 3.0], ["a", "b", "c"])
 
 
 def test_ptform_maps_cube_corners_to_box(prior):
@@ -56,7 +57,7 @@ def test_log_jacobian_matches_autodiff(prior):
 
 def test_bounds_must_be_ordered():
     with pytest.raises(ValueError, match="hi > lo"):
-        BoxPrior([0.0, 5.0], [1.0, 2.0])
+        PriorSet.box([0.0, 5.0], [1.0, 2.0])
 
 
 class _LinearForward:
@@ -81,7 +82,7 @@ class _LinearForward:
 def toy():
     g = torch.Generator().manual_seed(0)
     fwd = _LinearForward(torch.rand(3, 5, generator=g))
-    prior = BoxPrior([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    prior = PriorSet.box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
     data = np.array([3.0, 0.0, 7.0, 2.0, 11.0])      # a zero channel included
     return PoissonPosterior(fwd, data, prior)
 

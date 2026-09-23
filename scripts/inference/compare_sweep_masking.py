@@ -12,7 +12,7 @@ coincidence of that one abundance pattern? A sweep over 20 points answers it,
 and a per-point spread in N* is the diagnostic: a general cancellation would
 lift every point, a fine-tuned one lifts a few.
 
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python \\
+    conda run -n spexai python \\
         scripts/inference/compare_sweep_masking.py
 """
 import argparse

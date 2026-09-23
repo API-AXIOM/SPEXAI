@@ -14,7 +14,7 @@ published parameter:
               floor is invisible (noise-dominated); above it, it biases science.
 
 Run (laptop, single-T):
-  KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai \
+  conda run -n spexai \
       python scripts/experiments/hot_floor/fisher_bias.py --mode single
 
 The literature-strategy fit parametrisation (``N_REF``, ``Par``, ``Forward``,

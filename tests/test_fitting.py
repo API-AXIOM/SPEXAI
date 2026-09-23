@@ -20,7 +20,7 @@ import torch
 from spexai.inference.operator_model import JointOperatorModel, MODELS_DIR
 from spexai.inference.abundances import AbundanceModel
 from spexai.inference.fitting import (Param, build_posterior, make_loglike,
-                                      run_emcee, vectorization_blocker)
+                                      vectorization_blocker)
 from spexai.inference.simulate import simulate_observation
 from spexai.inference.response import Response
 
@@ -129,26 +129,6 @@ def test_sampled_redshift_blocks_vectorisation():
     assert vectorization_blocker(["temp", "log_norm"], None) is None
 
 
-def test_run_emcee_warns_and_falls_back_on_dem(model, obs):
-    class _DEM:
-        temp_grid = torch.tensor([2.0, 3.0])
-
-        def weights(self, p):
-            return torch.tensor([0.5, 0.5])
-
-    with pytest.warns(RuntimeWarning, match="scalar likelihood"):
-        res = run_emcee(obs, model, _params(), FIXED, nwalkers=8, nsteps=3,
-                        dem=_DEM())
-    assert res.samples.shape[1] == 3
-
-
-def test_run_emcee_vectorised_and_scalar_agree(model, obs):
-    # same seed, same walkers, same proposals -> the chains must coincide, which
-    # is a far stricter check than the posteriors merely looking similar
-    kw = dict(nwalkers=8, nsteps=6, seed=3)
-    vec = run_emcee(obs, model, _params(), FIXED, vectorized=True, **kw)
-    sca = run_emcee(obs, model, _params(), FIXED, vectorized=False, **kw)
-    assert np.allclose(vec.chain, sca.chain, rtol=1e-3, atol=1e-6)
 
 
 # --- DEM ---------------------------------------------------------------------
@@ -302,10 +282,22 @@ def test_dem_grouping_gives_each_row_its_own_kinematics(model, obs):
     assert rel > 1e-3, f"sigma_v 100 vs 600 changed the spectrum by only {rel:.1e}"
 
 
-def test_dem_run_emcee_does_not_warn(model, obs):
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        res = run_emcee(obs, model, _dem_params(), FIXED, nwalkers=10,
-                        nsteps=3, dem=_dem())
+def test_dem_fit_runs_vectorised_end_to_end(model, obs):
+    """A DEM with ``weights_batch`` samples through the batched forward.
+
+    This used to assert that ``fitting.run_emcee`` did not silently *fall back*
+    to the scalar likelihood for a DEM. There is no fallback any more --
+    ``SpectralFit`` is batched only, and a DEM without ``weights_batch`` raises
+    at construction instead of quietly costing a factor of nwalkers -- so what
+    is left to check is that the DEM path runs at all, end to end.
+    """
+    from spexai.inference.priors import PriorSet
+    from spexai.inference.spectral_fit import SpectralFit
+
+    params = _dem_params()
+    fit = SpectralFit.from_observation(
+        obs, model, PriorSet.from_params(params), dem=_dem(),
+        redshift=10.0 ** FIXED["logz"], fixed=FIXED)
+    res = fit.sample("emcee", nwalkers=10, nsteps=3,
+                     center=np.array([p.truth for p in params], dtype=float))
     assert res.samples.shape[1] == 4

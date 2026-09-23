@@ -32,7 +32,7 @@ for, and it does not need the box-clipped Newton steps ``fisher`` uses to
 stay numerically safe. Needs ``--device cuda``.
 
     # laptop (already run 2026-08-31, 8 seeds x 3 rounds, ~27 min CPU):
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python -u \\
+    conda run -n spexai python -u \\
         scripts/inference/mle_reseed.py --method fisher --n_seeds 8 --n_iter 3
 
     # cluster GPU:
@@ -100,7 +100,7 @@ from spexai.config import STORE, RESULTS                          # noqa: E402
 from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
-from spexai.inference.posterior import BoxPrior                   # noqa: E402
+from spexai.inference.priors import PriorSet                   # noqa: E402
 from spexai.inference.response import Response                    # noqa: E402
 from spexai.inference.vector_forward import VectorForward         # noqa: E402
 
@@ -276,7 +276,7 @@ def build_tierb_problem(args, rec, counts_row, tz):
     response, keep, rmf, arf = tierb_response(tz)
     pars, names, truth, mu_true = tierb_point(args, rec, counts_row, keep)
     forward = tierb_forward(args, names, response, keep)
-    prior = BoxPrior.from_params(pars, device=args.device)
+    prior = PriorSet.from_params(pars, device=args.device)
     return forward, prior, pars, truth, names, mu_true, (rmf, arf)
 
 

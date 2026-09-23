@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import torch
 
-from spexai.inference.posterior import BoxPrior, PoissonPosterior
+from spexai.inference.posterior import PoissonPosterior
 from spexai.inference.priors import (LogUniform, Normal, Prior, PriorSet,
                                      Uniform)
 
@@ -120,19 +120,38 @@ def test_priorset_sample_lands_in_support():
     assert draws[:, 1].std() == pytest.approx(0.05, abs=0.01)
 
 
-def test_priorset_matches_boxprior_on_uniforms():
-    """The compatibility contract: uniform PriorSet == the old BoxPrior."""
-    names, lo, hi = ["a", "b"], [0.0, -1.0], [2.0, 5.0]
+def test_priorset_uniform_matches_the_analytic_box():
+    """The uniform case is exactly the flat box, checked against closed form.
+
+    This used to compare against ``BoxPrior``, which ``PriorSet`` replaced and
+    which no longer exists. Comparing to the analytic expressions is the
+    stronger statement anyway: it cannot both drift and still pass, which two
+    implementations of the same mistake could.
+    """
+    names, lo, hi = ["a", "b"], np.array([0.0, -1.0]), np.array([2.0, 5.0])
     ps = PriorSet.uniform(names, lo, hi)
-    bp = BoxPrior(lo, hi, names)
+    span = hi - lo
+
     cube = np.array([[0.25, 0.75], [0.0, 1.0]])
-    assert ps.ptform(cube) == pytest.approx(bp.ptform(cube))
+    assert ps.ptform(cube) == pytest.approx(lo + cube * span)
+
     th = np.array([[1.0, 0.0], [3.0, 0.0]])
-    assert ps.inside(th).tolist() == bp.inside(th).tolist()
+    assert ps.inside(th).tolist() == [True, False]     # 3.0 is above hi=2.0
+
+    # theta = lo + span * sigmoid(z), and log|dtheta/dz| = sum log(span s (1-s))
     z = torch.tensor([[0.3, -0.7]], dtype=torch.float64)
-    t_ps, ld_ps = ps.to_constrained(z)
-    t_bp, ld_bp = bp.to_constrained(z)
-    assert torch.allclose(t_ps, t_bp) and torch.allclose(ld_ps, ld_bp)
+    theta, logdet = ps.to_constrained(z)
+    s = torch.sigmoid(z)
+    lo_t = torch.as_tensor(lo, dtype=torch.float64)
+    span_t = torch.as_tensor(span, dtype=torch.float64)
+    assert torch.allclose(theta, lo_t + span_t * s)
+    assert torch.allclose(logdet,
+                          torch.log(span_t * s * (1.0 - s)).sum(-1))
+
+    # and the density is the constant -sum(log span), which BoxPrior returned
+    # as 0 because it was never normalised
+    assert ps.logpdf(np.array([[1.0, 0.0]]))[0] == pytest.approx(
+        -np.sum(np.log(span)))
 
 
 def test_priorset_round_trips_unconstrained():
@@ -176,15 +195,25 @@ def test_posterior_applies_a_nonuniform_prior():
     assert at_peak - off_peak == pytest.approx(2.0, abs=0.05)   # 2 sigma^2/2
 
 
-def test_posterior_still_flat_under_boxprior():
-    """Bit-compatibility: the old uniform path is unchanged by the new sum."""
+def test_uniform_prior_contributes_only_a_constant():
+    """A flat prior must not tilt the posterior -- only offset it.
+
+    Under a uniform ``PriorSet`` the prior term is ``-sum(log span)`` at every
+    point, so two positions inside the box differ by the likelihood alone. That
+    constant is the one behavioural change from the unnormalised ``BoxPrior``
+    this replaced: it shifts ``logp`` but cancels in every acceptance ratio.
+    """
     fwd = _FlatForward()
     data = np.array([1.0, 1.0, 1.0])
-    post = PoissonPosterior(fwd, data, BoxPrior([1.5, 0.0], [7.5, 3.0],
-                                                ["kT", "Fe"]))
+    lo, hi = np.array([1.5, 0.0]), np.array([7.5, 3.0])
+    prior = PriorSet.uniform(["kT", "Fe"], lo, hi)
+    post = PoissonPosterior(fwd, data, prior)
     a = post.logp(np.array([[3.0, 0.55]]))[0]
     b = post.logp(np.array([[6.0, 2.0]]))[0]
-    assert a == pytest.approx(b)
+    assert a == pytest.approx(b)                       # flat: no tilt
+    # and the offset from the bare likelihood is exactly the normalisation
+    assert a - post.loglike(np.array([[3.0, 0.55]]))[0] == pytest.approx(
+        -np.sum(np.log(hi - lo)))
 
 
 def test_posterior_rejects_outside_support():

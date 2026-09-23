@@ -19,8 +19,9 @@ from spexai.inference.fit_plots import (plot_corner_overlay, plot_emcee_trace,
                                         plot_posterior_predictive,
                                         plot_ultranest_diagnostics)
 from spexai.inference.abundances import AbundanceModel
-from spexai.inference.fitting import (Param, run_emcee, run_ultranest,
-                                      SIGMA_V_PRIOR)
+from spexai.inference.fitting import Param, SIGMA_V_PRIOR
+from spexai.inference.priors import PriorSet
+from spexai.inference.spectral_fit import SpectralFit
 from spexai.inference.operator_model import JointOperatorModel
 from spexai.inference.response import Response
 from spexai.inference.simulate import simulate_observation
@@ -104,22 +105,32 @@ def main():
         if args.free_h:
             params.append(Param("H", 0.1, 5.0, "H", 1.0))
 
+    # One fit object, both samplers -- and any of the other seven, which this
+    # demo could not reach at all while it went through fitting.py's own
+    # emcee/UltraNest wrappers.
+    truths = np.array([p.truth for p in params], dtype=float)
+    labels = [p.label or p.name for p in params]
+    fit = SpectralFit.from_observation(
+        obs, model, PriorSet.from_params(params),
+        abundances=abundance_model, redshift=10.0 ** fixed["logz"], fixed=fixed)
+
     er = ur = None
     if args.sampler in ("both", "emcee"):
         print("running emcee ...", flush=True)
-        er = run_emcee(obs, model, params, fixed, nwalkers=args.nwalkers,
-                       nsteps=args.nsteps, abundance_model=abundance_model)
+        er = fit.sample("emcee", nwalkers=args.nwalkers, nsteps=args.nsteps,
+                        center=truths)
+        er.labels = labels
         print(f"  emcee: {er.runtime_s:.0f}s, {er.n_eval:,} evals, tau={er.tau}",
               flush=True)
 
     if args.sampler in ("both", "ultranest"):
         print("running ultranest ...", flush=True)
-        er_un_dir = os.path.join(args.outdir, "un")
-        ur = run_ultranest(obs, model, params, fixed,
-                           min_num_live_points=args.nlive, logdir=er_un_dir,
-                           abundance_model=abundance_model)
+        ur = fit.sample("ultranest", min_num_live_points=args.nlive,
+                        logdir=os.path.join(args.outdir, "un"))
+        ur.labels = labels
         print(f"  ultranest: {ur.runtime_s:.0f}s, {ur.n_eval:,} calls, "
-              f"logZ={ur.logz:.2f}+-{ur.logzerr:.2f}, ESS={ur.ess:.0f}", flush=True)
+              f"logZ={ur.logz:.2f}+-{ur.logzerr:.2f}, "
+              f"ESS={ur.min_ess:.0f}", flush=True)
 
     with open(os.path.join(args.outdir, "results.pkl"), "wb") as f:
         pickle.dump(dict(obs_counts=obs.counts, expected=obs.expected,
@@ -127,12 +138,14 @@ def main():
                          elements=args.elements), f)
 
     if er is not None:
-        plot_emcee_trace(er, os.path.join(args.outdir, "emcee_trace.png"))
+        plot_emcee_trace(er, os.path.join(args.outdir, "emcee_trace.png"),
+                         truths=truths)
     if ur is not None:
         plot_ultranest_diagnostics(ur,
                                    os.path.join(args.outdir, "ultranest_diag.png"))
     if er is not None and ur is not None:
-        plot_corner_overlay(er, ur, os.path.join(args.outdir, "corner.png"))
+        plot_corner_overlay(er, ur, os.path.join(args.outdir, "corner.png"),
+                            truths=truths)
     plot_posterior_predictive(obs, model, er, ur, fixed,
                               os.path.join(args.outdir,
                                            "posterior_predictive.png"),

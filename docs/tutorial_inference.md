@@ -13,7 +13,6 @@ All commands run in the `spexai` conda env. On macOS you **must** export one
 environment variable or torch scripts abort with an OpenMP error:
 
 ```bash
-export KMP_DUPLICATE_LIB_OK=TRUE          # macOS only; harmless elsewhere
 conda activate spexai                      # or prefix each call with: conda run -n spexai
 ```
 
@@ -366,7 +365,6 @@ pip install -e .                               # so `import spexai` resolves
 export ENV=spexai
 export DATADIR=$HOME/work/data/spexai/processed          # per-element SPEX caches
 export RESP=$HOME/work/data/spexai/responses             # RMF/ARF files
-export KMP_DUPLICATE_LIB_OK=TRUE                          # harmless off-macOS
 ```
 
 The model store (`spexai/models/`) ships with the repo. The manifest's

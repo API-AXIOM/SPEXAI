@@ -16,7 +16,7 @@ configurations are reported in the paper for that reason.
 Reads bias_{mode}_{masked_tag,unmasked_tag}.npz and emits a console table plus
 LaTeX rows for the paper.
 
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python \\
+    conda run -n spexai python \\
         scripts/experiments/hot_floor/compare_masking.py --mode single
     ... --mode dem --latex
 """

@@ -287,6 +287,32 @@ class PriorSet:
                    names=names, device=device)
 
     @classmethod
+    def box(cls, lo, hi, names: Optional[Sequence[str]] = None,
+            device: str = "cpu") -> "PriorSet":
+        """``BoxPrior``'s constructor, exactly -- positional bounds first.
+
+        :meth:`uniform` requires names, but much of the existing code calls
+        ``BoxPrior(lo, hi)`` with none (bounds derived from a Fisher sigma, say,
+        where the parameter order is the forward's and naming them adds
+        nothing). This constructor exists so replacing ``BoxPrior`` is a rename
+        rather than a rewrite at each of those sites, and it reproduces
+        ``BoxPrior``'s defaults: names fall back to ``p0, p1, ...`` and
+        ``hi > lo`` is validated up front rather than surfacing later as an
+        empty prior.
+        """
+        lo = np.asarray(lo, dtype=float).reshape(-1)
+        hi = np.asarray(hi, dtype=float).reshape(-1)
+        if lo.shape != hi.shape:
+            raise ValueError(f"lo and hi must have the same shape; got "
+                             f"{lo.shape} and {hi.shape}")
+        bad = [i for i in range(len(lo)) if not hi[i] > lo[i]]
+        if bad:
+            raise ValueError(f"prior bounds must satisfy hi > lo; bad at {bad}")
+        if names is None:
+            names = [f"p{i}" for i in range(len(lo))]
+        return cls.uniform(names, lo, hi, device=device)
+
+    @classmethod
     def from_params(cls, params, device: str = "cpu") -> "PriorSet":
         """From ``fitting.Param`` / ``fisher_bias.Par`` -- uniform on bounds."""
         return cls.uniform([p.name for p in params], [p.low for p in params],

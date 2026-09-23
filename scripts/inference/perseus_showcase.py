@@ -30,7 +30,9 @@ from spexai.inference.response import Response
 from spexai.inference.absorption import Absorption
 from spexai.inference.abundances import AbundanceModel
 from spexai.inference.simulate import Observation, simulate_observation
-from spexai.inference.fitting import Param, run_emcee, SIGMA_V_PRIOR
+from spexai.inference.fitting import Param, SIGMA_V_PRIOR
+from spexai.inference.priors import PriorSet
+from spexai.inference.spectral_fit import SpectralFit
 from spexai.inference import tempdist as td
 
 RESP_DIR = os.environ.get(
@@ -86,12 +88,36 @@ def run_single(truth, emu, response, absorption, args):
               Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
               Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
               Param("log_norm", ln - 1.5, ln + 1.5, truth=ln)]
-    res = run_emcee(obs, emu, params,
-                    {"abundances": {}, "logz": logz, "n_h": PERSEUS["n_h"],
-                     "luminosity_distance": PERSEUS["dist_m"]},
-                    nwalkers=args.nwalkers, nsteps=args.nsteps, seed=args.seed,
-                    abundance_model=abmodel, absorption=absorption)
-    return res, obs
+    return _sample(params, obs, emu, abmodel, absorption, logz,
+                   PERSEUS["dist_m"], args), obs
+
+
+def _sample(params, obs, emu, abmodel, absorption, logz, ld, args, dem=None):
+    """One emcee fit through the unified API.
+
+    ``truths`` and ``labels`` come off the ``Param`` list rather than off the
+    result: a posterior does not know the true answer, and ``SamplerResult``
+    deliberately does not pretend to. They are attached to the result here so
+    the reporting below can stay simple.
+
+    ``n_h_scale=1.0`` because ``PERSEUS["n_h"]`` here is an absolute column
+    density (1.4e21 cm^-2), reaching the forward through ``fixed``. The
+    campaign samples ``n_h`` in units of 1e21 instead, so the convention has to
+    be stated rather than defaulted -- getting it wrong is a factor of 1e21 and
+    raises nothing.
+    """
+    truths = np.array([p.truth for p in params], dtype=float)
+    fit = SpectralFit.from_observation(
+        obs, emu, PriorSet.from_params(params),
+        abundances=abmodel, absorption=absorption, dem=dem,
+        redshift=10.0 ** logz, luminosity_distance=ld, n_h_scale=1.0,
+        fixed={"abundances": {}, "logz": logz, "n_h": PERSEUS["n_h"],
+               "luminosity_distance": ld})
+    res = fit.sample("emcee", nwalkers=args.nwalkers, nsteps=args.nsteps,
+                     seed=args.seed, center=truths)
+    res.labels = [p.label or p.name for p in params]
+    res.extra["truths"] = truths
+    return res
 
 
 def run_dem(truth, emu, response, absorption, args):
@@ -126,12 +152,8 @@ def run_dem(truth, emu, response, absorption, args):
               Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
               Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
               Param("log_norm", ln - 1.5, ln + 1.5, truth=ln)]
-    res = run_emcee(obs, emu, params,
-                    {"abundances": {}, "logz": logz, "n_h": PERSEUS["n_h"],
-                     "luminosity_distance": ld},
-                    nwalkers=args.nwalkers, nsteps=args.nsteps, seed=args.seed,
-                    abundance_model=abmodel, dem=dem, absorption=absorption)
-    return res, obs
+    return _sample(params, obs, emu, abmodel, absorption, logz, ld, args,
+                   dem=dem), obs
 
 
 def main():
@@ -158,12 +180,13 @@ def main():
 
     runner = run_single if args.mode == "single" else run_dem
     res, obs = runner(truth, emu, response, absorption, args)
+    truths = res.extra["truths"]
 
     print(f"\nPerseus {args.mode} recovery ({obs.total_counts} counts, "
           f"D = {PERSEUS['dist_mpc']:.0f} Mpc fixed):")
     for i, name in enumerate(res.names):
         q16, q50, q84 = np.percentile(res.samples[:, i], [16, 50, 84])
-        t = res.truths[i]
+        t = truths[i]
         flag = "" if (q16 <= t <= q84) else "  <-- truth outside 68%"
         print(f"  {name:10s} truth={t:8.4f}  fit={q50:8.4f} "
               f"(-{q50-q16:.3f}/+{q84-q50:.3f}){flag}")
@@ -180,7 +203,7 @@ def main():
         import corner
         import matplotlib
         matplotlib.use("Agg")
-        fig = corner.corner(res.samples, labels=res.labels, truths=res.truths)
+        fig = corner.corner(res.samples, labels=res.labels, truths=truths)
         fig.savefig(f"{args.out}_{args.mode}_corner.png", dpi=130)
         print(f"wrote {args.out}_{args.mode}_corner.png")
     except Exception as e:

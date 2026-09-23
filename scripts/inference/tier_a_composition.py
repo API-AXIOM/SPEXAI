@@ -17,7 +17,7 @@ Elements outermost, one instantiation of SpexTruthModel + JointOperatorModel
 per element (both support `elements=[z]`), mirroring bias_sweep.py::stage_truth
 -- this is pure emulator-vs-truth in spectrum space, no fitting, no Fisher.
 
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python -u \\
+    conda run -n spexai python -u \\
         scripts/inference/tier_a_composition.py
 """
 import argparse

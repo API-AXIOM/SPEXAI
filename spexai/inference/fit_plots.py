@@ -1,5 +1,17 @@
-"""Diagnostic, corner, and posterior-predictive plots for the emcee and
-UltraNest fits produced by `spexai.inference.fitting`."""
+"""Diagnostic, corner, and posterior-predictive plots for any sampler result.
+
+These used to take ``fitting.EmceeResult`` and ``fitting.UltranestResult``,
+which is part of why those two classes could not be collapsed into the one
+:class:`~spexai.inference.samplers.SamplerResult` the bake-off already used.
+They now take ``SamplerResult``, so they work for all nine samplers rather than
+two.
+
+One deliberate signature change: **truths are passed in, not read off the
+result**. A posterior does not know the true answer -- only a simulation study
+does -- so making the result carry ``truths`` forced every real fit to invent a
+value. The studies that have truths now hand them over explicitly, and a fit to
+real data simply omits them.
+"""
 import corner
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,50 +22,74 @@ from matplotlib.lines import Line2D
 C_MCMC, C_NS, INK = "#0072B2", "#D55E00", "#222222"   # blue / vermillion (CVD-safe)
 
 
+def _truth_array(truths, n):
+    """``truths`` as a float array of length ``n``, NaN where unknown."""
+    if truths is None:
+        return np.full(n, np.nan)
+    return np.array([np.nan if t is None else float(t) for t in truths])
+
+
 def _predict(model, obs, names, theta, fixed, abundance_model=None):
+    """Counts for one parameter vector, under either naming convention.
+
+    ``kT``/``sigma_v`` are canonical; ``temp``/``velocity`` are the retired
+    spelling and still appear in saved results and older scripts.
+    """
     p = dict(zip(names, theta))
-    vel = p.get("velocity", fixed.get("velocity", 0.0))
+    temp = p.get("kT", p.get("temp"))
+    if temp is None:
+        raise KeyError(f"no temperature parameter in {list(p)}; expected "
+                       f"'kT' (or the legacy 'temp')")
+    vel = p.get("sigma_v", p.get("velocity", fixed.get("velocity", 0.0)))
     abund = ({**fixed.get("abundances", {}), **abundance_model.to_abundances(p)}
              if abundance_model is not None else fixed.get("abundances", {}))
     return model.predict_counts(
-        torch.tensor([float(p["temp"])]), abund,
+        torch.tensor([float(temp)]), abund,
         float(fixed.get("logz", -10.0)), 10.0 ** float(p["log_norm"]),
         float(vel), obs.response, obs.exposure).squeeze(0).cpu().numpy()
 
 
-def plot_emcee_trace(er, outpath):
-    """MCMC trace per parameter + autocorrelation time."""
-    ndim = len(er.names)
+def plot_emcee_trace(res, outpath, truths=None):
+    """Per-parameter trace + autocorrelation time, for any ensemble sampler."""
+    if res.chain is None:
+        raise ValueError(f"{res.name} produced no chain to trace; "
+                         f"traces are for ensemble samplers")
+    ndim = len(res.names)
+    tr = _truth_array(truths, ndim)
+    tau = res.tau if res.tau is not None else np.full(ndim, np.nan)
     fig, axes = plt.subplots(ndim, 1, figsize=(9, 2.2 * ndim), sharex=True)
     for i, ax in enumerate(np.atleast_1d(axes)):
-        ax.plot(er.chain[:, :, i], color="k", alpha=0.25, lw=0.5)
-        ax.axvline(er.discard, color="#888", ls=":", lw=1)          # burn-in
-        if np.isfinite(er.truths[i]):
-            ax.axhline(er.truths[i], color=C_NS, lw=1.5)            # truth
-        ax.set_ylabel(er.labels[i], color=INK)
-        tau = er.tau[i]
-        ax.text(0.99, 0.06, (rf"$\tau\approx{tau:.0f}$ steps"
-                             if np.isfinite(tau) else r"$\tau$: n/a"),
+        ax.plot(res.chain[:, :, i], color="k", alpha=0.25, lw=0.5)
+        ax.axvline(res.discard, color="#888", ls=":", lw=1)          # burn-in
+        if np.isfinite(tr[i]):
+            ax.axhline(tr[i], color=C_NS, lw=1.5)                    # truth
+        ax.set_ylabel(res.labels[i], color=INK)
+        ax.text(0.99, 0.06, (rf"$\tau\approx{tau[i]:.0f}$ steps"
+                             if np.isfinite(tau[i]) else r"$\tau$: n/a"),
                 transform=ax.transAxes, ha="right", fontsize=9, color="#555")
     np.atleast_1d(axes)[-1].set_xlabel("step")
     np.atleast_1d(axes)[0].set_title(
-        f"emcee traces — burn-in={er.discard}, "
-        f"{er.samples.shape[0]} post-burn-in samples "
+        f"{res.name} traces — burn-in={res.discard}, "
+        f"{res.samples.shape[0]} post-burn-in samples "
         f"(dotted = burn-in, orange = truth)")
     fig.tight_layout()
     fig.savefig(outpath, dpi=140, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_ultranest_diagnostics(ur, outpath):
-    """UltraNest's trace (the NS analogue of the MCMC trace) + evidence/ESS."""
+def plot_ultranest_diagnostics(res, outpath):
+    """UltraNest's own trace plot + evidence/ESS summary."""
     import ultranest.plot as up
+    raw = res.extra.get("result")
+    if raw is None:
+        raise ValueError("no UltraNest result payload on this SamplerResult; "
+                         "this plot is specific to run_ultranest")
     try:
-        up.traceplot(ur.result, labels=ur.labels)
+        up.traceplot(raw, labels=list(res.labels))
         fig = plt.gcf()
-        fig.suptitle(f"UltraNest trace — ln Z = {ur.logz:.2f} ± {ur.logzerr:.2f}, "
-                     f"ESS = {ur.ess:.0f}, {ur.n_eval:,} likelihood calls",
-                     fontsize=11, y=1.02)
+        fig.suptitle(f"UltraNest trace — ln Z = {res.logz:.2f} ± "
+                     f"{res.logzerr:.2f}, ESS = {res.min_ess:.0f}, "
+                     f"{res.n_eval:,} likelihood calls", fontsize=11, y=1.02)
     except Exception as exc:                                  # pragma: no cover
         fig, ax = plt.subplots(figsize=(7, 4))
         ax.text(0.5, 0.5, f"traceplot failed:\n{exc}", ha="center", va="center")
@@ -61,31 +97,38 @@ def plot_ultranest_diagnostics(ur, outpath):
     plt.close(fig)
 
 
-def plot_corner_overlay(er, ur, outpath):
-    """Corner plot with emcee and UltraNest posteriors overlaid."""
-    truths = [t if np.isfinite(t) else None for t in er.truths]
-    rng = [(min(er.samples[:, i].min(), ur.samples[:, i].min()),
-            max(er.samples[:, i].max(), ur.samples[:, i].max()))
-           for i in range(len(er.names))]
-    ckw = dict(labels=er.labels, range=rng, plot_datapoints=False,
+def plot_corner_overlay(a, b, outpath, truths=None,
+                        labels=("emcee (MCMC)", "UltraNest (NS)")):
+    """Corner plot with two posteriors overlaid.
+
+    Any two ``SamplerResult``s over the same parameters -- the pair is no
+    longer hardwired to emcee and UltraNest, only its default legend is.
+    """
+    tr = _truth_array(truths, len(a.names))
+    truth_list = [t if np.isfinite(t) else None for t in tr]
+    rng = [(min(a.samples[:, i].min(), b.samples[:, i].min()),
+            max(a.samples[:, i].max(), b.samples[:, i].max()))
+           for i in range(len(a.names))]
+    ckw = dict(labels=list(a.labels), range=rng, plot_datapoints=False,
                plot_density=False, fill_contours=False, levels=(0.393, 0.865),
                hist_kwargs=dict(density=True, alpha=0.85))
-    fig = corner.corner(er.samples, color=C_MCMC,
+    fig = corner.corner(a.samples, color=C_MCMC,
                         contour_kwargs=dict(alpha=0.9), **ckw)
-    corner.corner(ur.samples, fig=fig, color=C_NS, truths=truths,
+    corner.corner(b.samples, fig=fig, color=C_NS, truths=truth_list,
                   truth_color="k", contour_kwargs=dict(alpha=0.9), **ckw)
     fig.legend([Line2D([0], [0], color=C_MCMC), Line2D([0], [0], color=C_NS),
                 Line2D([0], [0], color="k", ls="--")],
-               ["emcee (MCMC)", "UltraNest (NS)", "truth"],
+               [*labels, "truth"],
                loc="upper right", frameon=False, fontsize=12)
     fig.savefig(outpath, dpi=140, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_posterior_predictive(obs, model, er, ur, fixed, outpath,
-                              ndraw=20, seed=0, abundance_model=None):
-    """Two panels (MCMC | UltraNest); each has a spectrum subplot (data,
-    posterior median, `ndraw` posterior draws) over a residual subplot."""
+def plot_posterior_predictive(obs, model, a, b, fixed, outpath,
+                              ndraw=20, seed=0, abundance_model=None,
+                              labels=("emcee (MCMC)", "UltraNest (NS)")):
+    """Two panels; each has a spectrum subplot (data, posterior median,
+    ``ndraw`` posterior draws) over a residual subplot."""
     e = obs.response.chan_e_cent.numpy()
     width = (obs.response.chan_e_max - obs.response.chan_e_min).numpy()
     band = (obs.expected > 0.02 * obs.expected.max() if obs.expected is not None
@@ -93,8 +136,7 @@ def plot_posterior_predictive(obs, model, er, ur, fixed, outpath,
     rng = np.random.default_rng(seed)
 
     panels = [(res, label, color) for res, label, color in
-              [(er, "emcee (MCMC)", C_MCMC), (ur, "UltraNest (NS)", C_NS)]
-              if res is not None]
+              [(a, labels[0], C_MCMC), (b, labels[1], C_NS)] if res is not None]
     fig = plt.figure(figsize=(7 * len(panels), 6))
     gs = GridSpec(2, len(panels), height_ratios=[3, 1], hspace=0.05, wspace=0.16)
     for col, (res, label, color) in enumerate(panels):
@@ -132,9 +174,15 @@ def plot_posterior_predictive(obs, model, er, ur, fixed, outpath,
             ax0.set_xlim(max(0.2, e[band].min() * 0.9), e[band].max() * 1.1)
         plt.setp(ax0.get_xticklabels(), visible=False)
 
-    fig.suptitle(f"{obs.instrument} — posterior predictive "
-                 f"(true $T$ = {obs.true_params['temp']} keV, "
-                 f"$v$ = {obs.true_params.get('velocity', 0)} km/s)",
+    # a real observation has no true_params; only the simulation studies do
+    tp = getattr(obs, "true_params", None) or {}
+    truth_bit = ""
+    if tp:
+        t = tp.get("kT", tp.get("temp"))
+        v = tp.get("sigma_v", tp.get("velocity", 0))
+        if t is not None:
+            truth_bit = f" (true $T$ = {t} keV, $v$ = {v} km/s)"
+    fig.suptitle(f"{obs.instrument} — posterior predictive{truth_bit}",
                  fontsize=12)
     fig.savefig(outpath, dpi=140, bbox_inches="tight")
     plt.close(fig)

@@ -29,7 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from spexai.inference.operator_model import JointOperatorModel
 from spexai.inference.spex_truth import SpexTruthModel
 from spexai.inference.simulate import simulate_observation
-from spexai.inference.fitting import Param, run_emcee, SIGMA_V_PRIOR
+from spexai.inference.fitting import Param, SIGMA_V_PRIOR
+from spexai.inference.priors import PriorSet
+from spexai.inference.spectral_fit import SpectralFit
 
 # realistic cluster ranges (temp keV, velocity km/s, log10 norm); abundances
 # fixed solar and logz fixed here to keep the smoke small -- extend as needed.
@@ -73,8 +75,13 @@ def run_one(truth_model, fit_model, response, ranges, rng, exposure,
                                target_counts=target_counts, rng=int(rng.integers(1 << 30)))
     truth["log_norm"] = float(np.log10(obs.true_params["norm"]))  # after rescale
     params = fit_params(truth, ranges)
-    res = run_emcee(obs, fit_model, params, {"abundances": {}, "logz": -10.0},
-                    nwalkers=nwalkers, nsteps=nsteps, seed=int(rng.integers(1 << 30)))
+    # no absorption and no fixed n_h here, so n_h_scale never enters
+    fit = SpectralFit.from_observation(
+        obs, fit_model, PriorSet.from_params(params),
+        redshift=10.0 ** -10.0, fixed={"abundances": {}, "logz": -10.0})
+    res = fit.sample("emcee", nwalkers=nwalkers, nsteps=nsteps,
+                     seed=int(rng.integers(1 << 30)),
+                     center=np.array([p.truth for p in params], dtype=float))
     out = {}
     for i, name in enumerate(res.names):
         s = res.samples[:, i]

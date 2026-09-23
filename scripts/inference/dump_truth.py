@@ -2,7 +2,7 @@
 per-element caches) and save a tiny in-band vector, so the cluster MCMC never
 needs the caches or SpexTruthModel -- only the 388 MB store + the response.
 
-  KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python -u \
+  conda run -n spexai python -u \
       scripts/inference/dump_truth.py --mode single
 
 Writes results/truth_<mode><tag>.npz with the in-band truth counts at norm_ref,

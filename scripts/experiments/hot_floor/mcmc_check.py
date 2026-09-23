@@ -8,7 +8,7 @@ we can simulate near `N*` -- where the systematic bias reaches ~1 sigma and is
 directly detectable -- to confirm the linearisation.
 
 Local smoke (a few minutes, just checks it runs):
-  KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python -u \
+  conda run -n spexai python -u \
       scripts/experiments/hot_floor/mcmc_check.py --smoke
 
 Cluster (scale up; use a process pool):

@@ -13,7 +13,8 @@ confident-looking, wrong posterior.
 import numpy as np
 import pytest
 
-from spexai.inference.posterior import BoxPrior, PoissonPosterior
+from spexai.inference.posterior import PoissonPosterior
+from spexai.inference.priors import PriorSet
 from spexai.inference import samplers
 
 
@@ -41,7 +42,7 @@ def _problem(seed=0):
     fwd = _LinearForward()
     mu = fwd(TRUTH[None, :])[0]
     data = np.random.default_rng(seed).poisson(mu).astype(float)
-    prior = BoxPrior([np.log(30.0), -2.0], [np.log(3000.0), 3.0],
+    prior = PriorSet.box([np.log(30.0), -2.0], [np.log(3000.0), 3.0],
                      ["log_amp", "tilt"])
     return PoissonPosterior(fwd, data, prior)
 
@@ -97,7 +98,7 @@ def test_uniform_box_scipy_rejects_nonuniform():
 
 
 def test_uniform_box_scipy_matches_bounds():
-    prior = BoxPrior([0.0, -1.0], [2.0, 5.0], ["a", "b"])
+    prior = PriorSet.box([0.0, -1.0], [2.0, 5.0], ["a", "b"])
     d = samplers._uniform_box_scipy(prior)
     assert d[0].ppf(0.0) == pytest.approx(0.0)
     assert d[1].ppf(1.0) == pytest.approx(5.0)

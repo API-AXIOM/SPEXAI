@@ -22,14 +22,17 @@ import os
 
 import torch
 
+from spexai.config import STORE
 from spexai.operator import OperatorConfig, SpectralOperator
 from spexai.broadening import (deposit_gaussian_lines, fft_broaden,
                                      rebin_flux, scatter_to_grid,
                                      uniform_log_edges)
 from spexai.inference.units import D_REF_M, FLUX_M2_TO_CM2, distance_factor
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "models")
+# The model store. Sourced from `spexai.config` so that `SPEXAI_STORE`
+# moves it -- the default is still `spexai/models/` inside the package, so
+# an unset variable behaves exactly as before.
+MODELS_DIR = STORE
 
 
 def abundance_weight(value, device):

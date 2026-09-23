@@ -22,7 +22,7 @@ import torch
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from spexai.inference.posterior import BoxPrior              # noqa: E402
+from spexai.inference.priors import PriorSet              # noqa: E402
 from mle_reseed import gauss_newton_batch, gn_score          # noqa: E402
 from test_lbfgs_precondition import NDIM, _ToyForward        # noqa: E402
 
@@ -93,7 +93,7 @@ def gtoy():
     truth = np.zeros(NDIM)
     fwd = _GNToy(truth)
     sigma = fwd.sigma_at_truth()                              # (NDIM,)
-    prior = BoxPrior(truth - 1e4 * sigma, truth + 1e4 * sigma)
+    prior = PriorSet.box(truth - 1e4 * sigma, truth + 1e4 * sigma)
     # a step of 0.1 sigma is small against curvature and large against the
     # toy's float64 exactness, matching how p.step is chosen for the real run
     pars = [_P(truth[j] - 1e4 * sigma[j], truth[j] + 1e4 * sigma[j],
@@ -309,7 +309,7 @@ def test_stall_detector_ends_a_limit_cycle(capsys):
     truth = np.zeros(NDIM)
     fwd = _JitteryToy(truth)
     sigma = fwd.sigma_at_truth()
-    prior = BoxPrior(truth - 1e4 * sigma, truth + 1e4 * sigma)
+    prior = PriorSet.box(truth - 1e4 * sigma, truth + 1e4 * sigma)
     pars = [_P(truth[j] - 1e4 * sigma[j], truth[j] + 1e4 * sigma[j],
                0.1 * sigma[j]) for j in range(NDIM)]
     theta_star, data, start = _planted(fwd, truth, sigma, K=2, seed=31)
@@ -417,7 +417,7 @@ def test_steps_stay_inside_the_box(gtoy):
     fwd, _, truth, sigma, _ = gtoy
     lo, hi = truth - 0.5 * sigma, truth + 0.5 * sigma           # a tight box
     pars = [_P(lo[j], hi[j], 0.1 * sigma[j]) for j in range(NDIM)]
-    prior = BoxPrior(lo, hi)
+    prior = PriorSet.box(lo, hi)
     _, data, _ = _planted(fwd, truth, sigma, K=2, offset=3.0)
     mle, _ = gauss_newton_batch(fwd, prior, data, truth, pars, n_iter=5,
                                 sigma_ref=sigma, max_step_sigma=50.0,

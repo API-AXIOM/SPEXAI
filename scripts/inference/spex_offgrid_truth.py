@@ -42,7 +42,7 @@ Usage:
     python scripts/inference/validate_spex_norm.py --mode spex --elements all \
         --keep-h --match-cache <processed> --gacc 0.01 --temps <same> \
         --edges /tmp/egrid.npz --out nodes_g01.npz
-    KMP_DUPLICATE_LIB_OK=TRUE python scripts/inference/spex_offgrid_truth.py \
+    python scripts/inference/spex_offgrid_truth.py \
         --mode compare --in truth_g01.npz --nodes nodes_g01.npz
 """
 import argparse

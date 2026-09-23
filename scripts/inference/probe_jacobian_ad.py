@@ -25,7 +25,7 @@ This probe answers three questions before any code is replaced:
 
 Read-only: nothing here changes the estimator.
 
-    KMP_DUPLICATE_LIB_OK=TRUE python -u scripts/inference/probe_jacobian_ad.py
+    python -u scripts/inference/probe_jacobian_ad.py
 """
 import argparse
 import dataclasses

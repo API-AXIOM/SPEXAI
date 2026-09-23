@@ -10,7 +10,7 @@ keeps the same data under a differently-named tree instead. A mismatch here
 is a configuration gap (export the right env vars, or scope them to the
 conda env with ``conda env config vars set -n <env> ...``), not a code bug.
 
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python scripts/inference/check_paths.py
+    conda run -n spexai python scripts/inference/check_paths.py
 
 Package-level dependencies (torch, emcee, ultranest, ...) are
 ``scripts/check_deps.py``'s job, not this script's -- this only checks paths.

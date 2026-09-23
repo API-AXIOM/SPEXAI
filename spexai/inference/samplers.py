@@ -15,6 +15,7 @@ pays for a B=1 forward per gradient, which is a structural handicap unrelated
 to its mixing -- hence ``n_eval`` is counted in *walkers evaluated*, so the two
 effects can be told apart.
 """
+import contextlib
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -37,6 +38,17 @@ class SamplerResult:
     logzerr: Optional[float] = None
     chain: Optional[np.ndarray] = None      # (nsteps, nwalkers, ndim) if any
     extra: dict = field(default_factory=dict)
+    # --- plotting / diagnostics ---------------------------------------------
+    # These three exist so `fit_plots` can consume a SamplerResult directly.
+    # They were only ever on EmceeResult/UltranestResult, which is a large part
+    # of why the two result types could not be collapsed into one.
+    labels: Optional[Sequence[str]] = None  # display names; None -> use `names`
+    discard: int = 0                        # burn-in steps dropped from `chain`
+    tau: Optional[np.ndarray] = None        # autocorrelation time, ensembles
+
+    def __post_init__(self):
+        if self.labels is None:
+            self.labels = list(self.names)
 
     @property
     def median(self) -> np.ndarray:
@@ -111,6 +123,30 @@ def _ess(chain: np.ndarray, names: Sequence[str]) -> np.ndarray:
         return np.full(len(names), np.nan)
 
 
+@contextlib.contextmanager
+def _seeded_global_numpy(seed):
+    """Pin NumPy's global legacy RNG across a block, then restore it.
+
+    emcee 3 does not take a seed. ``EnsembleSampler.__init__`` snapshots
+    NumPy's **global** legacy state (``np.random.get_state()``) into its own
+    ``RandomState``, and every proposal thereafter draws from that. So a
+    ``seed`` argument that only feeds ``default_rng`` seeds the walker
+    *initialisation* and nothing else: two runs with the same seed produce
+    different chains, which is how this package behaved until 2026-09-22.
+
+    Seeding the global RNG before construction fixes it. Restoring the previous
+    state afterwards keeps the fix from leaking: a caller's own RNG stream --
+    including the Poisson draw that makes the data -- must not silently become
+    a function of which sampler ran first.
+    """
+    state = np.random.get_state()
+    try:
+        np.random.seed(seed)
+        yield
+    finally:
+        np.random.set_state(state)
+
+
 def _init_walkers(prior, nwalkers, rng, center=None, scatter=0.02):
     """Walker cloud around ``center`` (or the box middle), clipped inside."""
     lo = prior.lo.cpu().numpy()
@@ -158,8 +194,10 @@ def run_emcee(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
 
     post.n_eval = 0
     t0 = time.time()
-    sampler = emcee.EnsembleSampler(nwalkers, post.prior.ndim, post.logp,
-                                    vectorize=True, backend=backend)
+    # construction is what captures the RNG state -- see _seeded_global_numpy
+    with _seeded_global_numpy(seed):
+        sampler = emcee.EnsembleSampler(nwalkers, post.prior.ndim, post.logp,
+                                        vectorize=True, backend=backend)
     every = progress_every or max(1, nsteps // 20)
     for i, _ in enumerate(sampler.sample(p0, iterations=nsteps)):
         if i == 0 or (i + 1) % every == 0:
@@ -169,11 +207,16 @@ def run_emcee(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
     runtime = time.time() - t0
     discard = int(discard_frac * nsteps)
     chain = sampler.get_chain()
+    try:
+        tau = sampler.get_autocorr_time(quiet=True)
+    except Exception:
+        tau = np.full(post.prior.ndim, np.nan)
     return SamplerResult(
         "emcee", post.prior.names, sampler.get_chain(discard=discard, flat=True),
         runtime, post.n_eval, _ess(chain[discard:], post.prior.names),
         chain=chain, extra={"acceptance": float(
-            np.mean(sampler.acceptance_fraction))})
+            np.mean(sampler.acceptance_fraction))},
+        discard=discard, tau=tau)
 
 
 def run_zeus(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
@@ -197,7 +240,7 @@ def run_zeus(post, nwalkers=64, nsteps=800, discard_frac=0.4, seed=0,
     return SamplerResult(
         "zeus", post.prior.names, sampler.get_chain(discard=discard, flat=True),
         runtime, post.n_eval, _ess(chain[discard:], post.prior.names),
-        chain=chain)
+        chain=chain, discard=discard)
 
 
 def run_ultranest(post, min_num_live_points=400, frac_remain=0.01,
@@ -964,3 +1007,41 @@ def run_hmc(post, nwalkers=64, n_samples=500, n_warmup=500, n_leapfrog=20,
                                 "accept_rate": accept_rate,
                                 "n_leapfrog": int(n_leapfrog),
                                 "grads_per_iter": int(grads_per_iter)})
+
+
+# --- registry ---------------------------------------------------------------
+
+#: Every sampler in the bake-off, addressable by name.
+#:
+#: The bake-off reached all nine of these; the user-facing path reached two,
+#: because ``fitting.py`` hardcoded its own emcee and UltraNest front-ends.
+#: This mapping is what lets one entry point (``SpectralFit.sample``) offer the
+#: whole set without a chain of ``if name == ...``, and what turns an unknown
+#: name into an error that lists the alternatives.
+SAMPLERS = {
+    "emcee": run_emcee,
+    "zeus": run_zeus,
+    "ultranest": run_ultranest,
+    "nautilus": run_nautilus,
+    "pocomc": run_pocomc,
+    "inessai": run_inessai,
+    "svi": run_svi,
+    "nuts": run_nuts,
+    "hmc": run_hmc,
+}
+
+#: Samplers whose first argument is a Pyro :class:`~spexai.inference.ppl.
+#: SpectrumModel` rather than a ``PoissonPosterior``. They are not
+#: interchangeable at the call site, so anything dispatching by name has to
+#: know which kind it is holding; ``SpectralFit.sample`` builds the model for
+#: these and passes the posterior for the rest.
+GRADIENT_SAMPLERS = frozenset({"svi", "nuts"})
+
+
+def get_sampler(name):
+    """Look up a sampler by name, or raise an error naming the available ones."""
+    try:
+        return SAMPLERS[name]
+    except KeyError:
+        raise KeyError(f"unknown sampler {name!r}; available: "
+                       f"{', '.join(sorted(SAMPLERS))}") from None

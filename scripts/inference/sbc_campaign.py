@@ -117,9 +117,10 @@ def build_forward(args):
         velocity=None, device=args.device, chunk=args.chunk,
         batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
         echunk=args.echunk)
-    # a PriorSet, not a BoxPrior: SBC must *draw* from the prior, and going
-    # through prior.sample keeps this script correct if the box is later
-    # swapped for informative priors
+    # SBC must *draw* from the prior, and going through prior.sample keeps this
+    # script correct if the box is later swapped for informative priors. (This
+    # was the first caller to need PriorSet, back when the rest of the package
+    # still used the uniform-only BoxPrior; PriorSet is now the only prior.)
     prior = PriorSet.uniform(names, lo, hi, device=args.device)
     return forward, prior, names
 

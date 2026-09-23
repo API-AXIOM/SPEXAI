@@ -20,7 +20,7 @@ This script confirms the cause rather than assuming it, by re-running one point
 under several configurations and counting distinct results.
 
 Usage (on the GPU machine, same env as the bake-off):
-    KMP_DUPLICATE_LIB_OK=TRUE python scripts/inference/diagnose_nondeterminism.py \
+    python scripts/inference/diagnose_nondeterminism.py \
         --truth <truth.npz> --device cuda [--n 16] [--compile]
 """
 import argparse

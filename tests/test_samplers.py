@@ -12,7 +12,8 @@ import numpy as np
 import pytest
 import torch
 
-from spexai.inference.posterior import BoxPrior, PoissonPosterior
+from spexai.inference.posterior import PoissonPosterior
+from spexai.inference.priors import PriorSet
 from spexai.inference import samplers
 
 NDIM, NCHAN = 3, 40
@@ -45,7 +46,7 @@ def post():
     fwd = _SmoothForward()
     mu = fwd(TRUTH[None, :])[0]
     data = np.random.default_rng(0).poisson(mu).astype(np.float64)
-    prior = BoxPrior(np.zeros(NDIM), np.ones(NDIM), fwd.names)
+    prior = PriorSet.box(np.zeros(NDIM), np.ones(NDIM), fwd.names)
     return PoissonPosterior(fwd, data, prior)
 
 

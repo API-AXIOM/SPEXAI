@@ -31,7 +31,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from spexai.inference.posterior import BoxPrior, PoissonPosterior  # noqa: E402
+from spexai.inference.posterior import PoissonPosterior  # noqa: E402
+from spexai.inference.priors import PriorSet
 from spexai.inference.ppl import SpectrumModel, uniform_priors     # noqa: E402
 
 
@@ -77,7 +78,7 @@ def bench_overhead(args):
     rng = np.random.default_rng(0)
     data = rng.poisson(fwd(np.full((1, ndim), 0.5))[0]).astype(np.float64)
 
-    prior = BoxPrior(lo, hi, fwd.names)
+    prior = PriorSet.box(lo, hi, fwd.names)
     post = PoissonPosterior(fwd, data, prior)
     model = SpectrumModel(fwd, data, uniform_priors(fwd.names, lo, hi))
 

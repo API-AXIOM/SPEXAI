@@ -43,7 +43,7 @@ from mle_reseed import (                                          # noqa: E402
     tierb_response,
     worst_ratio)
 from spexai.config import RESULTS, STORE                          # noqa: E402
-from spexai.inference.posterior import BoxPrior                   # noqa: E402
+from spexai.inference.priors import PriorSet                   # noqa: E402
 
 
 def repeat_check(forward, truth, n=3):
@@ -102,7 +102,7 @@ def repeat_check(forward, truth, n=3):
 def run_point(args, rec, counts_row, forward, keep):
     """One point: K reseeded MLEs -> k per parameter, plus diagnostics."""
     pars, names, truth, mu_true = tierb_point(args, rec, counts_row, keep)
-    prior = BoxPrior.from_params(pars, device=args.device)
+    prior = PriorSet.from_params(pars, device=args.device)
 
     b_sys = np.asarray(rec["b_sys"])
     # b_sys is count-independent (F and the residual term both scale with N);

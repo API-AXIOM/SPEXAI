@@ -14,7 +14,8 @@ import torch
 
 pytest.importorskip("pyro")
 
-from spexai.inference.posterior import BoxPrior, PoissonPosterior  # noqa: E402
+from spexai.inference.posterior import PoissonPosterior  # noqa: E402
+from spexai.inference.priors import PriorSet
 from spexai.inference.ppl import SpectrumModel, uniform_priors     # noqa: E402
 
 NDIM, NCHAN = 4, 25
@@ -47,7 +48,7 @@ def setup():
     rng = np.random.default_rng(0)
     data = rng.poisson(fwd(np.full((1, NDIM), 0.5))[0]).astype(np.float64)
     model = SpectrumModel(fwd, data, uniform_priors(fwd.names, lo, hi))
-    post = PoissonPosterior(fwd, data, BoxPrior(lo, hi, fwd.names))
+    post = PoissonPosterior(fwd, data, PriorSet.box(lo, hi, fwd.names))
     return fwd, model, post
 
 

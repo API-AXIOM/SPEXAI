@@ -19,7 +19,7 @@ offset, which is the larger term and would otherwise be read as interpolation
 error.
 
 Usage:
-    KMP_DUPLICATE_LIB_OK=TRUE python scripts/inference/summarise_offgrid.py \
+    python scripts/inference/summarise_offgrid.py \
         --offgrid off_sa3_g001.npz --nodes nodes_sa3_g001.npz \
         [--gdef off_sa3_gdef.npz] [--datadir <processed>]
 """

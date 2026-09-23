@@ -1,38 +1,35 @@
-"""Bayesian inference on (simulated) spectra with the operator emulator.
+"""The scalar reference likelihood, and the parameter dataclass.
 
-One Poisson likelihood, run two ways: MCMC (`emcee`) and nested sampling
-(`ultranest`). Both fit the same parameter set so their posteriors are directly
-comparable.
+**This module no longer runs fits.** Its ``run_emcee``/``run_ultranest`` front
+ends and their ``EmceeResult``/``UltranestResult`` types were a second, weaker
+copy of what :mod:`spexai.inference.samplers` already did -- two samplers
+instead of nine, no ESS, no checkpointing -- and were removed on 2026-09-22.
+Fits are assembled with :class:`~spexai.inference.spectral_fit.SpectralFit` and
+run with ``.sample(<name>)``. What remains here is the part that was never
+duplicated:
 
-Parameters are sampled in natural units except the normalisation, which is
-sampled as ``log_norm`` = log10(norm). `fixed` carries anything not fit
-(abundances, logz, and velocity if it is not a free parameter).
+``make_loglike`` is the **scalar reference likelihood**: one parameter set per
+call, straight through ``JointOperatorModel.predict_counts``, simple enough to
+read and check by eye. The production path -- a
+:class:`~spexai.inference.posterior.PoissonPosterior` over a
+:class:`~spexai.inference.vector_forward.VectorForward` -- evaluates a whole
+walker ensemble in one batched forward instead.
 
-**Two implementations of that likelihood, deliberately.**
+The two must agree, and ``tests/test_fitting.py`` asserts that they do at every
+construction. Keeping the scalar version is not redundancy for its own sake: it
+is the independent reference that catches silent walker-axis-alignment bugs, of
+which the batched forward has already produced one (a per-walker ``n_h``
+broadcast against the element axis). Since this machinery exists to *establish*
+calibration, a quietly wrong likelihood would invalidate the very thing it
+measures.
 
-``make_loglike`` is the *scalar reference*: one parameter set per call, straight
-through ``JointOperatorModel.predict_counts``. Simple enough to read and check
-by eye.
-
-:class:`~spexai.inference.posterior.PoissonPosterior` over
-:class:`~spexai.inference.vector_forward.VectorForward` is the *production*
-path: it evaluates the whole walker ensemble in one batched forward, which is
-where the element-batched trunk's speedup actually lands. ``vectorized=True``
-(the default) selects it.
-
-They must agree, and ``tests/test_fitting.py`` asserts that they do. Keeping the
-scalar version is not redundancy for its own sake -- it is the independent
-reference that catches the kind of silent, walker-axis-alignment bug the batched
-forward has already produced once (a per-walker ``n_h`` broadcast against the
-element axis). Since this machinery exists to *establish* calibration, a
-quietly wrong likelihood would invalidate the very thing it measures.
-
-The vectorised path falls back to the scalar one automatically, with a reason,
-whenever it does not apply -- see :func:`build_posterior`.
+``Param`` and ``SIGMA_V_PRIOR`` stay because the simulation studies specify
+parameters as boxes with a truth attached;
+:meth:`~spexai.inference.priors.PriorSet.from_params` turns a ``Param`` list
+into the prior a fit actually uses.
 """
-import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -148,180 +145,39 @@ def build_posterior(obs, model, params, fixed, abundance_model=None,
                     absorption=None, keep=None, dem=None, **forward_kwargs):
     """Vectorised :class:`PoissonPosterior` for one observation.
 
-    Mirrors :func:`make_loglike`'s semantics exactly -- same parameter roles,
-    same ``fixed`` fallbacks, same physical scaling -- but evaluates a whole
-    ensemble per call. Returns ``None`` if the fit needs something the batched
-    forward cannot express (see :func:`vectorization_blocker`).
-    """
-    from spexai.inference.posterior import BoxPrior, PoissonPosterior
-    from spexai.inference.vector_forward import VectorForward
-    from spexai.inference.abundances import AbundanceModel
+    **Deprecated.** This is now a thin adapter over
+    :class:`~spexai.inference.spectral_fit.SpectralFit`, which is the single
+    assembly point; it survives only so existing callers and the scalar-vs-
+    vectorised reference tests keep working unchanged. New code should build a
+    ``SpectralFit`` directly -- it reaches all nine samplers, whereas this
+    returns a bare posterior.
 
-    names = [p.name for p in params]
-    counts = np.asarray(obs.counts, dtype=np.float64)
-    keep = np.ones(len(counts), dtype=bool) if keep is None else np.asarray(keep)
-    # velocity: sampled if it is a parameter, otherwise pinned at its fixed value
-    velocity = None if "velocity" in names else float(fixed.get("velocity", 0.0))
-    ab = abundance_model if abundance_model is not None else AbundanceModel([])
-    forward = VectorForward(
-        model, obs.response, keep, names, ab, absorption=absorption,
+    Returns ``None`` if the fit needs something the batched forward cannot
+    express (see :func:`vectorization_blocker`), which ``SpectralFit`` would
+    instead raise over.
+
+    ``n_h_scale=1.0`` is pinned here deliberately: this entry point has always
+    taken ``n_h`` in absolute cm^-2, and the campaign's 1e21 convention would
+    silently change every existing caller's absorption by that factor.
+    """
+    from spexai.inference.priors import PriorSet
+    from spexai.inference.spectral_fit import SpectralFit
+
+    warnings.warn(
+        "fitting.build_posterior is deprecated; build a "
+        "spexai.inference.SpectralFit instead. It takes the same pieces, gives "
+        "you .posterior, and adds .sample(<any of nine samplers>). Note "
+        "build_posterior pins n_h_scale=1.0 (n_h in absolute cm^-2); "
+        "SpectralFit makes you state the convention.",
+        DeprecationWarning, stacklevel=2)
+
+    if vectorization_blocker([p.name for p in params], dem) is not None:
+        return None
+    return SpectralFit(
+        emulator=model, response=obs.response, counts=obs.counts,
+        exposure=obs.exposure, priors=PriorSet.from_params(params),
+        abundances=abundance_model, absorption=absorption, dem=dem,
         redshift=10.0 ** float(fixed.get("logz", -10.0)),
         luminosity_distance=float(fixed.get("luminosity_distance", D_REF_M)),
-        velocity=velocity, fixed=fixed, n_h_scale=1.0,
-        device=model.device, exposure=float(obs.exposure),
-        temp_name="temp", norm_name="log_norm", velocity_name="velocity",
-        nh_name="n_h", dem=dem, **forward_kwargs)
-    # abundances not managed by the abundance model still have to be applied;
-    # they are constants, so they ride along as the forward's fixed set
-    forward.fixed.setdefault("abundances", fixed.get("abundances", {}))
-    prior = BoxPrior.from_params(params, device=model.device)
-    return PoissonPosterior(forward, counts[keep], prior)
-
-
-def _resolve_posterior(obs, model, params, fixed, abundance_model, dem,
-                       absorption, vectorized):
-    """The posterior to sample, or ``None`` to use the scalar path."""
-    if not vectorized:
-        return None
-    blocker = vectorization_blocker([p.name for p in params], dem)
-    if blocker is not None:
-        warnings.warn(f"falling back to the scalar likelihood: {blocker}",
-                      RuntimeWarning, stacklevel=3)
-        return None
-    return build_posterior(obs, model, params, fixed, abundance_model,
-                           absorption, dem=dem)
-
-
-# --- emcee -----------------------------------------------------------------
-
-@dataclass
-class EmceeResult:
-    names: list
-    labels: list
-    chain: np.ndarray        # (nsteps, nwalkers, ndim)
-    samples: np.ndarray      # (N, ndim) post-burn-in, flattened
-    log_prob: np.ndarray     # (nsteps, nwalkers)
-    tau: np.ndarray          # autocorrelation time per parameter
-    discard: int
-    truths: np.ndarray
-    runtime_s: float
-    n_eval: int
-
-    @property
-    def median(self):
-        return np.median(self.samples, axis=0)
-
-
-def run_emcee(obs, model, params, fixed, nwalkers=16, nsteps=400,
-              discard_frac=0.4, seed=0, progress=False,
-              abundance_model=None, dem=None, absorption=None,
-              vectorized=True):
-    """Ensemble MCMC. ``vectorized`` batches the whole ensemble into one
-    forward per step; set it False to force the scalar reference likelihood."""
-    import emcee
-    names = [p.name for p in params]
-    labels = [p.label or p.name for p in params]
-    ndim = len(params)
-    lo = np.array([p.low for p in params])
-    hi = np.array([p.high for p in params])
-    truths = np.array([p.truth if p.truth is not None else np.nan for p in params])
-    post = _resolve_posterior(obs, model, params, fixed, abundance_model, dem,
-                              absorption, vectorized)
-    if post is None:
-        loglike = make_loglike(obs, model, names, fixed, abundance_model, dem,
-                               absorption)
-
-        def logprob(theta):
-            if np.any(theta < lo) or np.any(theta > hi):
-                return -np.inf
-            return loglike(theta)
-    else:
-        logprob = post.logp
-
-    rng = np.random.default_rng(seed)
-    center = np.where(np.isfinite(truths), truths, 0.5 * (lo + hi))
-    p0 = center + 0.02 * (hi - lo) * rng.standard_normal((nwalkers, ndim))
-    p0 = np.clip(p0, lo + 1e-6, hi - 1e-6)
-
-    t0 = time.time()
-    sampler = emcee.EnsembleSampler(nwalkers, ndim, logprob,
-                                    vectorize=post is not None)
-    sampler.run_mcmc(p0, nsteps, progress=progress)
-    runtime = time.time() - t0
-
-    try:
-        tau = sampler.get_autocorr_time(quiet=True)
-    except Exception:
-        tau = np.full(ndim, np.nan)
-    discard = int(discard_frac * nsteps)
-    return EmceeResult(names, labels, sampler.get_chain(),
-                       sampler.get_chain(discard=discard, flat=True),
-                       sampler.get_log_prob(), tau, discard, truths,
-                       runtime, nwalkers * nsteps)
-
-
-# --- ultranest -------------------------------------------------------------
-
-@dataclass
-class UltranestResult:
-    names: list
-    labels: list
-    samples: np.ndarray      # equal-weighted posterior (N, ndim)
-    logz: float
-    logzerr: float
-    ess: float
-    truths: np.ndarray
-    result: dict = field(repr=False, default=None)
-    runtime_s: float = 0.0
-    n_eval: int = 0
-
-    @property
-    def median(self):
-        return np.median(self.samples, axis=0)
-
-
-def run_ultranest(obs, model, params, fixed, min_num_live_points=200,
-                  frac_remain=0.01, seed=0, logdir=None,
-                  abundance_model=None, dem=None, absorption=None,
-                  vectorized=True):
-    """Nested sampling. ``vectorized`` evaluates UltraNest's whole live-point
-    block in one batched forward -- this used to loop the likelihood one row at
-    a time, which threw the batching away entirely."""
-    import ultranest
-    names = [p.name for p in params]
-    labels = [p.label or p.name for p in params]
-    lo = np.array([p.low for p in params])
-    span = np.array([p.high - p.low for p in params])
-    truths = np.array([p.truth if p.truth is not None else np.nan for p in params])
-    post = _resolve_posterior(obs, model, params, fixed, abundance_model, dem,
-                              absorption, vectorized)
-    if post is None:
-        loglike1 = make_loglike(obs, model, names, fixed, abundance_model, dem,
-                               absorption)
-
-        def loglike(thetas):                      # scalar fallback (loops)
-            thetas = np.atleast_2d(thetas)
-            return np.array([loglike1(t) for t in thetas])
-    else:
-        # ptform guarantees points inside the box, so the bounds check in
-        # `logp` would only waste work here
-        loglike = post.loglike
-
-    def ptform(cubes):
-        return lo + np.atleast_2d(cubes) * span
-
-    t0 = time.time()
-    sampler = ultranest.ReactiveNestedSampler(
-        names, loglike, ptform, vectorized=True,
-        log_dir=logdir, resume="overwrite")   # valid even when log_dir is None
-    res = sampler.run(min_num_live_points=min_num_live_points,
-                      frac_remain=frac_remain, show_status=progress_flag())
-    runtime = time.time() - t0
-    return UltranestResult(names, labels, np.asarray(res["samples"]),
-                           float(res["logz"]), float(res["logzerr"]),
-                           float(res.get("ess", len(res["samples"]))),
-                           truths, res, runtime, int(res.get("ncall", 0)))
-
-
-def progress_flag():
-    return False
+        keep=keep, fixed=fixed, n_h_scale=1.0, device=model.device,
+        **forward_kwargs).posterior

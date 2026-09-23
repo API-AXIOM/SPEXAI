@@ -22,7 +22,7 @@ import torch
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from spexai.inference.posterior import BoxPrior          # noqa: E402
+from spexai.inference.priors import PriorSet          # noqa: E402
 from mle_reseed import lbfgs_batch                       # noqa: E402
 
 NDIM, NBIN = 6, 400
@@ -65,7 +65,7 @@ def toy():
     sigma = fwd.sigma_at_truth()
     # box wide compared with sigma, as in the real problem, so bounds play no
     # part in what the optimiser does
-    prior = BoxPrior(truth - 1e4 * sigma, truth + 1e4 * sigma)
+    prior = PriorSet.box(truth - 1e4 * sigma, truth + 1e4 * sigma)
     mu_true = fwd.counts_torch(
         torch.as_tensor(truth[None, :]), grad=False).cpu().numpy()[0]
     rng = np.random.default_rng(7)

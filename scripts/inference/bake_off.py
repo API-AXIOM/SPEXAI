@@ -53,9 +53,9 @@ from spexai.inference.abundances import SYMBOL                    # noqa: E402
 from spexai.inference.abundances import AbundanceModel            # noqa: E402
 from spexai.inference.absorption import Absorption                # noqa: E402
 from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
-from spexai.inference.posterior import BoxPrior, PoissonPosterior  # noqa: E402
+from spexai.inference.priors import PriorSet                       # noqa: E402
+from spexai.inference.spectral_fit import SpectralFit              # noqa: E402
 from spexai.inference.response import Response                    # noqa: E402
-from spexai.inference.vector_forward import VectorForward         # noqa: E402
 from spexai.inference import samplers                             # noqa: E402
 
 SAMPLERS = ("emcee", "zeus", "ultranest", "nautilus", "pocomc", "inessai",
@@ -136,14 +136,22 @@ def build_problem(args):
     pars = build_params(spec, log_norm_truth)
     names = [p.name for p in pars]
 
-    forward = VectorForward(
-        emu, response, keep, names, ab, absorption=absorption,
+    # One assembly point (spexai.inference.SpectralFit) instead of this script's
+    # own copy. `data` is already in-band (dump_truth stores d_ref[keep]), which
+    # SpectralFit accepts as-is. n_h_scale=1e21 is the campaign convention --
+    # build_params emits Par("n_h", p["n_h"] / 1e21, ..., 0.0, 5.0), so n_h is
+    # sampled in units of 1e21 cm^-2, NOT absolute. It used to ride on
+    # VectorForward's default; it is stated here because the other convention
+    # (fitting.build_posterior's n_h_scale=1.0) is off by 1e21 and silent.
+    fit = SpectralFit(
+        emulator=emu, response=response, counts=data, exposure=1.0,
+        priors=PriorSet.from_params(pars), keep=keep,
+        abundances=ab, absorption=absorption,
         redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
-        velocity=None, device=args.device, chunk=args.chunk,
+        n_h_scale=1e21, device=args.device, chunk=args.chunk,
         batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
         echunk=args.echunk)
-    prior = BoxPrior.from_params(pars, device=args.device)
-    post = PoissonPosterior(forward, data, prior)
+    post = fit.posterior
     truth = np.array([p.truth for p in pars])
     return post, pars, truth, names
 

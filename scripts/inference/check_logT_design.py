@@ -15,7 +15,7 @@ Two independent checks, neither of which runs a SPEX truth:
              the flat part. Points: the fiducial, the cold-narrow and hot-wide
              DEM corners, and single-T kT at both ends of 0.7-15 keV.
 
-    KMP_DUPLICATE_LIB_OK=TRUE conda run -n spexai python \\
+    conda run -n spexai python \\
         scripts/inference/check_logT_design.py --table --steps
 """
 import argparse
