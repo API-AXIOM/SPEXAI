@@ -1,14 +1,15 @@
-"""Tier A: does per-element emulator error add coherently or in quadrature?
+"""Does per-element emulator error add coherently or in quadrature?
 
-Every downstream bias number (Tier B's Fisher sweep, Tier C's MCMC pulls) is
-computed on the FULL 30-element joint spectrum, which is automatically the
-*coherent* sum of each element's error -- there is no assumption to check
-there. What Tier A actually asks is a scale question: is the joint error
-dominated by a handful of elements pulling the same way (so it scales like N
-times a typical per-element error), or does it look more like N independent
-per-element errors partly cancelling (so it scales like sqrt(N))? That number
-is what calibrates how surprised to be by Tier B's per-point b_sys, and it is
-cheap to get directly: compute each element's own (emulator - truth) residual
+Every downstream bias number (bias_sweep's Fisher screen, and the posterior
+check that validates it) is computed on the FULL 30-element joint spectrum,
+which is automatically the *coherent* sum of each element's error -- there is
+no assumption to check there. What this asks is a scale question: is the joint
+error dominated by a handful of elements pulling the same way (so it scales
+like N times a typical per-element error), or does it look more like N
+independent per-element errors partly cancelling (so it scales like sqrt(N))?
+That number is what calibrates how surprised to be by the screen's per-point
+b_sys, and it is cheap to get directly: compute each element's own
+(emulator - truth) residual
 on the shared channel grid, in-band, at the SAME abundance/thermal/velocity
 point, then compare the real coherent sum (= the actual joint residual) to
 the quadrature combination of the same per-element residuals.
@@ -18,7 +19,7 @@ per element (both support `elements=[z]`), mirroring bias_sweep.py::stage_truth
 -- this is pure emulator-vs-truth in spectrum space, no fitting, no Fisher.
 
     conda run -n spexai python -u \\
-        scripts/inference/tier_a_composition.py
+        scripts/inference/emulator_error_composition.py
 """
 import argparse
 import os

@@ -6,9 +6,9 @@ campaign scripts each re-assembled the same thing by hand under ``kT``/
 ``sigma_v``, because the names were baked in and so the shared builder could
 not be called. The duplication was not cosmetic: it is why nine samplers were
 reachable from the bake-off and only two from the user-facing path, and it is
-how ``tier_c_mcmc.py`` came to build a ``VectorForward`` with no ``dem=`` while
-passing DEM parameter names -- a fit that could not construct, in a copy nobody
-was testing.
+how ``tier_c_mcmc.py`` (now ``emulator_bias_posterior_check.py``) came to
+build a ``VectorForward`` with no ``dem=`` while passing DEM parameter names --
+a fit that could not construct, in a copy nobody was testing.
 
 :class:`SpectralFit` is the single assembly point. It holds the configuration,
 builds the forward once, and dispatches to

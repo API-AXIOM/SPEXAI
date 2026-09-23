@@ -217,57 +217,152 @@ deleted `run_emcee`). That is by design -- it is kept as the provenance record
 for `tests/data/refactor_golden.npz`, and exits with an explanation pointing at
 `tests/test_refactor_equivalence.py`, which needs nothing from it.
 
-## RESUME HERE: P8 (Tier C) -- posterior confirmation
+## PROJECT RULES
+
+Standing conventions, to be applied as code is touched and swept up in full at
+the next repo refactor / clean-up.
+
+### 1. Name code for what it does
+
+Scripts and modules are named for their function, not for our internal campaign
+numbering (no `tier_a_*`, `tier_c_*`, `p6_*`, `p8_*`). The tier/phase labels stay
+in the prose, where they mean something; a filename has to be readable by
+someone who has never seen the agenda. Renamed 2026-09-23:
+
+| was | is |
+|---|---|
+| `scripts/inference/tier_c_mcmc.py` | `scripts/inference/emulator_bias_posterior_check.py` |
+| `scripts/inference/tier_a_composition.py` | `scripts/inference/emulator_error_composition.py` |
+
+Historical mentions of the old names were deliberately NOT rewritten where they
+record a past bug (the design spec, `spectral_fit.py`, `make_refactor_golden.py`,
+`test_refactor_equivalence.py`) -- the bug really was in a file with that name.
+Those carry a pointer to the new name instead.
+
+Still to do under this rule: `p6_sweep.py`, `p6_probe.py`, `p7_screen_diag.py`,
+`plot_p7_sweep.py` and friends. Not renamed yet -- they are referenced from the
+written-up P6/P7 sections and a rename should happen in one pass with the tex.
+
+### 2. Docstrings are numpy-style, with full parameter and return sections
+
+Every public function, method and class gets a numpy-style (numpydoc) docstring
+with explicit `Parameters` and `Returns` sections. For each entry, give:
+
+* the **name**,
+* its **type**,
+* its **default**, where it has one (write it as `optional` with the value, e.g.
+  ``n_eff : int, optional`` ... ``Default is 1000.``),
+* a **short description of what the variable actually is** -- not a restatement
+  of its name. `keep : ndarray of bool` is not documentation; "in-band channel
+  mask, as returned by `band_mask`" is.
+
+`Raises` where the function raises deliberately, and `Notes`/`Examples` where
+the reasoning needs somewhere to live.
+
+    def scale_to_counts(rec, target_counts):
+        """Rescale a screen ratio from the sweep's reference level.
+
+        Parameters
+        ----------
+        rec : dict
+            One record from a `bias_sweep` jsonl. Must carry ``n_ref``, the
+            count level its ``b_sys``/``sigma_ref`` were computed at.
+        target_counts : float
+            In-band counts the posterior check actually injects.
+
+        Returns
+        -------
+        float
+            Multiplicative factor taking a stored ratio to `target_counts`.
+            ``b_sys`` grows linearly with counts and sigma as its square root,
+            so the ratio scales as ``sqrt(target_counts / n_ref)``.
+        """
+
+**Why this and not the current style.** The existing docstrings are discursive
+-- they explain *why* the code is the way it is, often very usefully, and that
+prose should be kept (move it to `Notes`). What they systematically do not do is
+say what the arguments are, so a caller has to read the body to find out that
+`keep` is a boolean mask, that `n_h` is in units of 1e21, or that `counts` may
+be full-length or band-restricted and the length silently picks the meaning.
+That last one is exactly the class of bug that cost us the n_h scale-convention
+split. Types and units in the signature documentation are the cheap guard.
+
+State of play: **no module in the package currently complies.** This is a
+whole-repo sweep, not a per-file fix, and it wants a linter pinning it
+(`pydocstyle --convention=numpy`, or ruff's `D` rules with
+`convention = "numpy"`) so it cannot silently rot afterwards. Decide the linter
+at the same time as the sweep, or the sweep is a one-off.
+
+## RESUME HERE: P8 -- posterior confirmation of the bias screen
 
 **P7 is COMPLETE and written up** (both flavours, 1000 points, seed 39235);
 P6 before it. Everything below the P8 block is history, kept for reference.
 
+**The old DEM blocker is GONE** (the `VectorForward` built with no `dem=`);
+`SpectralFit` made it unrepresentable. The driver has still never been RUN in
+DEM mode against real data, so the first DEM invocation is also its first test.
 
-Targets, from P7:
-1. **The cold + narrow corner** (the real mode): kT < 1.5 keV, sigma_v < 150
-   km/s, both flavours. Worst raw screen values 2.81 sigma (single-T) and
-   2.05 sigma (DEM), both on sigma_v.
-2. **Two safe controls** from the hot bulk (kT > 2.5 keV), where nothing
-   exceeds 1 sigma, as the positive control that the fit reproduces the screen.
-3. **NOT the Mn pair** -- documented as a design artifact (Mn/Fe ~ 4x solar is
-   not an ICM composition). Revisit only if a referee asks.
+### Settled 2026-09-23
 
-**Open decision before starting: P8's target median precision**, which picks
-the sampler mechanically (agenda rule: worse than ~0.1 sigma -> emcee, better
--> nautilus). The effects to resolve are ~1-3 sigma, so emcee's own 0.104
-sigma of MC error is ~5% of the smallest effect, which looks sufficient.
+| question | decision |
+|---|---|
+| points | 4 worst + 4 random per flavour, 8 per flavour, 16 total |
+| exclusions | single-T drops 629 and 155 (Mn design artifacts). **Per-flavour** -- DEM point 155 is a genuine target |
+| region cut | NOT needed. With 629/155 dropped the global ranking IS the cold+narrow corner |
+| count level | inject at **1e6**; the sweep stores b_sys/sigma at `n_ref`=1e5, ratio scales as sqrt(N), factor 3.162 |
+| noise | Poisson, one realisation per point |
+| k | compare RAW: record `pull`, `pull_screen` and `k = pull/pull_screen`, then compare the set against P6's Gauss-Newton k |
+| sampler | target ESS ~1000; `--sampler {emcee,nautilus}` both wired |
 
-**Known blocker (VERIFIED 2026-09-22):** `scripts/inference/tier_c_mcmc.py:95`
-builds `VectorForward(...)` with no `dem=` argument, while `build_pars` at
-line 91 hands it `logT_mean`/`logT_sigma` under `--mode dem`. So `--mode dem`
-constructs a single-T forward with DEM parameter names and cannot work. Fix
-before target 1's DEM half; single-T targets are unaffected.
+The selected points (verified against the screens, ratios shown at 1e6):
+
+* single-T worst: **310** (2.81), **243** (2.73), **799** (2.67), **63** (2.56)
+  -- all kT 0.74-0.95 keV, sigma_v 34-97 km/s, all binding on `sigma_v`.
+* DEM worst: **456** (2.05), **155** (1.98), **82** (1.94), **734** (1.79)
+  -- all kT 0.72-1.09 keV, sigma_v 42-117 km/s, all binding on `sigma_v`.
+* random halves are drawn with `--seed`; seed 0 gives single-T 271/511/848/636
+  and DEM 270/511/848/636. The same index is a DIFFERENT physical point in the
+  two sweeps. DEM 848 happens to land at 1.49 sigma, near the region -- an
+  honest draw, and a useful intermediate case.
+
+### Sampler: the cost is a near-tie at ESS 1000
+
+From the bake-off table (one 1e6-count Perseus spectrum, 12 params, A10):
+
+* `emcee` delivers 24 ESS/10^3 s, so ESS 1000 costs **~11.6 h/point**.
+* `nautilus` delivered ESS 24,729 in 12.64 h at its default `n_eff`=10000. It
+  DOES have a throttle (`run_nautilus(..., n_eff=)`), contrary to the
+  methodology text's claim that nested samplers "cannot be asked for fewer
+  draws" -- **that sentence needs softening for nautilus.** But lowering
+  `n_eff` does not buy proportionally: nested sampling still pays the full
+  prior-to-posterior compression (~44 nats) and only the top-up shrinks. The
+  n_eff=1000 cost is therefore **unmeasured, bounded above by 12.64 h**.
+
+So the two are within ~10% at worst, and nautilus additionally returns logZ and
+is the showcase sampler. **Run one point as a timing probe before committing
+the other 15** (~190 GPU-h at 12 h/point).
 
 ### What P8 needs on disk
 
 | what | where |
 |---|---|
-| screens (pick targets from these) | `~/work/data/spexai/results/bias_sweep/bias_{single,dem}_n1000_s39235.jsonl` |
-| truths (tier_c needs BOTH jsonl + npz from the SAME run) | `.../truth_{single,dem}_n1000_s39235.npz` (single-T npz is on the LAPTOP; DEM on the cluster) |
-| driver | `scripts/inference/tier_c_mcmc.py` (needs the dem fix) |
-| screening/diagnostic helper | `scripts/inference/p7_screen_diag.py` (untracked) |
-| figures | `docs/figures/p7_*.png`, written by `scripts/inference/plot_p7_sweep.py` (untracked) |
+| screens | `~/work/data/spexai/results/bias_sweep/bias_{single,dem}_n1000_s39235.jsonl` |
+| truths (BOTH jsonl + npz from the SAME run) | `.../truth_{single,dem}_n1000_s39235.npz` |
+| driver | `scripts/inference/emulator_bias_posterior_check.py` |
+| screening/diagnostic helper | `scripts/inference/p7_screen_diag.py` |
+| figures | `docs/figures/p7_*.png`, written by `scripts/inference/plot_p7_sweep.py` |
 
-`tier_c_mcmc.py` selects worst/safe points from a bias jsonl by `--n_worst` /
-`--n_safe`, which ranks on the SCREEN's own worst parameter -- for P8 the
-targets are defined by a REGION (cold + narrow), so check what it selects
-before trusting the default ranking.
+Both p7 helpers ARE tracked in git (an earlier note here said untracked; wrong).
 
-### Open questions to settle before running
+### Still open
 
-1. **Target median precision** (above). Picks the sampler mechanically.
-2. **How many points, and how are they chosen** -- `--n_worst`'s ranking, or an
-   explicit cold+narrow cut? P7 says the tail is a region, not a few outliers.
-3. **Which count level.** The screen is quoted at 1e6 in-band counts; the cold
-   points' N* is ~4.7e5, so the answer depends on the level P8 injects at.
-4. **Whether to apply k** to the screen values P8 is compared against, or to
-   compare raw and let P8 measure k at these points directly (it measures the
-   same ratio P6 did, at the points that actually matter).
+1. **Perseus showcase wants both MCMC and nested sampling.**
+   `scripts/inference/perseus_showcase.py` has no `--sampler` at all -- it is
+   hardwired. Needs the same treatment as the driver. Not done.
+2. **One Poisson realisation gives ~35-50% on a single point's k** (a ~1 sigma
+   scatter on a ~2-3 sigma effect). Four points per flavour averages that to
+   ~20%. If k needs to be tighter, the fix is an Asimov (noise-free) companion
+   run, which was considered and deliberately not taken.
 
 ## P6 open threads (history, not P8 blockers)
 
@@ -643,7 +738,7 @@ reproducible. If any of them is needed again, reconcile first.
 | `scripts/inference/dump_truth.py` | linear-T `gaussian_dem`; feeds the hot_floor MCMC and the bake-off, writes `results/hot_floor` with the Perseus literature mask | not a campaign truth; `bias_sweep --stage truth` is |
 | `scripts/inference/bake_off.py` | `campaign.build_params` single-T (kT 1.5-7.5 keV) | -- |
 | `scripts/inference/crosscheck_steps.py`, `weight_step_impact.py` | hard-coded DEM grid 0.7-10 keV, 48 nodes, linear-T weights in numpy | 0.7-19.94 keV, 70 nodes, log-T |
-| `scripts/inference/tier_a_composition.py` | imports `bias_sweep.RANGES` / `sample_points` (single-T) | a RERUN would now draw kT log-uniform over 0.7-15 keV, not 1.5-8 keV |
+| `scripts/inference/emulator_error_composition.py` | imports `bias_sweep.RANGES` / `sample_points` (single-T) | a RERUN would now draw kT log-uniform over 0.7-15 keV, not 1.5-8 keV |
 
 `campaign.Forward` still produces bit-identical names and weights for the
 linear-T DEM (pinned by `test_forward_linear_T_hot_floor_path_unchanged`).

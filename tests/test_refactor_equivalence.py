@@ -10,8 +10,9 @@ refactor does in its last phase. Frozen values outlive the deletion.
 
 Two cases. ``single`` is the plain path. ``dem_abs`` carries a Gaussian DEM,
 Galactic absorption and a per-walker ``n_h``: the DEM wiring is what
-``tier_c_mcmc.py`` had wrong (a ``VectorForward`` built with no ``dem=``), and
-per-walker ``n_h`` is the axis that carried a real broadcast bug before. A
+``tier_c_mcmc.py`` -- now ``emulator_bias_posterior_check.py`` -- had wrong
+(a ``VectorForward`` built with no ``dem=``), and per-walker ``n_h`` is the
+axis that carried a real broadcast bug before. A
 single-temperature golden case on its own would pass while proving nothing
 about either.
 """
