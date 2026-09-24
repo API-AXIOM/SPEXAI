@@ -15,6 +15,7 @@ core kT~3.9 keV, Z_Fe~0.55 Zsun, sigma_v~180 km/s; DEM mean~4.27, width~1.11 keV
 
     conda run -n spexai python scripts/perseus_showcase.py --mode single
 """
+
 import argparse
 import os
 import sys
@@ -36,14 +37,24 @@ from spexai.inference.spectral_fit import SpectralFit
 from spexai.inference import tempdist as td
 
 RESP_DIR = os.environ.get(
-    "SPEXAI_RESPONSES", os.path.expanduser("~/data/spexai_data/responses"))
+    "SPEXAI_RESPONSES", os.path.expanduser("~/data/spexai_data/responses")
+)
 RESULTS = os.environ.get(
-    "SPEXAI_RESULTS", os.path.expanduser("~/data/spexai_data/results"))
-MPC_M = 3.0857e22          # 1 Megaparsec in metres
+    "SPEXAI_RESULTS", os.path.expanduser("~/data/spexai_data/results")
+)
+MPC_M = 3.0857e22  # 1 Megaparsec in metres
 # Perseus: z=0.0179 -> luminosity distance ~75 Mpc; emission measure Y in the
 # SPEX unit of 1e64 m^-3 (n_H n_e V). Distance is FIXED (degenerate with Y).
-PERSEUS = dict(z=0.0179, dist_mpc=75.0, n_h=1.4e21, kT=3.9, Z=0.55, vel=180.0,
-               dem_mean=4.27, dem_sigma=1.11)
+PERSEUS = dict(
+    z=0.0179,
+    dist_mpc=75.0,
+    n_h=1.4e21,
+    kT=3.9,
+    Z=0.55,
+    vel=180.0,
+    dem_mean=4.27,
+    dem_sigma=1.11,
+)
 PERSEUS["dist_m"] = PERSEUS["dist_mpc"] * MPC_M
 
 
@@ -56,6 +67,7 @@ def find_response():
     RMF they picked."""
     sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
     from campaign import find_xrism_response
+
     try:
         rmf, arf = find_xrism_response()
         return rmf, arf, "XRISM/Resolve"
@@ -64,7 +76,8 @@ def find_response():
         arf = os.path.join(RESP_DIR, "aciss_aimpt_cy28.arf")
         if not (os.path.exists(rmf) and os.path.exists(arf)):
             raise FileNotFoundError(
-                f"no Resolve response, and no ACIS RMF+ARF under {RESP_DIR}")
+                f"no Resolve response, and no ACIS RMF+ARF under {RESP_DIR}"
+            )
         return rmf, arf, "Chandra ACIS"
 
 
@@ -75,21 +88,37 @@ def metal_abundances(elements, z):
 def run_single(truth, emu, response, absorption, args):
     logz = float(np.log10(PERSEUS["z"]))
     ab = metal_abundances(truth.elements, PERSEUS["Z"])
-    p = {"temp": PERSEUS["kT"], "velocity": PERSEUS["vel"], "norm": 1e11,
-         "logz": logz, "n_h": PERSEUS["n_h"], "abundances": ab,
-         "luminosity_distance": PERSEUS["dist_m"]}
-    obs = simulate_observation(truth, response, p, args.exposure,
-                               target_counts=args.target_counts,
-                               absorption=absorption, rng=args.seed)
+    p = {
+        "temp": PERSEUS["kT"],
+        "velocity": PERSEUS["vel"],
+        "norm": 1e11,
+        "logz": logz,
+        "n_h": PERSEUS["n_h"],
+        "abundances": ab,
+        "luminosity_distance": PERSEUS["dist_m"],
+    }
+    obs = simulate_observation(
+        truth,
+        response,
+        p,
+        args.exposure,
+        target_counts=args.target_counts,
+        absorption=absorption,
+        rng=args.seed,
+    )
     # with the distance fixed at Perseus's, norm IS the physical emission measure
     ln = float(np.log10(obs.true_params["norm"]))
     abmodel = AbundanceModel(emu.elements).global_metallicity("Z")
-    params = [Param("temp", 1.0, 8.0, truth=PERSEUS["kT"]),
-              Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
-              Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
-              Param("log_norm", ln - 1.5, ln + 1.5, truth=ln)]
-    return _sample(params, obs, emu, abmodel, absorption, logz,
-                   PERSEUS["dist_m"], args), obs
+    params = [
+        Param("temp", 1.0, 8.0, truth=PERSEUS["kT"]),
+        Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
+        Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
+        Param("log_norm", ln - 1.5, ln + 1.5, truth=ln),
+    ]
+    return (
+        _sample(params, obs, emu, abmodel, absorption, logz, PERSEUS["dist_m"], args),
+        obs,
+    )
 
 
 def _sample(params, obs, emu, abmodel, absorption, logz, ld, args, dem=None):
@@ -108,13 +137,39 @@ def _sample(params, obs, emu, abmodel, absorption, logz, ld, args, dem=None):
     """
     truths = np.array([p.truth for p in params], dtype=float)
     fit = SpectralFit.from_observation(
-        obs, emu, PriorSet.from_params(params),
-        abundances=abmodel, absorption=absorption, dem=dem,
-        redshift=10.0 ** logz, luminosity_distance=ld, n_h_scale=1.0,
-        fixed={"abundances": {}, "logz": logz, "n_h": PERSEUS["n_h"],
-               "luminosity_distance": ld})
-    res = fit.sample("emcee", nwalkers=args.nwalkers, nsteps=args.nsteps,
-                     seed=args.seed, center=truths)
+        obs,
+        emu,
+        PriorSet.from_params(params),
+        abundances=abmodel,
+        absorption=absorption,
+        dem=dem,
+        redshift=10.0**logz,
+        luminosity_distance=ld,
+        n_h_scale=1.0,
+        fixed={
+            "abundances": {},
+            "logz": logz,
+            "n_h": PERSEUS["n_h"],
+            "luminosity_distance": ld,
+        },
+    )
+    # Both samplers are offered because the showcase reports one posterior in
+    # detail: emcee for the MCMC view, nautilus for the nested-sampling view
+    # and its logZ. They take different knobs -- emcee is asked for a step
+    # count, nautilus for an effective sample size -- and nautilus has no
+    # `center`, since it starts from the prior rather than from the truth.
+    if args.sampler == "emcee":
+        res = fit.sample(
+            "emcee",
+            nwalkers=args.nwalkers,
+            nsteps=args.nsteps,
+            seed=args.seed,
+            center=truths,
+        )
+    else:
+        res = fit.sample(
+            "nautilus", n_live=args.n_live, n_eff=args.n_eff, seed=args.seed
+        )
     res.labels = [p.label or p.name for p in params]
     res.extra["truths"] = truths
     return res
@@ -134,39 +189,83 @@ def run_dem(truth, emu, response, absorption, args):
     # inject: DEM counts from the truth model + Poisson draw (norm via target)
     norm0 = 1e11
     ld = PERSEUS["dist_m"]
-    mu = truth.predict_counts_dem(dem.temp_grid, w, ab, logz, norm0,
-                                  PERSEUS["vel"], response, args.exposure,
-                                  luminosity_distance=ld, absorption=absorption,
-                                  n_h=PERSEUS["n_h"]).squeeze(0).cpu().numpy()
+    mu = (
+        truth.predict_counts_dem(
+            dem.temp_grid,
+            w,
+            ab,
+            logz,
+            norm0,
+            PERSEUS["vel"],
+            response,
+            args.exposure,
+            luminosity_distance=ld,
+            absorption=absorption,
+            n_h=PERSEUS["n_h"],
+        )
+        .squeeze(0)
+        .cpu()
+        .numpy()
+    )
     mu = np.clip(mu, 0.0, None)
     scale = args.target_counts / max(mu.sum(), 1e-30)
     mu = mu * scale
-    ln = float(np.log10(norm0 * scale))     # physical emission measure at fixed D
+    ln = float(np.log10(norm0 * scale))  # physical emission measure at fixed D
     gen = np.random.default_rng(args.seed)
-    obs = Observation(counts=gen.poisson(mu).astype(np.int64), response=response,
-                      exposure=args.exposure, true_params={**tp, "norm": norm0 * scale},
-                      instrument="dem", expected=mu)
+    obs = Observation(
+        counts=gen.poisson(mu).astype(np.int64),
+        response=response,
+        exposure=args.exposure,
+        true_params={**tp, "norm": norm0 * scale},
+        instrument="dem",
+        expected=mu,
+    )
     abmodel = AbundanceModel(emu.elements).global_metallicity("Z")
-    params = [Param("T_mean", 1.0, 8.0, truth=PERSEUS["dem_mean"]),
-              Param("T_sigma", 0.1, 3.0, truth=PERSEUS["dem_sigma"]),
-              Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
-              Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
-              Param("log_norm", ln - 1.5, ln + 1.5, truth=ln)]
-    return _sample(params, obs, emu, abmodel, absorption, logz, ld, args,
-                   dem=dem), obs
+    params = [
+        Param("T_mean", 1.0, 8.0, truth=PERSEUS["dem_mean"]),
+        Param("T_sigma", 0.1, 3.0, truth=PERSEUS["dem_sigma"]),
+        Param("Z", 0.1, 1.5, truth=PERSEUS["Z"]),
+        Param("velocity", *SIGMA_V_PRIOR, truth=PERSEUS["vel"]),
+        Param("log_norm", ln - 1.5, ln + 1.5, truth=ln),
+    ]
+    return _sample(params, obs, emu, abmodel, absorption, logz, ld, args, dem=dem), obs
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["single", "dem"], default="single")
-    ap.add_argument("--elements", nargs="+", default=["26"],
-                    help="element Zs, or 'all' for every element in the manifest")
+    ap.add_argument(
+        "--elements",
+        nargs="+",
+        default=["26"],
+        help="element Zs, or 'all' for every element in the manifest",
+    )
     ap.add_argument("--exposure", type=float, default=1e5)
     ap.add_argument("--target-counts", type=float, default=1e5)
-    ap.add_argument("--nwalkers", type=int, default=24)
-    ap.add_argument("--nsteps", type=int, default=800)
+    ap.add_argument(
+        "--sampler",
+        choices=["emcee", "nautilus"],
+        default="emcee",
+        help="emcee for the MCMC view, nautilus for nested "
+        "sampling + logZ. Run it twice to show both -- the "
+        "output names carry the sampler, so they do not "
+        "collide",
+    )
+    ap.add_argument("--nwalkers", type=int, default=24, help="emcee")
+    ap.add_argument("--nsteps", type=int, default=800, help="emcee")
+    ap.add_argument("--n_eff", type=int, default=10000, help="nautilus")
+    ap.add_argument("--n_live", type=int, default=2000, help="nautilus")
+    ap.add_argument(
+        "--no_save_samples",
+        dest="save_samples",
+        action="store_false",
+        help="do NOT write the posterior draws. They are saved by "
+        "default, for either sampler: a printed summary is "
+        "not a posterior, and re-running this costs hours",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.path.join(RESULTS, "showcase"))
+    ap.set_defaults(save_samples=True)
     args = ap.parse_args()
 
     elements = None if "all" in args.elements else [int(z) for z in args.elements]
@@ -175,37 +274,63 @@ def main():
     response = Response(rmf, arf)
     emu = JointOperatorModel(device="cpu", elements=elements)
     truth = SpexTruthModel(device="cpu", elements=elements)
-    absorption = Absorption.default()      # cached tbabs if present, else wabs
+    absorption = Absorption.default()  # cached tbabs if present, else wabs
     print(f"absorption: {absorption.name}")
 
     runner = run_single if args.mode == "single" else run_dem
     res, obs = runner(truth, emu, response, absorption, args)
     truths = res.extra["truths"]
 
-    print(f"\nPerseus {args.mode} recovery ({obs.total_counts} counts, "
-          f"D = {PERSEUS['dist_mpc']:.0f} Mpc fixed):")
+    print(
+        f"\nPerseus {args.mode} recovery ({obs.total_counts} counts, "
+        f"D = {PERSEUS['dist_mpc']:.0f} Mpc fixed):"
+    )
     for i, name in enumerate(res.names):
         q16, q50, q84 = np.percentile(res.samples[:, i], [16, 50, 84])
         t = truths[i]
         flag = "" if (q16 <= t <= q84) else "  <-- truth outside 68%"
-        print(f"  {name:10s} truth={t:8.4f}  fit={q50:8.4f} "
-              f"(-{q50-q16:.3f}/+{q84-q50:.3f}){flag}")
+        print(
+            f"  {name:10s} truth={t:8.4f}  fit={q50:8.4f} "
+            f"(-{q50-q16:.3f}/+{q84-q50:.3f}){flag}"
+        )
 
     # log_norm IS the physical emission measure Y (1e64 m^-3) at the fixed distance
     if "log_norm" in res.names:
         i = res.names.index("log_norm")
         y16, y50, y84 = 10.0 ** np.percentile(res.samples[:, i], [16, 50, 84])
-        print(f"\n  physical emission measure Y = n_H n_e V (at {PERSEUS['dist_mpc']:.0f} Mpc):")
-        print(f"    Y = {y50:.3e} (-{y50-y16:.2e}/+{y84-y50:.2e}) x 1e64 m^-3"
-              f"  =  {y50*1e64:.3e} m^-3")
+        print(
+            f"\n  physical emission measure Y = n_H n_e V (at {PERSEUS['dist_mpc']:.0f} Mpc):"
+        )
+        print(
+            f"    Y = {y50:.3e} (-{y50-y16:.2e}/+{y84-y50:.2e}) x 1e64 m^-3"
+            f"  =  {y50*1e64:.3e} m^-3"
+        )
+
+    stem = f"{args.out}_{args.mode}_{args.sampler}"
+    if args.save_samples:
+        os.makedirs(os.path.dirname(os.path.abspath(stem)), exist_ok=True)
+        np.savez_compressed(
+            f"{stem}_samples.npz",
+            samples=res.samples,
+            names=np.array(list(res.names)),
+            labels=np.array([str(x) for x in (res.labels or res.names)]),
+            truths=truths,
+            sampler=args.sampler,
+            mode=args.mode,
+            total_counts=float(obs.total_counts),
+            logz=np.nan if res.logz is None else float(res.logz),
+            ess=np.array([] if res.ess is None else np.asarray(res.ess)),
+        )
+        print(f"wrote {stem}_samples.npz  {res.samples.shape}")
 
     try:
         import corner
         import matplotlib
+
         matplotlib.use("Agg")
         fig = corner.corner(res.samples, labels=res.labels, truths=truths)
-        fig.savefig(f"{args.out}_{args.mode}_corner.png", dpi=130)
-        print(f"wrote {args.out}_{args.mode}_corner.png")
+        fig.savefig(f"{stem}_corner.png", dpi=130)
+        print(f"wrote {stem}_corner.png")
     except Exception as e:
         print("corner plot skipped:", e)
 

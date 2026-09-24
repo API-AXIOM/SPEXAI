@@ -39,6 +39,7 @@ samplers have no checkpointing of their own, so the protection has to live here.
         --device cuda --compile --tf32 --fft32 --resume
     python scripts/sbc_campaign.py --summarise --out sbc_emcee
 """
+
 import argparse
 import json
 import os
@@ -52,23 +53,30 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from campaign import (                                            # noqa: E402
-    PERSEUS, FREE_Z, injected_abundances, find_xrism_response, band_mask, EXCLUDE_PERSEUS_LITERATURE)
-from spexai.config import STORE, RESULTS                          # noqa: E402
-from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
-from spexai.inference.absorption import Absorption                # noqa: E402
-from spexai.inference.fitting import SIGMA_V_PRIOR                # noqa: E402
-from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
-from spexai.inference.posterior import PoissonPosterior           # noqa: E402
-from spexai.inference.priors import PriorSet                      # noqa: E402
-from spexai.inference.response import Response                    # noqa: E402
-from spexai.inference.vector_forward import VectorForward         # noqa: E402
-from spexai.inference import calibration, samplers                # noqa: E402
+from campaign import (  # noqa: E402
+    PERSEUS,
+    FREE_Z,
+    injected_abundances,
+    find_xrism_response,
+    band_mask,
+    EXCLUDE_PERSEUS_LITERATURE,
+)
+from spexai.config import STORE, RESULTS  # noqa: E402
+from spexai.inference.abundances import AbundanceModel, SYMBOL  # noqa: E402
+from spexai.inference.absorption import Absorption  # noqa: E402
+from spexai.inference.fitting import SIGMA_V_PRIOR  # noqa: E402
+from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
+from spexai.inference.posterior import PoissonPosterior  # noqa: E402
+from spexai.inference.priors import PriorSet  # noqa: E402
+from spexai.inference.response import Response  # noqa: E402
+from spexai.inference.vector_forward import VectorForward  # noqa: E402
+from spexai.inference import calibration, samplers  # noqa: E402
 
 SAMPLERS = ("emcee", "zeus", "ultranest", "nuts", "svi")
 
 
 # --- the fixed SBC prior -----------------------------------------------------
+
 
 def sbc_prior(elements, log_norm_ref: float, abund_range=(0.2, 2.0)):
     """Parameter names and a box that does **not** depend on the drawn truth.
@@ -96,27 +104,40 @@ def build_forward(args):
     rmf, arf = find_xrism_response()
     response = Response(rmf, arf)
     keep = band_mask(response, exclude=EXCLUDE_PERSEUS_LITERATURE)
-    emu = JointOperatorModel(models_dir=args.store, device=args.device,
-                             accelerate=False)
+    emu = JointOperatorModel(
+        models_dir=args.store, device=args.device, accelerate=False
+    )
     # SBC draws its own truths through this same forward, so the ARF cancels
     # by construction -- it is printed only so a run's provenance is on record.
-    print(f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}\n"
-          f"response: {os.path.basename(rmf)} + {os.path.basename(arf)}",
-          flush=True)
+    print(
+        f"store: {args.store}\n{len(emu.models)} elements: {emu.elements}\n"
+        f"response: {os.path.basename(rmf)} + {os.path.basename(arf)}",
+        flush=True,
+    )
 
     ab = AbundanceModel(emu.elements)
     for z in FREE_Z:
         ab.free_element(z, SYMBOL[z])
-    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z],
-                 1.0, 26)
+    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z], 1.0, 26)
 
     names, lo, hi = sbc_prior(emu.elements, args.log_norm_ref)
     forward = VectorForward(
-        emu, response, keep, names, ab, absorption=Absorption.default(),
-        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
-        velocity=None, device=args.device, chunk=args.chunk,
-        batched=True, compile_trunk=args.compile, mem_gb=args.mem_gb,
-        echunk=args.echunk)
+        emu,
+        response,
+        keep,
+        names,
+        ab,
+        absorption=Absorption.default(),
+        redshift=PERSEUS["z"],
+        luminosity_distance=PERSEUS["dist_m"],
+        velocity=None,
+        device=args.device,
+        chunk=args.chunk,
+        batched=True,
+        compile_trunk=args.compile,
+        mem_gb=args.mem_gb,
+        echunk=args.echunk,
+    )
     # SBC must *draw* from the prior, and going through prior.sample keeps this
     # script correct if the box is later swapped for informative priors. (This
     # was the first caller to need PriorSet, back when the rest of the package
@@ -127,9 +148,10 @@ def build_forward(args):
 
 # --- one simulation ----------------------------------------------------------
 
+
 def simulate(forward, prior, theta_true, rng):
     """Emulator-injected Poisson counts at ``theta_true``. -> (n_keep,)"""
-    mu = np.clip(forward(theta_true[None, :])[0], 1e-30, None)   # (n_keep,)
+    mu = np.clip(forward(theta_true[None, :])[0], 1e-30, None)  # (n_keep,)
     return rng.poisson(mu).astype(np.float64), mu
 
 
@@ -139,7 +161,7 @@ def run_one(i, forward, prior, names, args):
     # drawn from the prior itself, not its bounding box -- with an informative
     # prior those differ, and SBC is only valid if the truth comes from the
     # same distribution the fit assumes
-    theta_true = prior.sample(rng, 1)[0]                         # (ndim,)
+    theta_true = prior.sample(rng, 1)[0]  # (ndim,)
     data, mu = simulate(forward, prior, theta_true, rng)
     post = PoissonPosterior(forward, data, prior)
 
@@ -148,13 +170,39 @@ def run_one(i, forward, prior, names, args):
     # walkers are separate chains, so thin the STEP axis and keep all of them
     if res.chain is not None:
         draws, thin = calibration.thin_to_independent(
-            res.chain, res.ess, max_draws=args.n_draws, rng=rng)
+            res.chain, res.ess, max_draws=args.n_draws, rng=rng
+        )
     else:
         # nested sampling / VI already return decorrelated draws
         draws, thin = res.samples, 1
         if len(draws) > args.n_draws:
             draws = draws[rng.choice(len(draws), args.n_draws, replace=False)]
     ranks = calibration.sbc_rank(draws, theta_true)
+
+    if args.save_samples:
+        # The THINNED draws -- the object the ranks are actually computed from,
+        # so a saved replicate can be re-ranked, re-plotted or audited without
+        # re-running the sampler. One file per replicate rather than one per
+        # run, which keeps --resume safe: a node that dies mid-campaign leaves
+        # every completed replicate intact. At the defaults this is ~10 kB a
+        # replicate, ~1 MB for the run.
+        #
+        # --out is a DIRECTORY holding sbc_<sampler>.jsonl, so the draws live
+        # inside it and carry the sampler too -- two samplers run into the same
+        # directory would otherwise both write sim00000.npz.
+        sdir = os.path.join(args.out, f"samples_{args.sampler}")
+        os.makedirs(sdir, exist_ok=True)
+        np.savez_compressed(
+            os.path.join(sdir, f"sim{i:05d}.npz"),
+            draws=draws,
+            truth=theta_true,
+            rank=ranks,
+            names=np.array(list(names)),
+            thin=int(thin),
+            sampler=args.sampler,
+            sim=int(i),
+            total_counts=float(data.sum()),
+        )
 
     med = np.median(draws, axis=0)
     q16, q84 = np.percentile(draws, [16, 84], axis=0)
@@ -186,36 +234,58 @@ def run_sampler(name, post, names, center, args, seed=0):
     as a rank pathology that has nothing to do with calibration.
     """
     if name == "emcee":
-        return samplers.run_emcee(post, nwalkers=args.nwalkers,
-                                  nsteps=args.nsteps, seed=seed, center=center)
+        return samplers.run_emcee(
+            post, nwalkers=args.nwalkers, nsteps=args.nsteps, seed=seed, center=center
+        )
     if name == "zeus":
-        return samplers.run_zeus(post, nwalkers=args.nwalkers,
-                                 nsteps=args.zeus_steps or args.nsteps // 4,
-                                 seed=seed, center=center)
+        return samplers.run_zeus(
+            post,
+            nwalkers=args.nwalkers,
+            nsteps=args.zeus_steps or args.nsteps // 4,
+            seed=seed,
+            center=center,
+        )
     if name == "ultranest":
-        return samplers.run_ultranest(post, min_num_live_points=args.live,
-                                      seed=seed, show_status=False)
+        return samplers.run_ultranest(
+            post, min_num_live_points=args.live, seed=seed, show_status=False
+        )
     model = _model_for(post, names)
     if name == "nuts":
-        return samplers.run_nuts(model, n_samples=args.nuts_samples,
-                                 n_warmup=args.nuts_warmup, seed=seed,
-                                 progress=False)
+        return samplers.run_nuts(
+            model,
+            n_samples=args.nuts_samples,
+            n_warmup=args.nuts_warmup,
+            seed=seed,
+            progress=False,
+        )
     if name == "svi":
-        return samplers.run_svi(model, steps=args.svi_steps,
-                                num_particles=args.svi_particles,
-                                lr=args.svi_lr, seed=seed)
+        return samplers.run_svi(
+            model,
+            steps=args.svi_steps,
+            num_particles=args.svi_particles,
+            lr=args.svi_lr,
+            seed=seed,
+        )
     raise SystemExit(f"unknown sampler {name!r}; choose from {SAMPLERS}")
 
 
 def _model_for(post, names):
     from spexai.inference.ppl import SpectrumModel, uniform_priors
-    return SpectrumModel(post.forward, post.data_np,
-                         uniform_priors(names, post.prior.lo.cpu().numpy(),
-                                        post.prior.hi.cpu().numpy(),
-                                        device=post.forward.device))
+
+    return SpectrumModel(
+        post.forward,
+        post.data_np,
+        uniform_priors(
+            names,
+            post.prior.lo.cpu().numpy(),
+            post.prior.hi.cpu().numpy(),
+            device=post.forward.device,
+        ),
+    )
 
 
 # --- resume ------------------------------------------------------------------
+
 
 def done_sims(path):
     """Indices already on disk. A truncated final line (killed mid-write) is
@@ -236,10 +306,11 @@ def append(path, rec):
     with open(path, "a") as f:
         f.write(json.dumps(rec) + "\n")
         f.flush()
-        os.fsync(f.fileno())        # a node that dies must not lose the record
+        os.fsync(f.fileno())  # a node that dies must not lose the record
 
 
 # --- reporting ---------------------------------------------------------------
+
 
 def summarise(path):
     recs = [json.loads(l) for l in open(path) if l.strip()]
@@ -250,31 +321,55 @@ def summarise(path):
     ranks = {n: [r["rank"][i] for r in recs] for i, n in enumerate(names)}
     print(f"{len(recs)} simulations from {path}")
     print(calibration.summarise(ranks, n_draws, names))
-    pulls = np.array([r["pull"] for r in recs])           # (n_sims, ndim)
+    pulls = np.array([r["pull"] for r in recs])  # (n_sims, ndim)
     cov = np.array([r["covered"] for r in recs]).mean(axis=0)
     print(f"\n{'param':>12} {'pull mean':>10} {'pull std':>9} {'cov68':>7}")
     for i, n in enumerate(names):
-        print(f"{n:>12} {pulls[:, i].mean():>+10.3f} "
-              f"{pulls[:, i].std():>9.3f} {cov[i]:>7.2f}")
+        print(
+            f"{n:>12} {pulls[:, i].mean():>+10.3f} "
+            f"{pulls[:, i].std():>9.3f} {cov[i]:>7.2f}"
+        )
     rt = np.array([r["runtime_s"] for r in recs])
-    print(f"\nruntime/sim: {rt.mean() / 3600:.2f} h mean, "
-          f"{rt.sum() / 3600:.1f} h total; "
-          f"median independent draws/sim {np.median([r['n_draws'] for r in recs]):.0f}")
+    print(
+        f"\nruntime/sim: {rt.mean() / 3600:.2f} h mean, "
+        f"{rt.sum() / 3600:.1f} h total; "
+        f"median independent draws/sim {np.median([r['n_draws'] for r in recs]):.0f}"
+    )
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--sampler", choices=SAMPLERS, default="emcee")
     ap.add_argument("--n_sims", type=int, default=100)
-    ap.add_argument("--n_draws", type=int, default=100,
-                    help="independent posterior draws per sim (the SBC L)")
+    ap.add_argument(
+        "--n_draws",
+        type=int,
+        default=100,
+        help="independent posterior draws per sim (the SBC L)",
+    )
     ap.add_argument("--store", default=STORE)
-    ap.add_argument("--log_norm_ref", type=float, default=11.0,
-                    help="centre of the FIXED log_norm prior box")
+    ap.add_argument(
+        "--log_norm_ref",
+        type=float,
+        default=11.0,
+        help="centre of the FIXED log_norm prior box",
+    )
     ap.add_argument("--out", default=os.path.join(RESULTS, "sbc", "sbc_run"))
+    ap.add_argument(
+        "--no_save_samples",
+        dest="save_samples",
+        action="store_false",
+        help="do NOT write each replicate's thinned draws. They "
+        "are saved by default: the jsonl keeps ranks and "
+        "summaries only, so without them a finished campaign "
+        "cannot be re-ranked or re-plotted without repeating "
+        "every fit",
+    )
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--summarise", action="store_true")
+    ap.set_defaults(save_samples=True)
     ap.add_argument("--seed", type=int, default=0)
     # forward
     ap.add_argument("--device", default="cuda")
@@ -312,16 +407,21 @@ def main():
     if already:
         print(f"resuming: {len(already)} simulations already done", flush=True)
     elif os.path.exists(jsonl) and not args.resume:
-        raise SystemExit(f"{jsonl} exists; pass --resume to continue it or "
-                         f"choose another --out (refusing to mix two runs)")
+        raise SystemExit(
+            f"{jsonl} exists; pass --resume to continue it or "
+            f"choose another --out (refusing to mix two runs)"
+        )
 
     todo = [i for i in range(args.n_sims) if i not in already]
     for k, i in enumerate(todo):
         rec = run_one(i, forward, prior, names, args)
         append(jsonl, rec)
-        print(f"[{k + 1}/{len(todo)}] sim {i}: {rec['runtime_s'] / 60:.1f} min, "
-              f"{rec['n_draws']} draws (thin {rec['thin']}), "
-              f"min ESS {rec['min_ess']:.0f}", flush=True)
+        print(
+            f"[{k + 1}/{len(todo)}] sim {i}: {rec['runtime_s'] / 60:.1f} min, "
+            f"{rec['n_draws']} draws (thin {rec['thin']}), "
+            f"min ESS {rec['min_ess']:.0f}",
+            flush=True,
+        )
     summarise(jsonl)
 
 

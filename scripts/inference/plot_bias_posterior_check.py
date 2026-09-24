@@ -1,7 +1,8 @@
 """Diagnostic plots for the emulator-bias posterior check.
 
 Reads the summary jsonl written by ``emulator_bias_posterior_check.py`` and, when
-present, the per-point sample npz written by its ``--save_samples``. The jsonl
+present, the per-point sample npz the driver writes by default (disable
+with its ``--no_save_samples``). The jsonl
 alone carries only summary statistics, so it supports the diagnostics but NOT a
 corner plot; corner plots need the npz.
 
@@ -283,7 +284,7 @@ def main():
     ap.add_argument(
         "--samples_dir",
         default=None,
-        help="where the --save_samples npz files are " "(default: beside --jsonl)",
+        help="where the sample npz files are (default: beside --jsonl)",
     )
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
@@ -319,7 +320,7 @@ def main():
             os.path.join(sdir, f)
             for f in sorted(os.listdir(sdir))
             if f.startswith("samples_")
-            and f".pt{rec['point']}_" in f
+            and f"_pt{rec['point']}_" in f
             and f.endswith(".npz")
         ]
         if cands:
@@ -331,7 +332,8 @@ def main():
         else:
             print(
                 f"  point {rec['point']}: no sample npz in {sdir} -- no "
-                f"corner plot. Re-run the driver with --save_samples."
+                f"corner plot -- the run predates sample saving, or used "
+                f"--no_save_samples."
             )
 
     for p in [w for w in written if w]:

@@ -54,6 +54,7 @@ production belongs on the GPU cluster.
         --mode single --exclude_points 629 155 \\
         --sampler nautilus --n_eff 1000 --device cuda
 """
+
 import argparse
 import json
 import os
@@ -67,17 +68,23 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts", "inference"))
 
-from campaign import (PERSEUS, FREE_Z, find_xrism_response, band_mask,  # noqa: E402
-                      EXCLUDE_NONE, gaussian_logT_dem)
-from bias_sweep import build_pars, abundance_map                  # noqa: E402
-from spexai.config import STORE, RESULTS                          # noqa: E402
-from spexai.inference.abundances import AbundanceModel, SYMBOL    # noqa: E402
-from spexai.inference.absorption import Absorption                # noqa: E402
-from spexai.inference.operator_model import JointOperatorModel    # noqa: E402
-from spexai.inference.response import Response                    # noqa: E402
-from spexai.inference.priors import PriorSet                      # noqa: E402
-from spexai.inference.spectral_fit import SpectralFit             # noqa: E402
-from spexai.inference import samplers                             # noqa: E402
+from campaign import (
+    PERSEUS,
+    FREE_Z,
+    find_xrism_response,
+    band_mask,  # noqa: E402
+    EXCLUDE_NONE,
+    gaussian_logT_dem,
+)
+from bias_sweep import build_pars, abundance_map  # noqa: E402
+from spexai.config import STORE, RESULTS  # noqa: E402
+from spexai.inference.abundances import AbundanceModel, SYMBOL  # noqa: E402
+from spexai.inference.absorption import Absorption  # noqa: E402
+from spexai.inference.operator_model import JointOperatorModel  # noqa: E402
+from spexai.inference.response import Response  # noqa: E402
+from spexai.inference.priors import PriorSet  # noqa: E402
+from spexai.inference.spectral_fit import SpectralFit  # noqa: E402
+from spexai.inference import samplers  # noqa: E402
 
 
 def screen_ratio(rec):
@@ -123,21 +130,26 @@ def select_points(bias_jsonl, n_worst, n_random, exclude=(), seed=0):
     excluded = np.isin(ids, np.asarray(list(exclude), dtype=int))
     missing = set(exclude) - set(ids[excluded].tolist())
     if missing:
-        raise SystemExit(f"--exclude_points {sorted(missing)} not in "
-                         f"{bias_jsonl}; check the flavour (the ids differ "
-                         f"between the single-T and DEM sweeps)")
+        raise SystemExit(
+            f"--exclude_points {sorted(missing)} not in "
+            f"{bias_jsonl}; check the flavour (the ids differ "
+            f"between the single-T and DEM sweeps)"
+        )
 
     order = np.argsort(-np.where(excluded, -np.inf, ratio))
     worst_idx = list(order[:n_worst])
 
-    pool = [i for i in range(len(recs))
-            if not excluded[i] and i not in set(worst_idx)]
+    pool = [i for i in range(len(recs)) if not excluded[i] and i not in set(worst_idx)]
     rng = np.random.default_rng(seed)
-    rand_idx = list(rng.choice(pool, size=min(n_random, len(pool)),
-                               replace=False)) if n_random else []
+    rand_idx = (
+        list(rng.choice(pool, size=min(n_random, len(pool)), replace=False))
+        if n_random
+        else []
+    )
 
-    return ([(recs[i], "worst", ratio[i]) for i in worst_idx]
-            + [(recs[i], "random", ratio[i]) for i in rand_idx])
+    return [(recs[i], "worst", ratio[i]) for i in worst_idx] + [
+        (recs[i], "random", ratio[i]) for i in rand_idx
+    ]
 
 
 def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
@@ -153,8 +165,7 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     ab = AbundanceModel(emu.elements)
     for z in FREE_Z:
         ab.free_element(z, SYMBOL[z])
-    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z],
-                1.0, 26)
+    ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z], 1.0, 26)
 
     # log_norm MUST be rescaled with the data. The sweep recorded
     # ``log_norm_truth`` for a spectrum normalised to ``n_ref`` counts; we inject
@@ -193,12 +204,24 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     # n_h_scale=1e21: build_pars emits Par("n_h", point["n_h"], 1e-2, 0.0, 6.0),
     # i.e. n_h in units of 1e21 cm^-2. `data` is already in-band.
     fit = SpectralFit(
-        emulator=emu, response=response, counts=data, exposure=1.0,
-        priors=PriorSet.from_params(pars), keep=keep,
-        abundances=ab, absorption=absorption, dem=dem,
-        redshift=PERSEUS["z"], luminosity_distance=PERSEUS["dist_m"],
-        n_h_scale=1e21, device=args.device, chunk=args.chunk,
-        batched=True, compile_trunk=False, mem_gb=args.mem_gb)
+        emulator=emu,
+        response=response,
+        counts=data,
+        exposure=1.0,
+        priors=PriorSet.from_params(pars),
+        keep=keep,
+        abundances=ab,
+        absorption=absorption,
+        dem=dem,
+        redshift=PERSEUS["z"],
+        luminosity_distance=PERSEUS["dist_m"],
+        n_h_scale=1e21,
+        device=args.device,
+        chunk=args.chunk,
+        batched=True,
+        compile_trunk=False,
+        mem_gb=args.mem_gb,
+    )
     return fit.posterior, pars, truth, names
 
 
@@ -212,26 +235,35 @@ def run_sampler(post, center, args):
     lowering ``n_eff`` buys much less than proportionally.
     """
     if args.sampler == "emcee":
-        return samplers.run_emcee(post, nwalkers=args.nwalkers,
-                                  nsteps=args.nsteps, seed=args.seed,
-                                  center=center)
+        return samplers.run_emcee(
+            post,
+            nwalkers=args.nwalkers,
+            nsteps=args.nsteps,
+            seed=args.seed,
+            center=center,
+        )
     if args.sampler == "nautilus":
-        return samplers.run_nautilus(post, n_live=args.n_live,
-                                     n_eff=args.n_eff, seed=args.seed)
+        return samplers.run_nautilus(
+            post, n_live=args.n_live, n_eff=args.n_eff, seed=args.seed
+        )
     raise SystemExit(f"unknown --sampler {args.sampler}")
 
 
 def run_point(store, response, absorption, keep, rec, d_ref, tag, ratio, args):
     fac = scale_to_counts(rec, args.target_counts)
-    print(f"\n=== point {rec['point']} ({tag}, screen {ratio:.2f} raw "
-          f"@N_REF={rec['n_ref']:.3g} -> {ratio * fac:.2f} "
-          f"@{args.target_counts:.3g}) ===", flush=True)
+    print(
+        f"\n=== point {rec['point']} ({tag}, screen {ratio:.2f} raw "
+        f"@N_REF={rec['n_ref']:.3g} -> {ratio * fac:.2f} "
+        f"@{args.target_counts:.3g}) ===",
+        flush=True,
+    )
     for k, v in rec["params"].items():
         print(f"  {k:>10} = {v:.4g}")
     post, pars, truth, names = build_point_problem(
-        store, response, absorption, keep, rec, d_ref, args)
+        store, response, absorption, keep, rec, d_ref, args
+    )
     res = run_sampler(post, truth, args)
-    s = res.samples                                    # already discard-applied
+    s = res.samples  # already discard-applied
     q16, q50, q84 = np.percentile(s, [16, 50, 84], axis=0)
     sigma = np.clip(0.5 * (q84 - q16), 1e-30, None)
     pull = (q50 - truth) / sigma
@@ -242,7 +274,8 @@ def run_point(store, response, absorption, keep, rec, d_ref, tag, ratio, args):
     # ratio next to a pull measured at target_counts understates it by `fac`.
     b_screen = np.asarray(rec["b_sys"]) * (args.target_counts / rec["n_ref"])
     sig_screen = np.asarray(rec["sigma_ref"]) * np.sqrt(
-        args.target_counts / rec["n_ref"])
+        args.target_counts / rec["n_ref"]
+    )
     pull_screen = b_screen / sig_screen
 
     # k = measured bias / linearised bias, the same ratio P6 estimated -- but
@@ -253,69 +286,127 @@ def run_point(store, response, absorption, keep, rec, d_ref, tag, ratio, args):
 
     print(f"{'param':>10} {'pull':>8} {'covered':>8} {'screen':>8} {'k':>7}")
     for j, n in enumerate(names):
-        print(f"{n:>10} {pull[j]:>+8.2f} {str(bool(covered[j])):>8} "
-              f"{pull_screen[j]:>+8.2f} {k[j]:>7.2f}")
-    if args.save_samples:
-        npz = os.path.join(os.path.dirname(args.out),
-                           f"samples_{args.mode}_pt{rec['point']}_"
-                           f"{args.sampler}.npz")
-        np.savez_compressed(npz, samples=s, names=np.array(names),
-                            truth=truth, median=q50, sigma=sigma,
-                            q16=q16, q84=q84, pull=pull,
-                            pull_screen=pull_screen, k=k,
-                            target_counts=args.target_counts,
-                            n_ref=rec["n_ref"], point=rec["point"])
+        print(
+            f"{n:>10} {pull[j]:>+8.2f} {str(bool(covered[j])):>8} "
+            f"{pull_screen[j]:>+8.2f} {k[j]:>7.2f}"
+        )
+    if args.save_samples:  # default True; --no_save_samples opts out
+        # Named after --out, not just the mode: samples are saved by default
+        # now, so two runs of the same point (a re-run after a fix, say) would
+        # otherwise silently overwrite each other's draws.
+        stem = os.path.splitext(os.path.basename(args.out))[0]
+        npz = os.path.join(
+            os.path.dirname(args.out),
+            f"samples_{stem}_pt{rec['point']}_" f"{args.sampler}.npz",
+        )
+        np.savez_compressed(
+            npz,
+            samples=s,
+            names=np.array(names),
+            truth=truth,
+            median=q50,
+            sigma=sigma,
+            q16=q16,
+            q84=q84,
+            pull=pull,
+            pull_screen=pull_screen,
+            k=k,
+            target_counts=args.target_counts,
+            n_ref=rec["n_ref"],
+            point=rec["point"],
+        )
         print(f"  samples -> {npz}  {s.shape}", flush=True)
 
-    return dict(point=rec["point"], tag=tag, sampler=args.sampler,
-               screen_ratio_raw=float(ratio),
-               screen_ratio_scaled=float(ratio * fac),
-               n_ref=float(rec["n_ref"]), target_counts=float(args.target_counts),
-               log_norm_count_shift=float(np.log10(
-                   args.target_counts / rec["n_ref"])),
-               names=names, truth=truth.tolist(), median=q50.tolist(),
-               sigma=sigma.tolist(), q16=q16.tolist(), q84=q84.tolist(),
-               pull=pull.tolist(),
-               pull_screen=pull_screen.tolist(), k=k.tolist(),
-               covered=covered.tolist(), runtime_s=res.runtime_s,
-               n_eval=res.n_eval,
-               ess=None if res.ess is None else np.asarray(res.ess).tolist(),
-               logz=res.logz)
+    return dict(
+        point=rec["point"],
+        tag=tag,
+        sampler=args.sampler,
+        screen_ratio_raw=float(ratio),
+        screen_ratio_scaled=float(ratio * fac),
+        n_ref=float(rec["n_ref"]),
+        target_counts=float(args.target_counts),
+        log_norm_count_shift=float(np.log10(args.target_counts / rec["n_ref"])),
+        names=names,
+        truth=truth.tolist(),
+        median=q50.tolist(),
+        sigma=sigma.tolist(),
+        q16=q16.tolist(),
+        q84=q84.tolist(),
+        pull=pull.tolist(),
+        pull_screen=pull_screen.tolist(),
+        k=k.tolist(),
+        covered=covered.tolist(),
+        runtime_s=res.runtime_s,
+        n_eval=res.n_eval,
+        ess=None if res.ess is None else np.asarray(res.ess).tolist(),
+        logz=res.logz,
+    )
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--store", default=STORE)
-    ap.add_argument("--bias_jsonl", required=True,
-                    help="bias_sweep's bias_<tag>.jsonl")
-    ap.add_argument("--truth_npz", required=True,
-                    help="bias_sweep's truth_<tag>.npz for the SAME sweep run "
-                         "(same --n_points/--seed/--mode) -- carries the "
-                         "noise-free per-point truth the jsonl's b_sys was "
-                         "computed against")
+    ap.add_argument("--bias_jsonl", required=True, help="bias_sweep's bias_<tag>.jsonl")
+    ap.add_argument(
+        "--truth_npz",
+        required=True,
+        help="bias_sweep's truth_<tag>.npz for the SAME sweep run "
+        "(same --n_points/--seed/--mode) -- carries the "
+        "noise-free per-point truth the jsonl's b_sys was "
+        "computed against",
+    )
     ap.add_argument("--mode", choices=["single", "dem"], default="single")
-    ap.add_argument("--n_worst", type=int, default=4,
-                    help="top-ranked screen points to fit (after exclusions)")
-    ap.add_argument("--n_random", type=int, default=4,
-                    help="points drawn uniformly from the rest of the space, "
-                         "as the screen's false-negative check")
-    ap.add_argument("--exclude_points", type=int, nargs="*", default=[],
-                    help="point ids to drop before ranking. PER-FLAVOUR: the "
-                         "single-T sweep needs `--exclude_points 629 155` (Mn "
-                         "design artifacts); the DEM sweep needs none, and its "
-                         "point 155 is a genuine target")
-    ap.add_argument("--target_counts", type=float, default=1e6,
-                    help="in-band counts to inject. The sweep's b_sys/sigma "
-                         "are stored at n_ref (1e5); the campaign quotes and "
-                         "fits at 1e6")
+    ap.add_argument(
+        "--n_worst",
+        type=int,
+        default=4,
+        help="top-ranked screen points to fit (after exclusions)",
+    )
+    ap.add_argument(
+        "--n_random",
+        type=int,
+        default=4,
+        help="points drawn uniformly from the rest of the space, "
+        "as the screen's false-negative check",
+    )
+    ap.add_argument(
+        "--exclude_points",
+        type=int,
+        nargs="*",
+        default=[],
+        help="point ids to drop before ranking. PER-FLAVOUR: the "
+        "single-T sweep needs `--exclude_points 629 155` (Mn "
+        "design artifacts); the DEM sweep needs none, and its "
+        "point 155 is a genuine target",
+    )
+    ap.add_argument(
+        "--target_counts",
+        type=float,
+        default=1e6,
+        help="in-band counts to inject. The sweep's b_sys/sigma "
+        "are stored at n_ref (1e5); the campaign quotes and "
+        "fits at 1e6",
+    )
     ap.add_argument("--sampler", choices=["emcee", "nautilus"], default="emcee")
-    ap.add_argument("--save_samples", action="store_true",
-                    help="write the posterior draws to an npz beside --out, "
-                         "one per point. Needed for corner plots -- the jsonl "
-                         "carries summary statistics only")
-    ap.add_argument("--n_eff", type=int, default=1000,
-                    help="nautilus: target effective sample size")
+    ap.add_argument(
+        "--no_save_samples",
+        dest="save_samples",
+        action="store_false",
+        help="do NOT write the posterior draws. The draws are "
+        "saved by default, for every sampler: the jsonl "
+        "carries summary statistics only, so discarding them "
+        "throws away the run's actual product -- corner "
+        "plots, re-derived intervals, convergence checks, "
+        "anything not anticipated when the run was launched. "
+        "A 17h nautilus run was lost this way on 2026-09-23. "
+        "Use this only when disk is genuinely the constraint",
+    )
+    ap.set_defaults(save_samples=True)
+    ap.add_argument(
+        "--n_eff", type=int, default=1000, help="nautilus: target effective sample size"
+    )
     ap.add_argument("--n_live", type=int, default=2000, help="nautilus")
     ap.add_argument("--nwalkers", type=int, default=64, help="emcee")
     ap.add_argument("--nsteps", type=int, default=800, help="emcee")
@@ -323,8 +414,9 @@ def main():
     ap.add_argument("--mem_gb", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
-    ap.add_argument("--out", default=os.path.join(RESULTS, "bias_posterior_check",
-                                                   "pulls.jsonl"))
+    ap.add_argument(
+        "--out", default=os.path.join(RESULTS, "bias_posterior_check", "pulls.jsonl")
+    )
     args = ap.parse_args()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
@@ -333,23 +425,31 @@ def main():
     absorption = Absorption.default()
     keep = band_mask(response, exclude=EXCLUDE_NONE)
 
-    selected = select_points(args.bias_jsonl, args.n_worst, args.n_random,
-                             exclude=args.exclude_points, seed=args.seed)
-    print(f"selected {len(selected)} points from {args.bias_jsonl} "
-          f"({args.n_worst} worst + {args.n_random} random, "
-          f"excluding {args.exclude_points or 'nothing'}); "
-          f"sampler={args.sampler}, injecting {args.target_counts:.3g} counts",
-          flush=True)
+    selected = select_points(
+        args.bias_jsonl,
+        args.n_worst,
+        args.n_random,
+        exclude=args.exclude_points,
+        seed=args.seed,
+    )
+    print(
+        f"selected {len(selected)} points from {args.bias_jsonl} "
+        f"({args.n_worst} worst + {args.n_random} random, "
+        f"excluding {args.exclude_points or 'nothing'}); "
+        f"sampler={args.sampler}, injecting {args.target_counts:.3g} counts",
+        flush=True,
+    )
 
     tz = np.load(args.truth_npz, allow_pickle=True)
-    truth_counts = tz["counts"]                    # (n_points, n_channels)
+    truth_counts = tz["counts"]  # (n_points, n_channels)
 
     with open(args.out, "a") as f:
         for rec, tag, ratio in selected:
             t0 = time.time()
             d_ref = truth_counts[rec["point"]][keep]
-            out = run_point(args.store, response, absorption, keep, rec,
-                            d_ref, tag, ratio, args)
+            out = run_point(
+                args.store, response, absorption, keep, rec, d_ref, tag, ratio, args
+            )
             f.write(json.dumps(out) + "\n")
             f.flush()
             print(f"  ({time.time() - t0:.0f}s)", flush=True)

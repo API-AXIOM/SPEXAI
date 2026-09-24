@@ -317,6 +317,32 @@ finished, before the library is released.** Do it together with rule 2's
 docstring pass and its linter, in one commit that touches nothing else, and add
 the commit SHA to a `.git-blame-ignore-revs` file so `git blame` stays useful.
 
+### 4. Posterior draws are saved to disk by default
+
+Any script that runs a sampler writes the draws, for **every** sampler. Saving
+is opt-out (`--no_save_samples`), never opt-in.
+
+Why: a summary jsonl records only what was anticipated when the run was
+launched. The draws are the run's product -- corner plots, re-derived
+intervals, convergence checks, anything thought of later. The 2026-09-23
+nautilus probe produced ESS 24,998 over 17 h and kept none of it, because the
+driver took percentiles from `res.samples` and discarded them and nautilus's
+own `filepath=` checkpoint was never passed. Re-running costs a GPU-day; the
+npz costs megabytes.
+
+Applied 2026-09-24 to all three samplers-running scripts. `bake_off.py` already
+saved unconditionally, which was the standard the others had drifted from.
+
+| script | where the draws go |
+|---|---|
+| `emulator_bias_posterior_check.py` | `samples_<out-stem>_pt<N>_<sampler>.npz` beside `--out` |
+| `perseus_showcase.py` | `<out>_<mode>_<sampler>_samples.npz` |
+| `sbc_campaign.py` | `<out>/samples_<sampler>/sim<N>.npz`, the THINNED draws |
+
+Name files so re-runs cannot silently overwrite: include the run (`--out` stem)
+and the sampler. SBC writes one file per replicate rather than one per run, so
+`--resume` survives a node dying mid-campaign.
+
 ## RESUME HERE: P8 -- posterior confirmation of the bias screen
 
 **P7 is COMPLETE and written up** (both flavours, 1000 points, seed 39235);
@@ -378,7 +404,8 @@ logZ. Either is ~190-280 GPU-h for 16 points. To actually throttle nautilus,
 pull / k / interval plots from the jsonl (figures in `docs/figures/biascheck_*`).
 It flags any parameter whose posterior sits within 3 sigma of a known prior
 bound -- that check is what caught this bug, and it should be read before any
-pull is believed. Corner plots need `--save_samples` (added 2026-09-24); the
+pull is believed. Posterior draws are saved by default for every sampler
+(`--no_save_samples` opts out, added 2026-09-24); the
 jsonl carries summary statistics only, so the probe has no corner plot.
 
 ### Settled 2026-09-23
