@@ -156,7 +156,21 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     ab.tie_const([z for z in emu.elements if z >= 3 and z not in FREE_Z],
                 1.0, 26)
 
-    log_norm_truth = rec["log_norm_truth"]
+    # log_norm MUST be rescaled with the data. The sweep recorded
+    # ``log_norm_truth`` for a spectrum normalised to ``n_ref`` counts; we inject
+    # ``target_counts``, and ``norm = 10**log_norm`` (fitting.py), so the truth
+    # the data actually implies is shifted by log10(target_counts/n_ref).
+    #
+    # Leaving it unshifted is not a cosmetic error in one number: build_pars
+    # gives log_norm the box [truth-1, truth+1], so at the campaign's default
+    # 10x rescale (n_ref 1e5 -> 1e6) the required value lands EXACTLY on the
+    # upper bound. The 2026-09-23 probe of point 310 saturated there -- median
+    # 1.01 sigma below the ceiling -- and the fit absorbed the missing
+    # normalisation into the abundances, inflating Si/S/Ar/Ca/Fe to +1.2..+3.3
+    # sigma and dropping coverage to 2/12. Shifting the truth also re-centres
+    # the box, so it cannot bind.
+    count_shift = float(np.log10(args.target_counts / rec["n_ref"]))
+    log_norm_truth = rec["log_norm_truth"] + count_shift
     pars = build_pars(None, pt, log_norm_truth, args.mode)
     names = [p.name for p in pars]
     truth = np.array([p.truth for p in pars])
@@ -241,12 +255,27 @@ def run_point(store, response, absorption, keep, rec, d_ref, tag, ratio, args):
     for j, n in enumerate(names):
         print(f"{n:>10} {pull[j]:>+8.2f} {str(bool(covered[j])):>8} "
               f"{pull_screen[j]:>+8.2f} {k[j]:>7.2f}")
+    if args.save_samples:
+        npz = os.path.join(os.path.dirname(args.out),
+                           f"samples_{args.mode}_pt{rec['point']}_"
+                           f"{args.sampler}.npz")
+        np.savez_compressed(npz, samples=s, names=np.array(names),
+                            truth=truth, median=q50, sigma=sigma,
+                            q16=q16, q84=q84, pull=pull,
+                            pull_screen=pull_screen, k=k,
+                            target_counts=args.target_counts,
+                            n_ref=rec["n_ref"], point=rec["point"])
+        print(f"  samples -> {npz}  {s.shape}", flush=True)
+
     return dict(point=rec["point"], tag=tag, sampler=args.sampler,
                screen_ratio_raw=float(ratio),
                screen_ratio_scaled=float(ratio * fac),
                n_ref=float(rec["n_ref"]), target_counts=float(args.target_counts),
+               log_norm_count_shift=float(np.log10(
+                   args.target_counts / rec["n_ref"])),
                names=names, truth=truth.tolist(), median=q50.tolist(),
-               sigma=sigma.tolist(), pull=pull.tolist(),
+               sigma=sigma.tolist(), q16=q16.tolist(), q84=q84.tolist(),
+               pull=pull.tolist(),
                pull_screen=pull_screen.tolist(), k=k.tolist(),
                covered=covered.tolist(), runtime_s=res.runtime_s,
                n_eval=res.n_eval,
@@ -281,6 +310,10 @@ def main():
                          "are stored at n_ref (1e5); the campaign quotes and "
                          "fits at 1e6")
     ap.add_argument("--sampler", choices=["emcee", "nautilus"], default="emcee")
+    ap.add_argument("--save_samples", action="store_true",
+                    help="write the posterior draws to an npz beside --out, "
+                         "one per point. Needed for corner plots -- the jsonl "
+                         "carries summary statistics only")
     ap.add_argument("--n_eff", type=int, default=1000,
                     help="nautilus: target effective sample size")
     ap.add_argument("--n_live", type=int, default=2000, help="nautilus")
