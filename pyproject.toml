@@ -1,0 +1,25 @@
+# Tool configuration only. Packaging still comes from setup.py -- there is
+# deliberately no [build-system] table here, so the build backend is unchanged.
+#
+# NOTE: the repo is NOT black-formatted. Formatting is applied per file as that
+# file is edited for another reason; the whole-repo sweep is deferred until the
+# scientific results are finished, before the library is released. See the
+# PROJECT RULES section of NOTES.md.
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+extend-exclude = '''
+/(
+    spexai/deprecated
+  | spexai/inference/fit_old\.py
+)/?
+'''
+
+# When the docstring sweep happens (PROJECT RULES rule 2 in NOTES.md), the
+# numpydoc linter is configured here too, so the convention cannot rot:
+#
+# [tool.ruff.lint]
+# select = ["D"]
+# [tool.ruff.lint.pydocstyle]
+# convention = "numpy"
