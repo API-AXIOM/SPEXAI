@@ -293,6 +293,30 @@ whole-repo sweep, not a per-file fix, and it wants a linter pinning it
 `convention = "numpy"`) so it cannot silently rot afterwards. Decide the linter
 at the same time as the sweep, or the sweep is a one-off.
 
+### 3. Formatting: black, 88 columns, applied per file as it is touched
+
+`black` is installed in the `spexai` env and configured in `pyproject.toml`
+(line length 88, black's default; `spexai/deprecated/` and `fit_old.py`
+excluded). `pyproject.toml` carries **tool config only** -- there is
+deliberately no `[build-system]` table, so `setup.py` remains the build backend
+and the editable install is unaffected (verified 2026-09-23).
+
+**The repo is NOT formatted and is not being swept now.** Format a file when you
+are editing it for some other reason; do not reformat files you are not
+otherwise touching.
+
+Why not now: black would rewrite **157 of 159 files, ~25,900 lines** at 88
+columns. That flattens `git blame` across the whole campaign at exactly the
+moment P8 starts producing results whose provenance we will want to trace, and
+it would mean the code running on the cluster differs from what was reviewed
+and tested. The files touched in the 2026-09-23 session were therefore left
+unformatted on purpose -- including the P8 driver, which is about to be run.
+
+**Deferred: the whole-repo sweep happens once the scientific results are
+finished, before the library is released.** Do it together with rule 2's
+docstring pass and its linter, in one commit that touches nothing else, and add
+the commit SHA to a `.git-blame-ignore-revs` file so `git blame` stays useful.
+
 ## RESUME HERE: P8 -- posterior confirmation of the bias screen
 
 **P7 is COMPLETE and written up** (both flavours, 1000 points, seed 39235);
@@ -301,6 +325,61 @@ P6 before it. Everything below the P8 block is history, kept for reference.
 **The old DEM blocker is GONE** (the `VectorForward` built with no `dem=`);
 `SpectralFit` made it unrepresentable. The driver has still never been RUN in
 DEM mode against real data, so the first DEM invocation is also its first test.
+
+### PROBE RESULT 2026-09-24: INVALID, and why (log_norm bug)
+
+The nautilus probe of single-T point 310 ran, but **its parameter results are
+not usable**. Two findings, one fatal and one about cost.
+
+**1. `log_norm`'s truth was never rescaled with the data. FIXED.**
+`build_point_problem` rescaled the injected spectrum to `--target_counts` but
+passed the sweep's `log_norm_truth` through untouched. Since `norm =
+10**log_norm` and the campaign injects 1e6 against a screen recorded at
+`n_ref` 1e5, the log_norm the data implies is `truth + 1.000` -- and
+`build_pars` gives log_norm the box `[truth-1, truth+1]`, so the required value
+lands **exactly on the upper bound**. Measured: truth 15.911002, ceiling
+16.911002, posterior median 16.907575 with sigma 0.003386, i.e. pinned
+**1.01 sigma below the wall**; offset 0.9966 = log10(9.92). The fit could not
+raise the normalisation, so it **absorbed the shortfall into the abundances**:
+
+| | |
+|---|---|
+| inflated abundances | Si +1.98, S +1.64, Ar +3.31, Ca +1.19, Fe +1.46 sigma, all high |
+| coverage | 2/12 parameters contain truth |
+| also prior-saturated | Ni (1.01 sigma from the 3.0 ceiling), Mn (1.49 sigma from the 0.02 floor) |
+| log_norm pull | +294 sigma (meaningless) |
+
+Fixed by shifting the truth with the data,
+`log_norm_truth += log10(target_counts / n_ref)`, which also re-centres the box
+so it cannot bind. **Every point must be re-run.** This bug predates the rename
+(it was in `tier_c_mcmc.py`) and would have silently corrupted the whole of P8.
+
+**The one result that survives:** `sigma_v`, the binding parameter and the only
+one with a meaningful screen prediction, came in at pull **+2.85 vs screen
++2.81, k = 1.01**. sigma_v is a line-width parameter, largely orthogonal to
+normalisation, which is why it escaped. Encouraging for P8's actual question,
+but it is one parameter at one point from an otherwise invalid fit.
+
+**2. `--n_eff 1000` did NOT throttle nautilus.** It returned **ESS 24,998** --
+the same as the bake-off's 24,729 at `n_eff=10000` -- in **17.4 h** (62,646 s,
+295,600 evals). `n_eff` is a floor, not a target: the prior-to-posterior
+compression alone already yields ~25k effective samples, so the run is governed
+entirely by `f_live` and n_eff is satisfied long before it can stop.
+**Correction to the 2026-09-23 estimate**, which guessed "below 12.64 h": it
+came in *above* the bake-off's time, not below.
+
+Consequence for the sampler choice at ESS ~1000: nautilus cannot be bought
+cheaply. emcee at ~11.6 h/point is now the cheaper route for a summary-only
+campaign; nautilus costs ~17 h and delivers 25x more ESS than needed, plus
+logZ. Either is ~190-280 GPU-h for 16 points. To actually throttle nautilus,
+`f_live` is the knob, not `n_eff` -- untested.
+
+**Diagnostics.** `scripts/inference/plot_bias_posterior_check.py` builds
+pull / k / interval plots from the jsonl (figures in `docs/figures/biascheck_*`).
+It flags any parameter whose posterior sits within 3 sigma of a known prior
+bound -- that check is what caught this bug, and it should be read before any
+pull is believed. Corner plots need `--save_samples` (added 2026-09-24); the
+jsonl carries summary statistics only, so the probe has no corner plot.
 
 ### Settled 2026-09-23
 
