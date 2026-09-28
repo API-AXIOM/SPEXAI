@@ -352,7 +352,7 @@ P6 before it. Everything below the P8 block is history, kept for reference.
 `SpectralFit` made it unrepresentable. The driver has still never been RUN in
 DEM mode against real data, so the first DEM invocation is also its first test.
 
-### PROBE RESULT 2026-09-24: INVALID, and why (log_norm bug)
+### PROBE 2026-09-23: INVALID, and why (log_norm bug) -- FIX VERIFIED
 
 The nautilus probe of single-T point 310 ran, but **its parameter results are
 not usable**. Two findings, one fatal and one about cost.
@@ -408,6 +408,107 @@ pull is believed. Posterior draws are saved by default for every sampler
 (`--no_save_samples` opts out, added 2026-09-24); the
 jsonl carries summary statistics only, so the probe has no corner plot.
 
+### VALIDATION RUN 2026-09-24: the fix holds
+
+Re-ran point 310 with the fix, `--sampler emcee --nsteps 400` (a deliberately
+short run: the question was whether `log_norm` comes free, not what k is).
+**The seed is unchanged, so the injected Poisson data is byte-identical to the
+invalid run** -- this isolates the bug from everything else.
+
+| | invalid (2026-09-23) | validated (2026-09-24) |
+|---|---|---|
+| `log_norm` truth | 15.911 | **16.911** (the +1.000 shift) |
+| `log_norm` pull | **+294 sigma**, pinned 1.01 sigma below the ceiling | **+0.40 sigma**, covered |
+| `log_norm` sigma | 0.0034 (clamped) | 0.0082 (free) |
+| coverage | 2/12 | **9/12** |
+
+The abundance inflation vanished, which confirms it was the fit absorbing the
+clamped normalisation rather than emulator bias:
+
+| | Si | S | Ar | Ca | Fe | Ni |
+|---|---|---|---|---|---|---|
+| invalid | +1.98 | +1.64 | +3.31 | +1.19 | +1.46 | +1.81 |
+| validated | +0.18 | -0.11 | +1.54 | -0.14 | -0.16 | +0.26 |
+
+Only Mn still trips the prior-bound check, at exactly 3.00 sigma, and it is
+unconstrained anyway (sigma 0.28 on a 0.02-3.0 box).
+
+**The P8 number so far:** `sigma_v` is still the only parameter with a
+meaningful screen prediction -- pull **+2.10 vs screen +2.81, k = 0.75**
+(it was 1.01 in the invalid run). **Do not read anything into that difference
+yet.** One Poisson realisation puts ~1 sigma of scatter on a 2.81 sigma effect,
+so k = 0.75 +- 0.36 from realisation noise alone, plus +-0.05 from the ESS-97
+Monte Carlo error. Both runs are consistent with k = 1. Also outside 68%: `kT`
+(-1.02, screen -0.37) and `Ar` (+1.54, screen +0.37) -- unremarkable as 3 of 12,
+but worth watching across the full set.
+
+Figures: `docs/figures/biascheck_{pull,k,intervals,corner}_pt310_emcee.png`.
+
+**Measured emcee cost, which corrects the earlier estimate.** 97 ESS in 5109 s
+= **19 ESS/10^3 s**, not the bake-off's 24 -- this cold, narrow point mixes
+worse than the bake-off's Perseus spectrum. ESS ~1000 therefore needs
+nsteps ~4200 and **~15 h**, not the 11.6 h quoted on 2026-09-23.
+
+### SAMPLER DECISION 2026-09-25: nautilus
+
+At ESS 1000 the two are ~2 h apart -- emcee ~15 h for exactly ESS 1000, against
+nautilus's measured 17.4 h for ESS ~25,000 **plus logZ**. D.H.: if the time is
+being spent either way, spend it on something useful. So **production uses
+nautilus**, superseding the 2026-09-23 "emcee by the agenda rule" note below.
+
+Pass `--n_eff 1000` rather than the default 10000: `n_eff` is a stopping
+*floor*, so a lower value can only let the sampler stop earlier, never later,
+and 1000 is all the campaign needs. It did not bind on the invalid run (ESS
+24,998 came back regardless) but the unclamped posterior may behave differently.
+
+**Caveat on the 17.4 h:** it was measured on the *saturated* posterior. The
+unclamped problem could sample faster or slower, so treat it as an estimate,
+not a measurement, until the first production point lands.
+
+### PRODUCTION RUN 2026-09-28: timings, and the observability fixes
+
+First single-T production points, nautilus, `--n_eff 1000`:
+
+| point | wall | note |
+|---|---|---|
+| 310 | **16.07 h** | vs 17.4 h on the buggy run -- the log_norm fix did not change the cost |
+| 243 | **11.3 h** | |
+| 799 | **40+ h and still running** | 3-6x its siblings |
+
+799 is the coldest of the three (kT 0.750 keV vs 0.773 and 0.948, sigma_v 43.8),
+and kT 0.750 sits near the emulator's lower grid edge of 0.7 keV. Colder and
+narrower means a sharper likelihood and more nested-sampling compression, so
+some of this is expected -- but 3-6x was not diagnosable, because of three gaps
+in how the nautilus path was wired. **All four now fixed** (branch
+`nautilus-observability`):
+
+1. **`verbose` was never passed**, so nautilus printed NOTHING between the
+   point header and the result. A multi-day point was completely opaque. Now on
+   by default; `--no_sampler_verbose` silences it. It is a tqdm bar, so a
+   redirected log grows.
+2. **`filepath` was never passed**, so there was no checkpoint: killing point
+   799 would have thrown away 40+ h with no way to resume. Now every nautilus
+   point writes `ckpt_<out-stem>_pt<N>_nautilus.hdf5` beside `--out`, and
+   `--resume` continues from it. Checkpoints are always WRITTEN; `--resume`
+   only controls whether they are READ, and it is ignored when the file is
+   absent (nautilus raises otherwise).
+3. **`f_live` was not exposed**, so nautilus's only real throttle was
+   unreachable from the CLI -- despite it being the knob identified on
+   2026-09-24 when `n_eff` turned out not to bind. Now `--f_live` (default
+   0.01); raise it to stop sooner at some cost in logZ accuracy.
+4. **`--chunk` defaulted to 32 for every sampler.** `chunk` is the WALKER
+   sub-batch size, so the sub-batches per likelihood call is (batch / chunk).
+   emcee pushes 64 walkers -> 2 sub-batches. nautilus is vectorised over
+   ~`n_live` = 2000 -> **~63**, the same work split into 30x more launches.
+   The default now adapts: 32 for emcee, **128 for nautilus**. Deliberately
+   moderate rather than the largest that might fit, since peak device memory
+   scales with it -- **untested at scale, lower it if the GPU OOMs.**
+
+Whether (4) explains 799 specifically is unproven: it would slow every nautilus
+point equally, and 310/243 were fine. The cold-corner explanation fits the
+point-to-point spread better. Both are addressed by the fixes; the next point's
+verbose output will settle it.
+
 ### Settled 2026-09-23
 
 | question | decision |
@@ -418,7 +519,7 @@ jsonl carries summary statistics only, so the probe has no corner plot.
 | count level | inject at **1e6**; the sweep stores b_sys/sigma at `n_ref`=1e5, ratio scales as sqrt(N), factor 3.162 |
 | noise | Poisson, one realisation per point |
 | k | compare RAW: record `pull`, `pull_screen` and `k = pull/pull_screen`, then compare the set against P6's Gauss-Newton k |
-| sampler | target ESS ~1000; `--sampler {emcee,nautilus}` both wired |
+| sampler | **nautilus** (decided 2026-09-25), `--n_eff 1000`; emcee also wired |
 
 The selected points (verified against the screens, ratios shown at 1e6):
 
@@ -431,7 +532,7 @@ The selected points (verified against the screens, ratios shown at 1e6):
   two sweeps. DEM 848 happens to land at 1.49 sigma, near the region -- an
   honest draw, and a useful intermediate case.
 
-### Sampler: the cost is a near-tie at ESS 1000
+### Sampler cost at ESS 1000 (SUPERSEDED 2026-09-25 -- nautilus won)
 
 From the bake-off table (one 1e6-count Perseus spectrum, 12 params, A10):
 

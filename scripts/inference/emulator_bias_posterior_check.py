@@ -217,7 +217,7 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
         luminosity_distance=PERSEUS["dist_m"],
         n_h_scale=1e21,
         device=args.device,
-        chunk=args.chunk,
+        chunk=effective_chunk(args),
         batched=True,
         compile_trunk=False,
         mem_gb=args.mem_gb,
@@ -225,7 +225,23 @@ def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     return fit.posterior, pars, truth, names
 
 
-def run_sampler(post, center, args):
+def effective_chunk(args):
+    """Walker sub-batch size, sized for the sampler unless pinned.
+
+    ``chunk`` is the walker sub-batch (see ``VectorForward``), so the number of
+    sequential sub-batches per likelihood call is (batch size / chunk). emcee
+    pushes ``nwalkers`` (64 by default) and 32 gives 2 sub-batches. nautilus is
+    vectorised over its live set, ~``n_live`` = 2000, where 32 would give ~63 --
+    the same work split into 30x more launches. Peak device memory scales with
+    ``chunk``, so 128 is a deliberately moderate step up rather than the largest
+    that might fit; raise it with ``--chunk`` if the GPU has room.
+    """
+    if args.chunk is not None:
+        return int(args.chunk)
+    return 128 if args.sampler == "nautilus" else 32
+
+
+def run_sampler(post, center, args, ckpt=None):
     """Dispatch to the requested sampler.
 
     emcee is asked for a step count; nautilus is asked for an effective sample
@@ -243,8 +259,24 @@ def run_sampler(post, center, args):
             center=center,
         )
     if args.sampler == "nautilus":
+        # filepath is nautilus's own HDF5 checkpoint. Without it a point that
+        # is killed -- or a node that dies -- loses everything: point 799 of the
+        # 2026-09-25 run was unrecoverable after 40+ h for exactly this reason.
+        # resume only when the file is actually there, or nautilus raises.
+        resume = bool(ckpt) and args.resume and os.path.exists(ckpt)
+        if ckpt:
+            print(
+                f"  checkpoint: {ckpt}" f"{' (resuming)' if resume else ''}", flush=True
+            )
         return samplers.run_nautilus(
-            post, n_live=args.n_live, n_eff=args.n_eff, seed=args.seed
+            post,
+            n_live=args.n_live,
+            n_eff=args.n_eff,
+            f_live=args.f_live,
+            seed=args.seed,
+            filepath=ckpt,
+            resume=resume,
+            verbose=args.sampler_verbose,
         )
     raise SystemExit(f"unknown --sampler {args.sampler}")
 
@@ -262,7 +294,16 @@ def run_point(store, response, absorption, keep, rec, d_ref, tag, ratio, args):
     post, pars, truth, names = build_point_problem(
         store, response, absorption, keep, rec, d_ref, args
     )
-    res = run_sampler(post, truth, args)
+    stem = os.path.splitext(os.path.basename(args.out))[0]
+    ckpt = (
+        os.path.join(
+            os.path.dirname(args.out),
+            f"ckpt_{stem}_pt{rec['point']}_{args.sampler}.hdf5",
+        )
+        if args.sampler == "nautilus"
+        else None
+    )
+    res = run_sampler(post, truth, args, ckpt=ckpt)
     s = res.samples  # already discard-applied
     q16, q50, q84 = np.percentile(s, [16, 50, 84], axis=0)
     sigma = np.clip(0.5 * (q84 - q16), 1e-30, None)
@@ -403,14 +444,51 @@ def main():
         "A 17h nautilus run was lost this way on 2026-09-23. "
         "Use this only when disk is genuinely the constraint",
     )
-    ap.set_defaults(save_samples=True)
+    ap.set_defaults(save_samples=True, sampler_verbose=True)
     ap.add_argument(
         "--n_eff", type=int, default=1000, help="nautilus: target effective sample size"
     )
     ap.add_argument("--n_live", type=int, default=2000, help="nautilus")
+    ap.add_argument(
+        "--f_live",
+        type=float,
+        default=0.01,
+        help="nautilus: remaining live-set evidence fraction to "
+        "stop at. This -- NOT --n_eff -- is the knob that "
+        "actually sets nautilus's cost; n_eff is a floor that "
+        "the prior-to-posterior compression already clears. "
+        "Raise it (e.g. 0.05) to stop sooner, at some cost in "
+        "logZ accuracy",
+    )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="nautilus: continue from the per-point HDF5 "
+        "checkpoint if one exists. Checkpoints are always "
+        "written; this controls whether they are read",
+    )
+    ap.add_argument(
+        "--no_sampler_verbose",
+        dest="sampler_verbose",
+        action="store_false",
+        help="silence nautilus's own progress output. It is ON by "
+        "default -- without it a multi-day point prints "
+        "nothing at all between the header and the result, "
+        "which is how the 2026-09-25 run became unobservable. "
+        "Note it is a tqdm bar, so a redirected log grows",
+    )
     ap.add_argument("--nwalkers", type=int, default=64, help="emcee")
     ap.add_argument("--nsteps", type=int, default=800, help="emcee")
-    ap.add_argument("--chunk", type=int, default=32)
+    ap.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        help="walker sub-batch size. Default adapts to the "
+        "sampler: 32 for emcee (64 walkers), 128 for nautilus "
+        "(~2000 live points, where 32 means ~63 sequential "
+        "sub-batches per call). Peak device memory scales "
+        "with it",
+    )
     ap.add_argument("--mem_gb", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
