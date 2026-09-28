@@ -152,6 +152,37 @@ def select_points(bias_jsonl, n_worst, n_random, exclude=(), seed=0):
     ]
 
 
+def completed_points(path, sampler, target_counts):
+    """Point ids already recorded in ``path``, under the SAME configuration.
+
+    Matching on the point id alone would silently skip a point that was fitted
+    with a different sampler or at a different count level, which is a real
+    re-run case and not a duplicate. A record only counts as done when the
+    sampler and target_counts match too.
+
+    A run killed mid-write can leave a truncated final line, so malformed lines
+    are ignored rather than taken as a reason to redo everything.
+    """
+    if not os.path.exists(path):
+        return set()
+    done, bad = set(), 0
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+                if r["sampler"] == sampler and float(r["target_counts"]) == float(
+                    target_counts
+                ):
+                    done.add(int(r["point"]))
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                bad += 1
+    if bad:
+        print(f"  ({bad} unreadable line(s) in {path} ignored)", flush=True)
+    return done
+
+
 def build_point_problem(store, response, absorption, keep, rec, d_ref, args):
     """One screened point's cached truth -> a fit-ready (post, pars, truth,
     names), reusing bias_sweep's own truth-vector builder. ``d_ref`` is the
@@ -461,6 +492,15 @@ def main():
         "logZ accuracy",
     )
     ap.add_argument(
+        "--skip_done",
+        action="store_true",
+        help="skip points already present in --out for this same sampler and "
+        "--target_counts. Pairs with --resume on a restart: --skip_done drops "
+        "the points that finished, --resume continues the one that did not. "
+        "Without it a restart redoes every selected point and appends "
+        "duplicate records",
+    )
+    ap.add_argument(
         "--resume",
         action="store_true",
         help="nautilus: continue from the per-point HDF5 "
@@ -510,6 +550,20 @@ def main():
         exclude=args.exclude_points,
         seed=args.seed,
     )
+    if args.skip_done:
+        done = completed_points(args.out, args.sampler, args.target_counts)
+        hit = sorted(done & {t[0]["point"] for t in selected})
+        if hit:
+            selected = [t for t in selected if t[0]["point"] not in hit]
+            print(
+                f"--skip_done: {len(hit)} already in {args.out} "
+                f"({', '.join(map(str, hit))}); {len(selected)} left to run",
+                flush=True,
+            )
+        if not selected:
+            print("nothing left to run")
+            return
+
     print(
         f"selected {len(selected)} points from {args.bias_jsonl} "
         f"({args.n_worst} worst + {args.n_random} random, "

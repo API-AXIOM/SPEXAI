@@ -504,6 +504,15 @@ in how the nautilus path was wired. **All four now fixed** (branch
    moderate rather than the largest that might fit, since peak device memory
    scales with it -- **untested at scale, lower it if the GPU OOMs.**
 
+A fifth, added the same day: **`--skip_done`** drops points already recorded
+in `--out` for the same sampler and `--target_counts`, so a restart does not
+redo finished work and append duplicate records. It matches on the
+configuration, not the point id alone, so a deliberate re-run at a different
+count level or with a different sampler is NOT skipped, and a line truncated by
+a kill is ignored rather than counted as done. Pair it with `--resume`:
+`--skip_done` drops the points that finished, `--resume` continues the one that
+did not.
+
 Whether (4) explains 799 specifically is unproven: it would slow every nautilus
 point equally, and 310/243 were fine. The cold-corner explanation fits the
 point-to-point spread better. Both are addressed by the fixes; the next point's

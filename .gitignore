@@ -3,6 +3,7 @@ docs/*.fdb_latexmk
 docs/*.fls
 docs/*.log
 docs/*.out
+docs/figures/
 .DS_Store
 master_thesis_jip_matthijsse_a3vknpje.pdf
 __pycache__/
