@@ -518,6 +518,50 @@ point equally, and 310/243 were fine. The cold-corner explanation fits the
 point-to-point spread better. Both are addressed by the fixes; the next point's
 verbose output will settle it.
 
+### SAMPLER SPLIT 2026-10-01: nautilus degenerates in the cold corner
+
+nautilus fails on the two coldest single-T points, and the ordering is clean:
+
+| point | kT (keV) | nautilus outcome |
+|---|---|---|
+| 63 | **0.738** | 36 h, **0 effective samples** -- importance weights collapsed |
+| 799 | **0.750** | 69 h, then 24 h more, stuck at f_live 0.43 (threshold already relaxed to 0.05) |
+| 310 | 0.773 | 16.07 h, clean |
+| 243 | 0.948 | 11.3 h, clean |
+
+Monotonic in kT, with the boundary at ~0.75-0.77 keV -- just above the
+emulator's 0.7 keV grid floor. Point 63's **N_eff = 0** is the more serious
+signal: that is weight degeneracy, not slowness, and more time cannot fix it.
+Consistent with a known soft spot -- logZ here is ~4.6e6 and the bake-off
+already had nessai overflowing at logZ ~3.4e6.
+
+**This is a finding, not a tooling annoyance:** the cold corner is exactly what
+P8 exists to test (P7 flagged kT < 1.5, sigma_v < 150 as where the screen is
+most stressed), and nested sampling degenerating there constrains how the
+campaign can be run. It belongs in the write-up.
+
+**Decision:** the **4 worst points go to emcee**, the **4 random points stay on
+nautilus**. emcee's cost is bounded and predictable (~15 h for ESS 1000 at
+nsteps 4200, from the measured 19 ESS/10^3 s) and it has no convergence
+criterion to fail; nautilus handles the warmer random points fine and returns
+logZ.
+
+**The split is confounded with the measurement** -- the worst points and the
+controls end up on different samplers -- but two things contain it. The
+bake-off cross-validated the two at 0.15 sigma with width ratios 0.96-1.09.
+And 310 and 243 **already have nautilus results**, so running them under emcee
+as part of the worst-4 gives two paired same-point, same-data cross-sampler
+comparisons at no extra cost. Report those alongside.
+
+**`--only_points` (added 2026-10-01) is how the split is run.** It NARROWS the
+selection that `--n_worst`/`--n_random`/`--exclude_points` define rather than
+replacing it, so the documented 8-point set and its tags stay fixed.
+**Do not use `--exclude_points` to skip a point:** verified 2026-10-01 that
+`--exclude_points 629 155 799 63` promotes 392 and 78 into the worst set AND
+shifts the random draw from 271/511/848/636 to 271/512/849/637, because the
+random sample is drawn from the post-exclusion pool. Silent, and it would have
+produced a different campaign than the one written up.
+
 ### Settled 2026-09-23
 
 | question | decision |

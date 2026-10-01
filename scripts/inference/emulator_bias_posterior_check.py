@@ -492,6 +492,20 @@ def main():
         "logZ accuracy",
     )
     ap.add_argument(
+        "--only_points",
+        type=int,
+        nargs="*",
+        default=[],
+        help="run only these point ids, out of the set --n_worst/--n_random/"
+        "--exclude_points already select. It NARROWS that selection, it does "
+        "not replace it, so the documented point set and its tags stay fixed. "
+        "Use it to split a run across samplers -- e.g. the cold worst points "
+        "under emcee and the random ones under nautilus. Do NOT reach for "
+        "--exclude_points for this: excluding a point promotes the next one "
+        "off the ranking AND changes the random draw, silently giving a "
+        "different point set",
+    )
+    ap.add_argument(
         "--skip_done",
         action="store_true",
         help="skip points already present in --out for this same sampler and "
@@ -550,6 +564,24 @@ def main():
         exclude=args.exclude_points,
         seed=args.seed,
     )
+    if args.only_points:
+        want = set(args.only_points)
+        have = {t[0]["point"] for t in selected}
+        missing = sorted(want - have)
+        if missing:
+            raise SystemExit(
+                f"--only_points {missing} are not in the current selection "
+                f"{sorted(have)}. --only_points narrows the selection, it does "
+                f"not add to it; widen --n_worst/--n_random or adjust "
+                f"--exclude_points if you really want those points."
+            )
+        selected = [t for t in selected if t[0]["point"] in want]
+        print(
+            f"--only_points: running {len(selected)} of {len(have)} selected "
+            f"({', '.join(str(t[0]['point']) for t in selected)})",
+            flush=True,
+        )
+
     if args.skip_done:
         done = completed_points(args.out, args.sampler, args.target_counts)
         hit = sorted(done & {t[0]["point"] for t in selected})
